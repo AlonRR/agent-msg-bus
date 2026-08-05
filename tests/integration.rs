@@ -247,7 +247,7 @@ async fn a_bad_token_is_rejected_visibly_on_both_surfaces() {
     let h = start().await;
 
     let bad = h.client_with("not-the-token");
-    let err = blocking(move || bad.peers().map(|_| ())).await.unwrap_err();
+    let err = blocking(move || bad.peers(false).map(|_| ())).await.unwrap_err();
     assert!(format!("{err}").contains("401"), "expected a visible 401, got: {err}");
 
     let res = tokio_tungstenite::connect_async(h.ws_url("machine-a/x", "not-the-token")).await;
@@ -288,7 +288,7 @@ async fn peers_reports_live_state_from_the_socket_not_a_guess() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let c2 = h.client();
-    let p = blocking(move || c2.peers().unwrap()).await;
+    let p = blocking(move || c2.peers(true).unwrap()).await;
     assert_eq!(p.live, vec!["machine-a/a".to_string()]);
     let b = p.known.iter().find(|k| k.addr == "machine-a/b").unwrap();
     assert!(!b.live, "an address with no socket was reported live");

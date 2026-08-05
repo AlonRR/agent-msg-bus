@@ -83,8 +83,12 @@ enum Cmd {
     },
     /// Confirm messages up to and including this id have been handled.
     Ack { addr: String, up_to_id: String },
-    /// Who is on the bus.
-    Peers,
+    /// Who is on the bus (addresses that have actually joined).
+    Peers {
+        /// Include provisional addresses: sessions that registered but never subscribed.
+        #[arg(long)]
+        all: bool,
+    },
     /// Migrate a mailbox: <to> starts answering to <from> and inherits its unread mail.
     ///
     /// Use when a session ended and its successor has a different derived address, so mail queued
@@ -118,6 +122,9 @@ enum Cmd {
     Prune {
         #[arg(long, default_value_t = 7)]
         days: i64,
+        /// Provisional addresses (registered, never subscribed) expire on this much shorter clock.
+        #[arg(long, default_value_t = 6)]
+        provisional_hours: i64,
         #[arg(long)]
         yes: bool,
     },
@@ -346,8 +353,8 @@ fn run_client(cli: &Cli) {
                 }
             })
             .map_err(Into::into),
-        Cmd::Prune { days, yes } => c
-            .prune(*days, !*yes)
+        Cmd::Prune { days, provisional_hours, yes } => c
+            .prune(*days, *provisional_hours, !*yes)
             .map(|addrs| {
                 if addrs.is_empty() {
                     println!("nothing to prune (offline and unseen for more than {days} days)");
@@ -406,20 +413,27 @@ fn run_client(cli: &Cli) {
                 }
             })
             .map_err(Into::into),
-        Cmd::Peers => c
-            .peers()
+        Cmd::Peers { all } => c
+            .peers(*all)
             .map(|p| {
                 for k in &p.known {
+                    let alias = if k.aliases.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  (also answers to {})", k.aliases.join(", "))
+                    };
                     println!(
-                        "{:<32} {:<8} {:>3} pending  {}",
+                        "{:<32} {:<8} {:>3} pending  {}{}",
                         k.addr,
                         if k.live { "live" } else { "offline" },
                         k.pending,
-                        k.repo
+                        k.repo,
+                        alias
                     );
                 }
                 if p.known.is_empty() {
-                    println!("no addresses registered");
+                    println!("no addresses have joined the bus yet");
+                    println!("(sessions that registered but never subscribed are hidden; --all shows them)");
                 }
             })
             .map_err(Into::into),

@@ -214,6 +214,9 @@ async fn messages(
 pub struct PruneBody {
     #[serde(default = "default_prune_days")]
     pub older_than_days: i64,
+    /// Provisional addresses expire on a much shorter clock — see the note in `prune`.
+    #[serde(default = "default_provisional_hours")]
+    pub provisional_hours: i64,
     /// Defaults to a dry run. Deleting registrations is not something to do by accident.
     #[serde(default = "default_true")]
     pub dry_run: bool,
@@ -221,6 +224,9 @@ pub struct PruneBody {
 
 fn default_prune_days() -> i64 {
     7
+}
+fn default_provisional_hours() -> i64 {
+    6
 }
 fn default_true() -> bool {
     true
@@ -246,17 +252,37 @@ async fn prune(
         cutoff.second()
     );
 
+    // Provisional addresses - started, never subscribed - expire in hours rather than days. There is
+    // nothing to lose by forgetting a session that never joined, and this is where the churn lives.
+    let pcut = time::OffsetDateTime::now_utc() - time::Duration::hours(b.provisional_hours);
+    let provisional_cutoff = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+        pcut.year(),
+        pcut.month() as u8,
+        pcut.day(),
+        pcut.hour(),
+        pcut.minute(),
+        pcut.second()
+    );
+
     let store = st.store.lock().unwrap();
     let candidates = match store.stale_registrations(&cutoff_ts) {
         Ok(v) => v,
         Err(e) => return server_error(e),
     };
+    let provisional = match store.stale_provisional(&provisional_cutoff) {
+        Ok(v) => v,
+        Err(e) => return server_error(e),
+    };
     // Never touch an address with a live socket, whatever its registration timestamp says.
-    let targets: Vec<String> = candidates
+    let mut targets: Vec<String> = candidates
         .into_iter()
         .map(|r| r.addr)
+        .chain(provisional)
         .filter(|a| !st.hub.is_live(a))
         .collect();
+    targets.sort();
+    targets.dedup();
 
     if b.dry_run {
         return Json(serde_json::json!({
@@ -374,8 +400,9 @@ async fn peers(
     if !st.auth.check(token_from(&headers, &q).as_deref()) {
         return unauthorized();
     }
+    let include_provisional = matches!(q.get("all").map(|s| s.as_str()), Some("1") | Some("true"));
     let store = st.store.lock().unwrap();
-    let regs = match store.peers() {
+    let regs = match store.peers(include_provisional) {
         Ok(r) => r,
         Err(e) => return server_error(e),
     };
@@ -436,6 +463,11 @@ async fn sub(
                 .into_response()
         }
     };
+    // Subscribing is what makes an address real. Until now it was provisional: a valid send target
+    // so send-before-subscribe keeps working, but absent from `peers`, which answers "who is here".
+    if let Err(e) = st.store.lock().unwrap().promote(&p.addr) {
+        eprintln!("agent-msg-bus: could not promote {}: {e}", p.addr);
+    }
     let addr = p.addr.clone();
     ws.on_upgrade(move |socket| drive(socket, st, addr, conn_id, rx))
 }

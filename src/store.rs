@@ -142,7 +142,34 @@ impl Store {
                registered_at TEXT NOT NULL
              );",
         )?;
+
+        // `provisional` separates "this address exists and can receive" from "this address has ever
+        // joined the bus". Conflating those is what made every alternative uncomfortable: registering
+        // eagerly fills `peers` with sessions that never join, but registering lazily breaks
+        // send-before-subscribe, where mail sent to a live session that has not yet armed its
+        // subscription must still queue. A provisional row does both - it is a valid send target from
+        // the moment a session starts, and it stays out of `peers` until the address actually
+        // subscribes.
+        //
+        // Added by ALTER rather than in the CREATE so existing databases migrate in place. Existing
+        // rows default to provisional and self-correct: anything that subscribes is promoted at once,
+        // and anything that never does was never real.
+        let has_col: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('registry') WHERE name = 'provisional'")?
+            .exists([])?;
+        if !has_col {
+            conn.execute_batch(
+                "ALTER TABLE registry ADD COLUMN provisional INTEGER NOT NULL DEFAULT 1;",
+            )?;
+        }
         Ok(Store { conn })
+    }
+
+    /// Mark an address as having genuinely joined the bus. Called when a subscription is accepted.
+    pub fn promote(&self, addr: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE registry SET provisional = 0 WHERE addr = ?1", params![addr])?;
+        Ok(())
     }
 
     /// Claim an address. A **new** address starts its cursor at the current head, so it does not
@@ -150,10 +177,14 @@ impl Store {
     /// crashed still gets the mail it never read.
     pub fn register(&self, reg: &Registration) -> Result<()> {
         let (_, ts) = mint_id();
+        // Never demote: an address that has already joined stays joined even if a later session
+        // re-registers it. Otherwise a routine re-register would hide a live address from `peers`.
         self.conn.execute(
-            "INSERT OR REPLACE INTO registry
-               (addr, session_id, machine, repo, cwd, pid, registered_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO registry
+               (addr, session_id, machine, repo, cwd, pid, registered_at, provisional)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
+             ON CONFLICT(addr) DO UPDATE SET
+               session_id = ?2, machine = ?3, repo = ?4, cwd = ?5, pid = ?6, registered_at = ?7",
             params![reg.addr, reg.session_id, reg.machine, reg.repo, reg.cwd, reg.pid, ts],
         )?;
         let head: String = self
@@ -352,6 +383,19 @@ impl Store {
         Ok(out)
     }
 
+    /// Addresses that have never joined the bus, older than `cutoff_ts`.
+    ///
+    /// Expired far more aggressively than joined addresses (hours, not days): a session that started
+    /// and never subscribed genuinely is dead, and there is nothing to lose by forgetting it.
+    pub fn stale_provisional(&self, cutoff_ts: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT addr FROM registry
+              WHERE provisional = 1 AND registered_at < ?1 ORDER BY addr",
+        )?;
+        let rows = stmt.query_map(params![cutoff_ts], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     /// Registrations with no live socket that have not re-registered since `cutoff_ts`.
     ///
     /// The registry grows once per session-directory combination and nothing ever removes an entry,
@@ -390,10 +434,16 @@ impl Store {
         Ok(n > 0)
     }
 
-    pub fn peers(&self) -> Result<Vec<Registration>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT addr, session_id, machine, repo, cwd, pid FROM registry ORDER BY addr")?;
+    /// Addresses on the bus. By default only those that have actually joined — `peers` answers
+    /// "who is here", and an address that has never subscribed is not.
+    pub fn peers(&self, include_provisional: bool) -> Result<Vec<Registration>> {
+        let sql = if include_provisional {
+            "SELECT addr, session_id, machine, repo, cwd, pid FROM registry ORDER BY addr"
+        } else {
+            "SELECT addr, session_id, machine, repo, cwd, pid FROM registry
+              WHERE provisional = 0 ORDER BY addr"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |r| {
             Ok(Registration {
                 addr: r.get(0)?,
@@ -655,7 +705,7 @@ mod tests {
 
         assert!(s.forget("machine-a/b").unwrap());
         assert!(!s.forget("machine-a/b").unwrap(), "second forget should report nothing removed");
-        assert_eq!(s.peers().unwrap().len(), 1);
+        assert_eq!(s.peers(true).unwrap().len(), 1);
         // History survives: forget retires an identity, not the record of what was said.
         assert_eq!(s.history("machine-a/b", None, 20).unwrap().len(), 1);
     }
@@ -741,12 +791,70 @@ mod tests {
         assert_eq!(s.pending_for("machine-a/b").unwrap().len(), 0);
     }
 
+    // ---- provisional registration ------------------------------------------
+
+    /// The whole point: a session that registers but never subscribes stays out of `peers`, while
+    /// remaining a valid send target so send-before-subscribe still queues.
+    #[test]
+    fn a_registered_but_never_subscribed_address_is_hidden_from_peers_yet_still_receives() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/never-joined")).unwrap();
+
+        assert!(
+            !s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/never-joined"),
+            "a provisional address appeared in peers"
+        );
+        assert!(
+            s.peers(true).unwrap().iter().any(|p| p.addr == "machine-a/never-joined"),
+            "--all did not reveal it"
+        );
+
+        // Still addressable: this is the send-before-subscribe guarantee.
+        s.send(&msg("machine-a/sender", "machine-a/never-joined", "queued before subscribing")).unwrap();
+        assert_eq!(s.pending_for("machine-a/never-joined").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn subscribing_promotes_an_address_into_peers() {
+        let s = store();
+        s.register(&reg("machine-a/joins")).unwrap();
+        assert!(!s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/joins"));
+        s.promote("machine-a/joins").unwrap();
+        assert!(s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/joins"));
+    }
+
+    /// A routine re-register must not hide an address that has already joined.
+    #[test]
+    fn re_registering_never_demotes_a_joined_address() {
+        let s = store();
+        s.register(&reg("machine-a/joins")).unwrap();
+        s.promote("machine-a/joins").unwrap();
+        s.register(&reg("machine-a/joins")).unwrap(); // e.g. the session restarted
+        assert!(
+            s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/joins"),
+            "re-registering demoted a joined address"
+        );
+    }
+
+    #[test]
+    fn only_provisional_addresses_expire_on_the_short_clock() {
+        let s = store();
+        s.register(&reg("machine-a/joined")).unwrap();
+        s.promote("machine-a/joined").unwrap();
+        s.register(&reg("machine-a/never")).unwrap();
+
+        let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
+        assert!(stale.contains(&"machine-a/never".to_string()));
+        assert!(!stale.contains(&"machine-a/joined".to_string()), "a joined address was short-expired");
+    }
+
     #[test]
     fn peers_lists_registered_addresses() {
         let s = store();
         s.register(&reg("machine-a/a")).unwrap();
         s.register(&reg("machine-b/notes")).unwrap();
-        let peers = s.peers().unwrap();
+        let peers = s.peers(true).unwrap();
         assert_eq!(peers.len(), 2);
     }
 }

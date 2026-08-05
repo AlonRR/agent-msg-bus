@@ -138,10 +138,19 @@ impl Client {
             .map_err(|e| ClientError::Http(e.to_string()))
     }
 
-    pub fn prune(&self, days: i64, dry_run: bool) -> Result<Vec<String>, ClientError> {
+    pub fn prune(
+        &self,
+        days: i64,
+        provisional_hours: i64,
+        dry_run: bool,
+    ) -> Result<Vec<String>, ClientError> {
         let v = self.post(
             "/prune",
-            serde_json::json!({"older_than_days": days, "dry_run": dry_run}),
+            serde_json::json!({
+                "older_than_days": days,
+                "provisional_hours": provisional_hours,
+                "dry_run": dry_run
+            }),
         )?;
         let key = if dry_run { "would_forget" } else { "forgot" };
         Ok(v.get(key)
@@ -164,8 +173,8 @@ impl Client {
         Ok(v.get("forgotten").and_then(|x| x.as_bool()).unwrap_or(false))
     }
 
-    pub fn peers(&self) -> Result<PeersOut, ClientError> {
-        let v = self.get("/peers")?;
+    pub fn peers(&self, all: bool) -> Result<PeersOut, ClientError> {
+        let v = self.get(if all { "/peers?all=1" } else { "/peers" })?;
         serde_json::from_value(v).map_err(|e| ClientError::Http(e.to_string()))
     }
 

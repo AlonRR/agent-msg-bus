@@ -162,7 +162,7 @@ async fn upstream_is_opened_only_while_a_local_subscriber_is_attached() {
 
     let before = blocking({
         let c3 = Client::new(&rig.broker, TOKEN);
-        move || c3.peers().unwrap()
+        move || c3.peers(true).unwrap()
     })
     .await;
     assert!(before.live.is_empty(), "broker saw a live socket with no subscriber attached");
@@ -170,6 +170,6 @@ async fn upstream_is_opened_only_while_a_local_subscriber_is_attached() {
     let _sock = sub_via_relay(&rig, "machine-a/a").await.expect("relay refused");
     tokio::time::sleep(Duration::from_millis(400)).await;
 
-    let after = blocking(move || c.peers().unwrap()).await;
+    let after = blocking(move || c.peers(true).unwrap()).await;
     assert_eq!(after.live, vec!["machine-a/a".to_string()], "subscribing did not open upstream");
 }
