@@ -118,6 +118,46 @@ behaviour across the LAN through a firewall, and not across a suspend/resume. Bo
 
 ---
 
+## ⛔ Phase 2 blocker — Monitor cannot reach a private IP (found 5 Aug 2026)
+
+**Monitor's `ws:` source refuses to connect to any RFC1918 / link-local / cloud-metadata address.**
+Both attempts were rejected by Monitor itself, before any network traffic:
+
+```
+ws://<broker-ip>:9450   -> "Monitor cannot open a WebSocket to <broker-ip>: the address is in
+                              a private, link-local, or cloud-metadata range."
+wss://msgbus.example.internal    -> "msgbus.example.internal resolves to <proxy-ip>, which is in a private,
+                              link-local, or cloud-metadata range"
+```
+
+This is a **client-side SSRF guard**, not a network, firewall, TLS or CA problem:
+
+- HTTP from machine-a to `<broker-ip>:9450` works (`register`, `peers` both fine over the LAN).
+- `https://msgbus.example.internal/health` returns `200` from machine-a — Caddy's internal CA *is* trusted here.
+- Loopback is allowed: Phase 0 and the local broker both ran on `127.0.0.1` without complaint.
+
+**Consequence: a session cannot subscribe directly to a central broker.** The broker deployment is
+sound and verified, but no session on machine-a, machine-b or the Linux server can hold a subscription to it as built.
+
+Phase 0 could not have caught this — it ran on loopback by construction. The plan said so explicitly
+(*"this ran on 127.0.0.1 … not its behaviour across the LAN — that is a Phase 2 check"*), and the
+Phase 2 check is what found it.
+
+### Options
+
+| Option | Shape | Cost |
+|---|---|---|
+| **Loopback relay** (recommended) | `agent-msg-bus relay` runs per machine, holds the LAN connection to the broker host, re-serves on `127.0.0.1`. Monitor connects to loopback, which is permitted | ~1 phase of work; one supervised process per machine; owns reconnect logic, which requirement 1 needed anyway |
+| **SSH tunnel** | `ssh -N -L 9450:127.0.0.1:9450 lab-server`, Monitor hits loopback | No new code, but a tunnel to supervise per machine, with no reconnect or backoff of its own |
+| **Channels** | The MCP server is an ordinary local subprocess with no SSRF guard, so it can reach the LAN directly | Removes the blocker *and* the arming step, but is research preview, needs a launch flag on every session, and Node/Bun everywhere |
+
+The relay and Channels are not exclusive: the relay is the near-term fix, and Channels later removes
+both the relay and the arming step. Either way **the broker, the wire contract and the store are
+unaffected** — this is a last-hop problem, which is exactly what freezing the wire contract was meant
+to contain.
+
+---
+
 ## Architecture
 
 ```
