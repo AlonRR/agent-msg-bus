@@ -9,8 +9,9 @@ running as services on machine-a, the Linux server and machine-b, sessions self-
 been delivered across machines into idle sessions unprompted. **The durable queue is now proven
 against a machine that leaves the bus** — see Phase 7.
 
-**Remaining:** Phase 8 (retire the old bus), Phase 9 (Channels). The old file-based `msgbus` is still
-running in parallel and untouched.
+**All nine phases resolved.** Phase 8 retired the old bus by deprecation rather than deletion — its
+hooks are gone so nothing new joins it, but the code stays while two pre-cutover sessions are still
+running on it. Phase 9 (Channels) is assessed and **deliberately not built**; see below.
 
 ---
 
@@ -280,8 +281,8 @@ words, never the user's.
 | 5 | machine-a cutover, both buses in parallel | Round-trip between two real machine-a sessions | ✅ relay is a Scheduled Task; a session is live on the bus |
 | 6 | the Linux server Remote Control sessions | Round-trip machine-a ↔ the Linux server | ✅ a message from the Linux server woke an machine-a session |
 | 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ✅ **passed** — 2 messages queued while offline, both replayed in order on reconnect, none lost |
-| 8 | Retire old msgbus | Code archived, skill rewritten, old hooks removed | ▫️ |
-| 9 | Channels adapter | Delivery with no arming step | ▫️ |
+| 8 | Retire old msgbus | Hooks removed, skill deprecated, data archived | ✅ **deprecated, not deleted** — see below |
+| 9 | Channels adapter | Delivery with no arming step | ⏸️ **not recommended yet** — see below |
 
 Phases 1–4 build nothing user-visible on their own. That is deliberate: each increment is small enough
 that a killed session costs one step, per the standing session-limits policy.
@@ -440,6 +441,46 @@ Still to cover in later phases:
 - Two sessions in one repo never share a mailbox or cursor *(the machine-wide whoami bug)* (3/4)
 - An address survives the session changing directory (3/4)
 - A malformed stored row doesn't break delivery for anything else
+
+### Phase 8 — deprecated rather than deleted, and why
+
+The old file bus is **not gone**. Two sessions started before the cutover are still running on it,
+and one of them sent on it on 5 Aug. Deleting the code would have stranded a live session mid-work,
+which is a worse outcome than a tidy tree.
+
+What was actually removed is its reach into new work:
+
+- **Both hooks gone** from `~/.claude/settings.json` (`SessionStart` and the dead `FileChanged`), so
+  no new session joins that bus.
+- **The skill's `description` now leads with DEPRECATED** and names the replacement commands. That
+  field is the one that matters — it is what makes a session reach for a skill in the first place.
+- **Data archived** to `E:\_archive\msgbus-data-20260805\`, copied rather than moved, because the
+  live session still needs it.
+- **Undelivered mail was forwarded** onto this bus first, so nothing was abandoned.
+
+Delete the directory once no pre-cutover session remains — and remove the junction with `rmdir`,
+**never** a recursive delete, which would take the target with it.
+
+### Phase 9 — Channels, and why it is not worth doing yet
+
+Channels would remove the one remaining manual step: arming the Monitor subscription. That is the
+entire benefit, and it is now small, because the `SessionStart` hook already hands the session the
+exact `Monitor({ws:…})` call to paste.
+
+The costs have not moved:
+
+- **A launch flag on every session.** `--dangerously-load-development-channels server:msgbus` must
+  be passed at launch. There is no `settings.json` equivalent, so this changes how sessions are
+  started on all three machines — trivial for the Linux server's systemd unit, friction everywhere a human
+  types `claude`.
+- **Node or Bun on every machine**, plus an MCP server process per machine, alongside the relay that
+  already exists and works.
+- **A research-preview contract.** The docs say the flag syntax and protocol "may change based on
+  feedback", and this would sit under every session's message delivery.
+
+Revisit when Channels leaves research preview, or if arming turns out to be a real friction point in
+practice rather than in principle. The relay already delivers into idle sessions, which was the hard
+part.
 
 ---
 
