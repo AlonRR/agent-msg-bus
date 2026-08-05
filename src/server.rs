@@ -44,6 +44,8 @@ pub fn app(state: AppState) -> Router {
         .route("/ack", post(ack))
         .route("/peers", get(peers))
         .route("/forget", post(forget))
+        .route("/messages", get(messages))
+        .route("/prune", post(prune))
         .route("/sub", get(sub))
         .with_state(state)
 }
@@ -184,6 +186,90 @@ async fn ack(
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => server_error(e),
     }
+}
+
+/// Read stored history. Does **not** consume or advance a cursor — this is recovery, not delivery.
+async fn messages(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+        return unauthorized();
+    }
+    let Some(addr) = q.get("addr") else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "addr is required"})))
+            .into_response();
+    };
+    let since = q.get("since").map(|s| s.as_str());
+    let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+    match st.store.lock().unwrap().history(addr, since, limit) {
+        Ok(v) => Json(serde_json::json!({"messages": v})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PruneBody {
+    #[serde(default = "default_prune_days")]
+    pub older_than_days: i64,
+    /// Defaults to a dry run. Deleting registrations is not something to do by accident.
+    #[serde(default = "default_true")]
+    pub dry_run: bool,
+}
+
+fn default_prune_days() -> i64 {
+    7
+}
+fn default_true() -> bool {
+    true
+}
+
+async fn prune(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(b): Json<PruneBody>,
+) -> Response {
+    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+        return unauthorized();
+    }
+    let cutoff = time::OffsetDateTime::now_utc() - time::Duration::days(b.older_than_days);
+    let cutoff_ts = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+        cutoff.year(),
+        cutoff.month() as u8,
+        cutoff.day(),
+        cutoff.hour(),
+        cutoff.minute(),
+        cutoff.second()
+    );
+
+    let store = st.store.lock().unwrap();
+    let candidates = match store.stale_registrations(&cutoff_ts) {
+        Ok(v) => v,
+        Err(e) => return server_error(e),
+    };
+    // Never touch an address with a live socket, whatever its registration timestamp says.
+    let targets: Vec<String> = candidates
+        .into_iter()
+        .map(|r| r.addr)
+        .filter(|a| !st.hub.is_live(a))
+        .collect();
+
+    if b.dry_run {
+        return Json(serde_json::json!({
+            "dry_run": true, "cutoff": cutoff_ts, "would_forget": targets
+        }))
+        .into_response();
+    }
+    let mut done = Vec::new();
+    for a in targets {
+        if store.forget(&a).unwrap_or(false) {
+            done.push(a);
+        }
+    }
+    Json(serde_json::json!({"dry_run": false, "cutoff": cutoff_ts, "forgot": done})).into_response()
 }
 
 #[derive(Deserialize)]

@@ -120,6 +120,34 @@ impl Client {
         Ok(())
     }
 
+    /// Stored history for an address. Does not consume or advance the cursor.
+    pub fn read(
+        &self,
+        addr: &str,
+        since: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::store::Message>, ClientError> {
+        let mut path = format!("/messages?addr={}&limit={}", urlencode(addr), limit);
+        if let Some(s) = since {
+            path.push_str(&format!("&since={}", urlencode(s)));
+        }
+        let v = self.get(&path)?;
+        serde_json::from_value(v.get("messages").cloned().unwrap_or_default())
+            .map_err(|e| ClientError::Http(e.to_string()))
+    }
+
+    pub fn prune(&self, days: i64, dry_run: bool) -> Result<Vec<String>, ClientError> {
+        let v = self.post(
+            "/prune",
+            serde_json::json!({"older_than_days": days, "dry_run": dry_run}),
+        )?;
+        let key = if dry_run { "would_forget" } else { "forgot" };
+        Ok(v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .unwrap_or_default())
+    }
+
     pub fn forget(&self, addr: &str) -> Result<bool, ClientError> {
         let v = self.post("/forget", serde_json::json!({"addr": addr}))?;
         Ok(v.get("forgotten").and_then(|x| x.as_bool()).unwrap_or(false))

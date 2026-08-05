@@ -77,6 +77,27 @@ enum Cmd {
     Peers,
     /// Retire an address (drops its registration and cursor, not its message history).
     Forget { addr: String },
+    /// Read stored messages for an address. Does NOT consume them or move the cursor.
+    ///
+    /// Use this to recover a message that arrived truncated in a notification — delivery is
+    /// push-only, so without this the full text of a long message was unrecoverable once acked.
+    Read {
+        addr: String,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Forget registrations with no live socket that have not been seen for a while.
+    ///
+    /// Dry run unless --yes. The registry gains an entry per session-directory and never loses one,
+    /// so dead addresses accumulate — and a wildcard send fans out to every one of them.
+    Prune {
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Print the ws:// URL to hand to Monitor.
     SubUrl { addr: String },
     /// Hold the broker connection on this machine and re-serve it on loopback.
@@ -263,6 +284,40 @@ fn run_client(cli: &Cli) {
         Cmd::Ack { addr, up_to_id } => {
             c.ack(addr, up_to_id).map(|_| println!("acked {addr} up to {up_to_id}")).map_err(Into::into)
         }
+        Cmd::Read { addr, since, limit } => c
+            .read(addr, since.as_deref(), *limit)
+            .map(|msgs| {
+                if msgs.is_empty() {
+                    println!("no stored messages for {addr}");
+                }
+                for m in msgs {
+                    println!("{}", "=".repeat(76));
+                    println!("id      : {}", m.id);
+                    println!("from    : {}  ->  {}   [{}]", m.from, m.to, m.kind);
+                    println!("ts      : {}", m.ts);
+                    println!("subject : {}", m.subject);
+                    println!("{}", "-".repeat(76));
+                    println!("{}", m.body);
+                }
+            })
+            .map_err(Into::into),
+        Cmd::Prune { days, yes } => c
+            .prune(*days, !*yes)
+            .map(|addrs| {
+                if addrs.is_empty() {
+                    println!("nothing to prune (offline and unseen for more than {days} days)");
+                } else if *yes {
+                    for a in &addrs {
+                        println!("forgot {a}");
+                    }
+                } else {
+                    println!("would forget {} address(es) — re-run with --yes:", addrs.len());
+                    for a in &addrs {
+                        println!("  {a}");
+                    }
+                }
+            })
+            .map_err(Into::into),
         Cmd::Forget { addr } => c
             .forget(addr)
             .map(|existed| {

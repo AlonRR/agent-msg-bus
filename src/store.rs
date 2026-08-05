@@ -241,6 +241,76 @@ impl Store {
         Ok(())
     }
 
+    /// Stored history for an address, independent of the cursor.
+    ///
+    /// Delivery is push-only, and a notification can be truncated by whatever renders it. Without
+    /// this there was no way to recover the rest of a long message: the only copy a session could
+    /// reach was the undelivered one, so replaying it required *not* having acked, and after an ack
+    /// it was unrecoverable. Long messages were effectively lossy. This reads the stored rows, so
+    /// acked or not makes no difference.
+    ///
+    /// Unlike `pending_for`, this deliberately ignores the cursor and does **not** advance it.
+    pub fn history(&self, addr: &str, since: Option<&str>, limit: usize) -> Result<Vec<Message>> {
+        let since = since.unwrap_or("");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, sender, recipient, kind, subject, body, reply_to
+               FROM messages
+              WHERE id > ?1
+              ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![since], |r| {
+            Ok(Message {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                from: r.get(2)?,
+                to: r.get(3)?,
+                kind: r.get(4)?,
+                subject: r.get(5)?,
+                body: r.get(6)?,
+                reply_to: r.get(7)?,
+            })
+        })?;
+        // Sent-or-received: a session recovering a conversation wants both halves, not just inbound.
+        let mut out = Vec::new();
+        for row in rows {
+            let m = row?;
+            if addr_matches(&m.to, addr) || m.from == addr {
+                out.push(m);
+            }
+        }
+        if out.len() > limit {
+            out = out.split_off(out.len() - limit);
+        }
+        Ok(out)
+    }
+
+    /// Registrations with no live socket that have not re-registered since `cutoff_ts`.
+    ///
+    /// The registry grows once per session-directory combination and nothing ever removes an entry,
+    /// so it accrues dead addresses. That matters for two reasons beyond tidiness: a wildcard send
+    /// fans out to every dead address (each accumulating pending that nothing will ever ack), and a
+    /// dead address that is later reclaimed keeps its old cursor and gets flooded with backlog —
+    /// the exact behaviour the "a new address gets no history" rule exists to prevent.
+    ///
+    /// Liveness is not knowable here; the caller filters on the hub.
+    pub fn stale_registrations(&self, cutoff_ts: &str) -> Result<Vec<Registration>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT addr, session_id, machine, repo, cwd, pid
+               FROM registry WHERE registered_at < ?1 ORDER BY addr",
+        )?;
+        let rows = stmt.query_map(params![cutoff_ts], |r| {
+            Ok(Registration {
+                addr: r.get(0)?,
+                session_id: r.get(1)?,
+                machine: r.get(2)?,
+                repo: r.get(3)?,
+                cwd: r.get(4)?,
+                pid: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Retire an address: drop its registration and its cursor.
     ///
     /// Messages already sent to it stay in `messages` — this removes the *identity*, not history.
@@ -464,6 +534,62 @@ mod tests {
         let subjects: Vec<_> = pending.iter().map(|m| m.subject.as_str()).collect();
         assert_eq!(subjects[0], "m0");
         assert_eq!(subjects[9], "m9");
+    }
+
+    /// The gap this closes: delivery is push-only, so a notification truncated by whatever renders
+    /// it left no way to recover the rest. The only reachable copy was the *undelivered* one, so
+    /// replay required not having acked — and after an ack the text was gone for good.
+    #[test]
+    fn history_is_readable_after_acking_and_does_not_move_the_cursor() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.register(&reg("machine-a/b")).unwrap();
+        let id = s.send(&msg("machine-a/a", "machine-a/b", "a long message")).unwrap();
+
+        s.ack("machine-a/b", &id).unwrap();
+        assert_eq!(s.pending_for("machine-a/b").unwrap().len(), 0, "precondition: acked");
+
+        let h = s.history("machine-a/b", None, 20).unwrap();
+        assert_eq!(h.len(), 1, "acked message was unrecoverable");
+        assert_eq!(h[0].subject, "a long message");
+        assert_eq!(s.pending_for("machine-a/b").unwrap().len(), 0, "history advanced the cursor");
+    }
+
+    #[test]
+    fn history_includes_messages_the_address_sent() {
+        // Recovering a conversation means both halves, not just inbound.
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.send(&msg("machine-a/a", "machine-a/b", "outbound")).unwrap();
+        let h = s.history("machine-a/a", None, 20).unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].subject, "outbound");
+    }
+
+    #[test]
+    fn stale_registrations_respects_the_cutoff() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        // Everything registered now is newer than a past cutoff, so nothing is stale...
+        assert!(s.stale_registrations("2000-01-01T00:00:00.000Z").unwrap().is_empty());
+        // ...and everything is older than a future one.
+        let all = s.stale_registrations("2999-01-01T00:00:00.000Z").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].addr, "machine-a/a");
+    }
+
+    #[test]
+    fn forget_removes_the_address_but_not_the_messages() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.register(&reg("machine-a/b")).unwrap();
+        s.send(&msg("machine-a/a", "machine-a/b", "keep me")).unwrap();
+
+        assert!(s.forget("machine-a/b").unwrap());
+        assert!(!s.forget("machine-a/b").unwrap(), "second forget should report nothing removed");
+        assert_eq!(s.peers().unwrap().len(), 1);
+        // History survives: forget retires an identity, not the record of what was said.
+        assert_eq!(s.history("machine-a/b", None, 20).unwrap().len(), 1);
     }
 
     #[test]
