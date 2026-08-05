@@ -4,7 +4,12 @@ Push-delivery message bus for Claude Code sessions. Replaces the file-based `msg
 (`Tools/machine-a/tools/msgbus/`). A full rewrite, not a patch — the old code and scripts were explicitly
 treated as replaceable.
 
-**Status: Phase 0 ✅ · Phase 1b ✅ · Phase 1c next. Not deployed. The old bus is still the live one.**
+**Status: deployed and carrying real traffic.** Phases 0–6 complete: broker live on the broker host, relays
+running as services on machine-a and the Linux server, sessions self-register at startup, and messages have been
+delivered across machines into idle sessions unprompted.
+
+**Remaining:** Phase 7 (machine-b — blocked, needs a human on that machine), Phase 8 (retire the old bus),
+Phase 9 (Channels). The old file-based `msgbus` is still running in parallel and untouched.
 
 ---
 
@@ -267,19 +272,41 @@ words, never the user's.
 | 1c | HTTP `/register` `/send` `/ack` `/peers` | Tests green | ✅ `ca7a8d5` |
 | 1d | WebSocket `/sub` + replay on reconnect | Tests green | ✅ `ca7a8d5` |
 | 1e | Token auth | Tests green | ✅ `ca7a8d5` |
-| 3 | Client CLI: `send` / `peers` / `ack` / `sub-url` | Works on Windows **and** Linux | ✅ `ca7a8d5` — Windows verified; **Linux not yet built** |
-| 2 | Deploy to the broker host | Service live, firewall, Caddy vhost, Proxmox notes | ✅ live on the broker host — homelab docs still to write |
-| 2b | Loopback relay (unplanned; forced by the private-IP guard) | Cross-host delivery verified | ✅ `8519b0a`+ |
-| 4 | `SessionStart` hook: register, start the relay, instruct arming | New session self-registers with no human step | ▫️ next |
-| 4 | `SessionStart` hook: register, tell the session its address, instruct arming | New session self-registers with no human step | ▫️ |
-| 5 | machine-a cutover, both buses in parallel | Round-trip between two real machine-a sessions | ▫️ |
-| 6 | the Linux server Remote Control sessions | Round-trip machine-a ↔ the Linux server | ▫️ |
-| 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ▫️ |
+| 2 | Deploy the broker to its host | Service live, firewall, Caddy vhost, Proxmox notes, homelab docs | ✅ live on the broker host |
+| 2b | Loopback relay (**unplanned** — forced by the private-IP guard) | Cross-host delivery verified | ✅ `1875442`, made per-machine in `2856a43` |
+| 3 | Client CLI: `send` / `peers` / `ack` / `forget` / `whoami` | Works on Windows **and** Linux | ✅ both — 24 tests green on each |
+| 4 | `SessionStart` hook: register + tell the session its address | New session self-registers with no human step | ✅ `2856a43`, in the binary rather than per-OS scripts |
+| 5 | machine-a cutover, both buses in parallel | Round-trip between two real machine-a sessions | ✅ relay is a Scheduled Task; a session is live on the bus |
+| 6 | the Linux server Remote Control sessions | Round-trip machine-a ↔ the Linux server | ✅ a message from the Linux server woke an machine-a session |
+| 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ⚠️ **blocked: needs a human on that machine** — see below |
 | 8 | Retire old msgbus | Code archived, skill rewritten, old hooks removed | ▫️ |
 | 9 | Channels adapter | Delivery with no arming step | ▫️ |
 
 Phases 1–4 build nothing user-visible on their own. That is deliberate: each increment is small enough
 that a killed session costs one step, per the standing session-limits policy.
+
+### Phase 7 — machine-b cannot be done remotely
+
+`machine-b` is **not reachable over SSH from machine-a**; the `claude-config-sync` skill says so outright
+(*"run the command on that machine"*). Worse, it *looks* reachable: `ping machine-b` succeeds because the
+name resolves through wildcard DNS to **<proxy-ip>**, which is the Caddy container, not machine-b. The
+same trap `homelab/docs/manual/rc-panel.md` documents for unconfigured SSH aliases. A successful ping
+proves nothing here.
+
+So Phase 7 is one command, run **on machine-b**, with that machine's own token:
+
+```powershell
+# get machine-b's token (on any machine that can reach the homelab host):
+ssh <broker-host> 'cat /etc/agent-msg-bus/tokens.json'
+
+# then, on machine-b, from a clone of this repo after `cargo build --release`:
+.\scripts\bootstrap-client.ps1 -Machine machine-b -Token <machine-b's token>
+```
+
+That writes the config, installs the binary, registers the relay as a Scheduled Task, and adds the
+SessionStart hook. The offline-queue test is then the interesting part, and it is the one thing this
+design has not yet proven against a machine that genuinely goes away: send to machine-b while it is
+asleep, wake it, and confirm the message arrives on reconnect rather than being lost.
 
 ---
 
