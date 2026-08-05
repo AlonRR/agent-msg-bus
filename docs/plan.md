@@ -443,6 +443,44 @@ Still to cover in later phases:
 
 ---
 
+## Relay supervision on Windows — what actually recovers a dead relay
+
+**The repetition trigger is the supervisor. `-RestartCount` does not recover a crashed relay**, and
+the config reads as though it does. This was measured on machine-b, twice, by killing the relay rather
+than reading the settings:
+
+```
+kill 23:30:37 -> back 23:33:38 = 184s, landing exactly on the 5-minute repetition grid
+earlier kill  -> back 23:28:37 = same grid
+LastTaskResult = 267009 (SCHED_S_TASK_RUNNING) throughout; never a failure code
+RestartCount=999, RestartInterval=PT1M present the whole time
+```
+
+If restart-on-failure were firing, recovery would have been ~60s. It was on the repetition grid both
+times.
+
+**Why:** Task Scheduler's restart-on-failure fires when a task ends *unexpectedly* — fails to start,
+or is terminated by the service. An action that exits non-zero is recorded in `LastTaskResult`, but
+the task counts as having completed normally, so no restart is scheduled. Making the shim propagate
+the exit code (`WScript.Quit rc`) therefore buys **observability, not supervision** — a claim
+previously made in this repo that was half right and is now corrected.
+
+**Consequence:** the repetition interval *is* the worst-case inbound-delivery outage. It is now
+**1 minute** (was 5). The only cost of the short interval is a `wscript` spawn per minute that exits
+immediately, because the relay returns 0 on `AddrInUse` when one is already running.
+
+`-RestartCount`/`-RestartInterval` are kept for the case they genuinely cover — the task failing to
+start at all — and are deliberately not relied on for crash recovery.
+
+The blocking shim is still worth having independently: the task now stays `Running` for the relay's
+lifetime with `wscript` as its live parent, which is what makes `Stop-ScheduledTask` actually stop
+the relay.
+
+**The Linux server is unaffected throughout.** systemd `Restart=always` supervises properly; every problem in
+this section is Windows-only.
+
+---
+
 ## Known limitations (accepted for v1, written down so they are not rediscovered as surprises)
 
 - **A token authenticates a machine, not an address.** Any holder of a valid token can `send` with

@@ -63,19 +63,30 @@ $taskName = 'agent-msg-bus relay'
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 $action  = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$shim`""
 
-# Belt and braces. The blocking shim makes restart-on-failure work, but a clean exit is not a
-# failure and would leave nothing running. A repetition trigger re-launches every 5 minutes
-# regardless; the relay exits 0 immediately if the port is already bound, so a redundant run is a
-# no-op rather than a restart loop.
+# THE REPETITION TRIGGER IS THE SUPERVISOR. -RestartCount below does NOT recover a died relay.
+#
+# Measured on machine-b, twice, by actually killing the relay rather than reading the config: recovery
+# took 184s both times, landing exactly on the repetition grid, while LastTaskResult stayed
+# 267009 (SCHED_S_TASK_RUNNING) and never showed a failure code. Task Scheduler's restart-on-failure
+# fires when a task ends *unexpectedly* - fails to start, or is terminated by the service. An action
+# that exits non-zero is recorded in LastTaskResult but the task counts as completed normally, so no
+# restart is scheduled. Propagating the exit code buys observability, not supervision.
+#
+# So the interval IS the worst-case inbound-delivery outage. At 1 minute that is ~60s worst case,
+# ~30s mean. The only cost of the short interval is a wscript spawn per minute that exits
+# immediately, because the relay returns 0 on AddrInUse when one is already running.
+#
+# -RestartCount/-RestartInterval are kept for the case they genuinely cover (the task failing to
+# start at all) and are deliberately NOT relied on for crash recovery.
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $repeat  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5)
+    -RepetitionInterval (New-TimeSpan -Minutes 1)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger, $repeat) -Settings $settings `
-    -Description 'Holds the agent-msg-bus broker connection and re-serves it on loopback, because Monitor refuses to open a WebSocket to a private IP.' | Out-Null
-Write-Host "registered scheduled task: $taskName (blocking shim + 5-minute self-heal)"
+    -Description 'Holds the agent-msg-bus broker connection and re-serves it on loopback, because Monitor refuses to open a WebSocket to a private IP. Recovery is driven by the 1-minute repetition trigger, NOT by restart-on-failure.' | Out-Null
+Write-Host "registered scheduled task: $taskName (blocking shim + 1-minute repetition supervisor)"
 
 Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 3

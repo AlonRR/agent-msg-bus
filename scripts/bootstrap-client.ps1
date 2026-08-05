@@ -73,10 +73,12 @@ $taskName = 'agent-msg-bus relay'
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 $action  = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$shim`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-# Self-heal every 5 minutes: a clean exit is not a failure, so restart-on-failure alone would leave
-# nothing running. The relay exits 0 if the port is already bound, so a redundant run is a no-op.
+# THIS TRIGGER IS THE SUPERVISOR - -RestartCount below does NOT recover a died relay. Measured:
+# restart-on-failure only fires when a task ends unexpectedly, not when its action exits non-zero,
+# so the repetition interval IS the worst-case delivery outage. 1 minute. The relay exits 0 on
+# AddrInUse, so the redundant launches this causes are no-ops.
 $repeat  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5)
+    -RepetitionInterval (New-TimeSpan -Minutes 1)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
