@@ -250,6 +250,34 @@ async fn a_replayed_message_is_marked_as_a_replay_but_a_live_one_is_not() {
     );
 }
 
+/// Reported by machine-a/machine-a.fixes: it was pinned, registered, subscribed and demonstrably receiving,
+/// and `peers` did not list it.
+///
+/// Cause: `promote` is an UPDATE, so subscribing *before* registering promotes nothing, and the
+/// `register` that follows inserts the address as provisional. It stays live and invisible.
+/// The real error was deriving membership from a stored flag when the hub already knows the truth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_address_that_subscribes_before_registering_still_appears_in_peers() {
+    let h = start().await;
+
+    // Subscribe first — nothing is registered yet, so promote has nothing to update.
+    let _sock = connect(&h, "machine-a/early").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Register afterwards, which inserts it as provisional.
+    let c = h.client();
+    blocking(move || c.register("machine-a/early", "s1", "machine-a", "r", "/x", 1).unwrap()).await;
+
+    let c2 = h.client();
+    let p = blocking(move || c2.peers(false).unwrap()).await;
+    assert!(
+        p.known.iter().any(|k| k.addr == "machine-a/early"),
+        "an address with a live socket was hidden from peers: {:?}",
+        p.known.iter().map(|k| &k.addr).collect::<Vec<_>>()
+    );
+    assert!(p.live.contains(&"machine-a/early".to_string()));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sender_never_receives_its_own_broadcast() {
     let h = start().await;

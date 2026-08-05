@@ -402,10 +402,33 @@ async fn peers(
     }
     let include_provisional = matches!(q.get("all").map(|s| s.as_str()), Some("1") | Some("true"));
     let store = st.store.lock().unwrap();
-    let regs = match store.peers(include_provisional) {
+    let mut regs = match store.peers(include_provisional) {
         Ok(r) => r,
         Err(e) => return server_error(e),
     };
+
+    // A LIVE SOCKET IS PROOF OF MEMBERSHIP, and outranks the stored flag.
+    //
+    // The flag can be stale in a way that hides a working session: `promote` is an UPDATE, so it
+    // does nothing if the address is not in the registry yet. A session that subscribes *before* it
+    // registers therefore promotes nothing, and the `register` that follows inserts it as
+    // provisional — leaving it live, delivering messages, and absent from the roster. That happened
+    // to machine-a/machine-a.fixes, which reported it.
+    //
+    // The root error was deriving membership from stored state at all. This design's own rule is
+    // that liveness is socket state, not an inference; `peers` was ignoring the hub and trusting a
+    // flag. It now asks the hub, and repairs the flag on the way past so it stops being wrong.
+    if !include_provisional {
+        if let Ok(all) = store.peers(true) {
+            for r in all {
+                if !regs.iter().any(|x| x.addr == r.addr) && st.hub.is_live(&r.addr) {
+                    let _ = store.promote(&r.addr);
+                    regs.push(r);
+                }
+            }
+            regs.sort_by(|a, b| a.addr.cmp(&b.addr));
+        }
+    }
     let known = regs
         .into_iter()
         .map(|r| KnownPeer {
