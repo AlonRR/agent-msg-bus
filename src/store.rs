@@ -208,6 +208,29 @@ impl Store {
         Ok(out)
     }
 
+    /// Read a single stored message back. Used by `/send` so the pushed frame is the row that was
+    /// actually persisted, rather than a reconstruction of it — if the two ever disagreed, the
+    /// recipient would see something no replay could reproduce.
+    pub fn by_id(&self, id: &str) -> Result<Option<Message>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, sender, recipient, kind, subject, body, reply_to
+               FROM messages WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], |r| {
+            Ok(Message {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                from: r.get(2)?,
+                to: r.get(3)?,
+                kind: r.get(4)?,
+                subject: r.get(5)?,
+                body: r.get(6)?,
+                reply_to: r.get(7)?,
+            })
+        })?;
+        rows.next().transpose()
+    }
+
     /// Advance the cursor. Never moves backwards.
     pub fn ack(&self, addr: &str, up_to: &str) -> Result<()> {
         self.conn.execute(
