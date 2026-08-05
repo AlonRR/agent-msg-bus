@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # blocking HTTP for the CLI half. Deliberately not reqwest: the client path needs no
 # async runtime, and ureq keeps the single binary small.
 ureq = { version = "2", features = ["json"] }
+# WebSocket *client*, for the relay's upstream leg. Also used by the integration tests.
+tokio-tungstenite = "0.24"
 
 [dev-dependencies]
-tokio-tungstenite = "0.24"

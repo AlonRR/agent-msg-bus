@@ -77,6 +77,15 @@ enum Cmd {
     Peers,
     /// Print the ws:// URL to hand to Monitor.
     SubUrl { addr: String },
+    /// Hold the broker connection on this machine and re-serve it on loopback.
+    ///
+    /// Monitor refuses to open a WebSocket to a private IP, so it cannot reach the broker directly;
+    /// it can reach 127.0.0.1. Run one of these per session address.
+    Relay {
+        addr: String,
+        #[arg(long, default_value = "127.0.0.1:9451")]
+        listen: String,
+    },
 }
 
 fn main() {
@@ -85,7 +94,41 @@ fn main() {
         Cmd::Serve { listen, db, tokens, insecure_no_auth } => {
             serve(&listen, &db, tokens.as_deref(), insecure_no_auth)
         }
+        Cmd::Relay { ref addr, ref listen } => {
+            let (addr, listen) = (addr.clone(), listen.clone());
+            relay(&listen, &cli.url, &addr, &cli.token)
+        }
         _ => run_client(&cli),
+    }
+}
+
+#[tokio::main]
+async fn relay(listen: &str, broker: &str, addr: &str, token: &str) {
+    if token.is_empty() {
+        eprintln!("agent-msg-bus: no token. Pass --token or set AMB_TOKEN.");
+        std::process::exit(1);
+    }
+    let upstream = agent_msg_bus::relay::upstream_url(broker, addr, token);
+    let state = agent_msg_bus::relay::RelayState {
+        upstream_url: Arc::new(upstream),
+        addr: Arc::new(addr.to_string()),
+        busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("agent-msg-bus: cannot bind {listen}: {e}");
+            std::process::exit(1);
+        }
+    };
+    // The token is deliberately absent from this line: it would otherwise be the one place the
+    // value gets printed, and this is what a session copies into a Monitor call.
+    println!("relay for {addr} listening on {listen}");
+    println!("subscribe with: ws://{listen}/sub");
+    if let Err(e) = axum::serve(listener, agent_msg_bus::relay::app(state)).await {
+        eprintln!("agent-msg-bus: relay error: {e}");
+        std::process::exit(1);
     }
 }
 
@@ -182,7 +225,7 @@ fn run_client(cli: &Cli) {
             println!("{}", c.sub_url(addr));
             Ok(())
         }
-        Cmd::Serve { .. } => unreachable!("handled in main"),
+        Cmd::Serve { .. } | Cmd::Relay { .. } => unreachable!("handled in main"),
     };
     if let Err(e) = result {
         eprintln!("agent-msg-bus: {e}");

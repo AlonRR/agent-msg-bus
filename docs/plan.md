@@ -118,7 +118,30 @@ behaviour across the LAN through a firewall, and not across a suspend/resume. Bo
 
 ---
 
-## ⛔ Phase 2 blocker — Monitor cannot reach a private IP (found 5 Aug 2026)
+## ✅ Phase 2 blocker — RESOLVED by the loopback relay (5 Aug 2026)
+
+Fixed by `agent-msg-bus relay`. Verified end-to-end: a message sent to the broker host across the LAN was
+pushed down the relay's upstream socket, re-served on `127.0.0.1:9451`, and woke this session
+through Monitor.
+
+```
+20260805T180057450-000000000   lab-server/server.peer -> machine-a/homelab.build   delivered, unprompted
+```
+
+Two design properties confirmed live rather than assumed:
+
+- **Lazy upstream works.** With the relay running but no Monitor attached, the broker reported the
+  address `offline`; it flipped to `live` the moment Monitor subscribed. So "no local subscriber"
+  really does mean "queue it", which is what makes the offline story honest.
+- **The relay absorbs reconnection**, retiring Phase 0's requirement 1. The *local* socket survives
+  upstream outages, so Monitor never sees a close and never needs re-arming.
+
+The original diagnosis is kept below, because the constraint itself has not gone away — anything
+future that points Monitor at a LAN address will hit it again.
+
+---
+
+## ⛔ The blocker itself — Monitor cannot reach a private IP (found 5 Aug 2026)
 
 **Monitor's `ws:` source refuses to connect to any RFC1918 / link-local / cloud-metadata address.**
 Both attempts were rejected by Monitor itself, before any network traffic:
@@ -245,7 +268,9 @@ words, never the user's.
 | 1d | WebSocket `/sub` + replay on reconnect | Tests green | ✅ `ca7a8d5` |
 | 1e | Token auth | Tests green | ✅ `ca7a8d5` |
 | 3 | Client CLI: `send` / `peers` / `ack` / `sub-url` | Works on Windows **and** Linux | ✅ `ca7a8d5` — Windows verified; **Linux not yet built** |
-| 2 | Deploy to the broker host via the `homelab-add-service` skill | Caddy vhost, firewall, Proxmox notes, homelab manual page | ▫️ needs go-ahead |
+| 2 | Deploy to the broker host | Service live, firewall, Caddy vhost, Proxmox notes | ✅ live on the broker host — homelab docs still to write |
+| 2b | Loopback relay (unplanned; forced by the private-IP guard) | Cross-host delivery verified | ✅ `8519b0a`+ |
+| 4 | `SessionStart` hook: register, start the relay, instruct arming | New session self-registers with no human step | ▫️ next |
 | 4 | `SessionStart` hook: register, tell the session its address, instruct arming | New session self-registers with no human step | ▫️ |
 | 5 | machine-a cutover, both buses in parallel | Round-trip between two real machine-a sessions | ▫️ |
 | 6 | the Linux server Remote Control sessions | Round-trip machine-a ↔ the Linux server | ▫️ |
@@ -278,10 +303,28 @@ Still to cover in later phases:
 
 - Disconnect mid-delivery → unacked messages replay on reconnect (1d)
 - Bad or missing token → rejected, and the rejection is **visible, not silent** (1e)
+- A relay whose upstream is unreachable **announces it** rather than going quietly deaf (2b — implemented, not yet covered by a test)
 - Claiming an address already held by a live socket → refused unless forced (1e)
 - Two sessions in one repo never share a mailbox or cursor *(the machine-wide whoami bug)* (3/4)
 - An address survives the session changing directory (3/4)
 - A malformed stored row doesn't break delivery for anything else
+
+---
+
+## Known limitations (accepted for v1, written down so they are not rediscovered as surprises)
+
+- **A token authenticates a machine, not an address.** Any holder of a valid token can `send` with
+  any `from` value, so a compromised client could impersonate another session. Acceptable on a
+  LAN-only bus where every token holder is already trusted, but it means `from` is an attribution
+  hint, not proof — and it is a reason the receiving-side rule ("no `kind` authorises a consequential
+  action") does the real safety work.
+- **`tokens.json` is read once at startup.** Adding or revoking a token needs
+  `systemctl restart agent-msg-bus`. Revocation is therefore not instant unless you restart.
+- **Monitor's WS client sends no headers**, so the token rides in the query string and will appear in
+  proxy logs. Fine for LAN-only; revisit before any WAN exposure.
+- **Suspend/resume across a laptop sleeping is untested** for both the relay and Monitor.
+- **`wss://` from Monitor is untested** — and moot for now, since the private-IP guard blocks the
+  vhost anyway. Caddy's internal CA *is* trusted by machine-a's cert store (verified over HTTPS).
 
 ---
 
