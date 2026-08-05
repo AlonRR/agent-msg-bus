@@ -40,24 +40,42 @@ Start-Sleep -Milliseconds 500
 Copy-Item $built $exe -Force
 Write-Host "installed $exe"
 
-# A console app launched by Task Scheduler shows a window. wscript with window style 0 is the
-# dependency-free way to suppress it.
+# A console app launched by Task Scheduler shows a window; wscript with window style 0 suppresses it.
+#
+# The third argument MUST be True (wait). With False, wscript spawned the relay detached and exited 0
+# in milliseconds, so Task Scheduler marked the task Completed and lost any handle on the relay -
+# which made -RestartCount inert by construction, because restart-on-failure only fires when the
+# *task* fails and this task always succeeded instantly. The relay could then die and nothing would
+# bring it back, while `peers` kept working (that is HTTP straight to the broker) so the CLI looked
+# healthy with inbound delivery dead. Found on machine-b, confirmed on machine-a: relay alive, task State=Ready.
+#
+# Waiting keeps the task Running for the relay's lifetime, and WScript.Quit propagates the exit code
+# so a crash actually registers as a task failure.
 $shim = Join-Path $InstallDir 'relay-hidden.vbs'
 @"
-CreateObject("WScript.Shell").Run """$exe"" relay --listen $Listen", 0, False
+Dim rc
+rc = CreateObject("WScript.Shell").Run("""$exe"" relay --listen $Listen", 0, True)
+WScript.Quit rc
 "@ | Set-Content -Path $shim -Encoding ASCII
 Write-Host "wrote $shim"
 
 $taskName = 'agent-msg-bus relay'
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 $action  = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$shim`""
+
+# Belt and braces. The blocking shim makes restart-on-failure work, but a clean exit is not a
+# failure and would leave nothing running. A repetition trigger re-launches every 5 minutes
+# regardless; the relay exits 0 immediately if the port is already bound, so a redundant run is a
+# no-op rather than a restart loop.
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$repeat  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit ([TimeSpan]::Zero)
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger, $repeat) -Settings $settings `
     -Description 'Holds the agent-msg-bus broker connection and re-serves it on loopback, because Monitor refuses to open a WebSocket to a private IP.' | Out-Null
-Write-Host "registered scheduled task: $taskName"
+Write-Host "registered scheduled task: $taskName (blocking shim + 5-minute self-heal)"
 
 Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 3

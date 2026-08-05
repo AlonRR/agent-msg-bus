@@ -60,19 +60,27 @@ Get-CimInstance Win32_Process -Filter "Name='agent-msg-bus.exe'" -ErrorAction Si
 Start-Sleep -Milliseconds 500
 Copy-Item $BinaryPath $exe -Force
 
+# Third arg MUST be True (wait). With False, wscript exits immediately and Task Scheduler loses the
+# relay, making -RestartCount inert - the relay can die and nothing brings it back.
 $shim = Join-Path $InstallDir 'relay-hidden.vbs'
 @"
-CreateObject("WScript.Shell").Run """$exe"" relay --listen $Listen", 0, False
+Dim rc
+rc = CreateObject("WScript.Shell").Run("""$exe"" relay --listen $Listen", 0, True)
+WScript.Quit rc
 "@ | Set-Content -Path $shim -Encoding ASCII
 
 $taskName = 'agent-msg-bus relay'
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 $action  = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$shim`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# Self-heal every 5 minutes: a clean exit is not a failure, so restart-on-failure alone would leave
+# nothing running. The relay exits 0 if the port is already bound, so a redundant run is a no-op.
+$repeat  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit ([TimeSpan]::Zero)
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger, $repeat) -Settings $settings `
     -Description 'Holds the agent-msg-bus broker connection and re-serves it on loopback.' | Out-Null
 Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 3

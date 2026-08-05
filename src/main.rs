@@ -167,6 +167,13 @@ async fn relay(listen: &str, broker: &str, token: &str) {
 
     let listener = match tokio::net::TcpListener::bind(listen).await {
         Ok(l) => l,
+        // Exit 0, not 1: another relay already serves this port, so there is nothing to do and
+        // nothing wrong. This makes a supervisor that re-launches on a timer a safe no-op instead of
+        // a restart loop - which is what lets the Scheduled Task carry a repetition trigger.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            println!("agent-msg-bus: {listen} is already served by another relay; nothing to do");
+            std::process::exit(0);
+        }
         Err(e) => {
             eprintln!("agent-msg-bus: cannot bind {listen}: {e}");
             std::process::exit(1);

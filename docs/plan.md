@@ -291,13 +291,39 @@ that a killed session costs one step, per the standing session-limits policy.
 `machine-b` is **not reachable over SSH from machine-a**; the `claude-config-sync` skill says so outright
 (*"run the command on that machine"*), so this had to be run on the machine itself.
 
-**Correction to the DNS claim previously recorded here.** This section used to say `ping machine-b`
-succeeds because the name resolves through wildcard DNS to the reverse proxy (`<proxy-ip>`). Measured from
-machine-b, that is not quite the mechanism. The wildcard covers **`*.example.internal`** — `msgbus.example.internal` →
-`<proxy-ip>`, confirmed — but bare hostnames do *not* resolve at all (`nonsense-xyz123` → NXDOMAIN,
-and so does `git-remote`). From machine-b, `machine-b` resolves to its own link-local address. The trap is
-real for `.example.internal` names; the stated mechanism was too broad. Not re-checked from machine-a, so this
-correction is scoped to machine-b.
+**Correction to the DNS claim previously recorded here — now measured from machine-a too, and the
+original claim was simply wrong.**
+
+This section used to say `ping machine-b` succeeds because the name resolves through wildcard DNS to
+the reverse proxy (`<proxy-ip>`). The machine-b session flagged that as too broad; measuring from machine-a shows it
+was worse than that — it was a misreading.
+
+Measured from machine-a:
+
+```
+nslookup machine-b                    -> *** can't find machine-b: Non-existent domain
+nslookup nonsense-xyz123          -> *** Non-existent domain          (bare names: NXDOMAIN)
+nslookup nonsense-xyz123.example.internal -> <proxy-ip>                   (wildcard is *.example.internal only)
+ping machine-b                        -> <machine-b-ip>   <- machine-b ITSELF, not Caddy
+```
+
+**Where the error came from:** `nslookup` prints the *resolver's* `Server:`/`Address:` before the
+answer. `<proxy-ip>` was the DNS server (the reverse proxy) being quoted back, not the result for
+`machine-b`. The bare name never resolved via DNS at all — `ping` found machine-b over NetBIOS/LLMNR, and
+`<machine-b-ip>` is genuinely machine-b.
+
+So, corrected:
+
+- The wildcard trap is **real but scoped to `*.example.internal`**, exactly as the machine-b session said. It is
+  the same trap `homelab/docs/manual/rc-panel.md` documents for SSH aliases.
+- **machine-b is network-reachable** from machine-a. The ping was honest.
+- The reason it cannot be onboarded remotely is **not DNS — it has no SSH server**:
+  `Test-NetConnection <machine-b-ip> -Port 22` → `False`, and `ssh machine-b` times out. That is what the
+  `claude-config-sync` skill means by "not reachable over SSH".
+
+The conclusion (run the bootstrap on that machine) never changed; the stated reason was wrong, and a
+wrong reason is worth correcting because it sends the next person to fix DNS, or to distrust pings in
+general, when neither is the problem.
 
 Phase 7 is one command, run **on machine-b**, with that machine's own token:
 
