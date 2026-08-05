@@ -4,12 +4,13 @@ Push-delivery message bus for Claude Code sessions. Replaces the file-based `msg
 (`Tools/machine-a/tools/msgbus/`). A full rewrite, not a patch — the old code and scripts were explicitly
 treated as replaceable.
 
-**Status: deployed and carrying real traffic.** Phases 0–6 complete: broker live on the broker host, relays
-running as services on machine-a and the Linux server, sessions self-register at startup, and messages have been
-delivered across machines into idle sessions unprompted.
+**Status: deployed and carrying real traffic.** Phases 0–7 complete: broker live on the broker host, relays
+running as services on machine-a, the Linux server and machine-b, sessions self-register at startup, and messages have
+been delivered across machines into idle sessions unprompted. **The durable queue is now proven
+against a machine that leaves the bus** — see Phase 7.
 
-**Remaining:** Phase 7 (machine-b — blocked, needs a human on that machine), Phase 8 (retire the old bus),
-Phase 9 (Channels). The old file-based `msgbus` is still running in parallel and untouched.
+**Remaining:** Phase 8 (retire the old bus), Phase 9 (Channels). The old file-based `msgbus` is still
+running in parallel and untouched.
 
 ---
 
@@ -278,22 +279,27 @@ words, never the user's.
 | 4 | `SessionStart` hook: register + tell the session its address | New session self-registers with no human step | ✅ `2856a43`, in the binary rather than per-OS scripts |
 | 5 | machine-a cutover, both buses in parallel | Round-trip between two real machine-a sessions | ✅ relay is a Scheduled Task; a session is live on the bus |
 | 6 | the Linux server Remote Control sessions | Round-trip machine-a ↔ the Linux server | ✅ a message from the Linux server woke an machine-a session |
-| 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ⚠️ **blocked: needs a human on that machine** — see below |
+| 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ✅ **passed** — 2 messages queued while offline, both replayed in order on reconnect, none lost |
 | 8 | Retire old msgbus | Code archived, skill rewritten, old hooks removed | ▫️ |
 | 9 | Channels adapter | Delivery with no arming step | ▫️ |
 
 Phases 1–4 build nothing user-visible on their own. That is deliberate: each increment is small enough
 that a killed session costs one step, per the standing session-limits policy.
 
-### Phase 7 — machine-b cannot be done remotely
+### Phase 7 — machine-b: done on 5 Aug 2026, and what it cost
 
 `machine-b` is **not reachable over SSH from machine-a**; the `claude-config-sync` skill says so outright
-(*"run the command on that machine"*). Worse, it *looks* reachable: `ping machine-b` succeeds because the
-name resolves through wildcard DNS to **<proxy-ip>**, which is the Caddy container, not machine-b. The
-same trap `homelab/docs/manual/rc-panel.md` documents for unconfigured SSH aliases. A successful ping
-proves nothing here.
+(*"run the command on that machine"*), so this had to be run on the machine itself.
 
-So Phase 7 is one command, run **on machine-b**, with that machine's own token:
+**Correction to the DNS claim previously recorded here.** This section used to say `ping machine-b`
+succeeds because the name resolves through wildcard DNS to the reverse proxy (`<proxy-ip>`). Measured from
+machine-b, that is not quite the mechanism. The wildcard covers **`*.example.internal`** — `msgbus.example.internal` →
+`<proxy-ip>`, confirmed — but bare hostnames do *not* resolve at all (`nonsense-xyz123` → NXDOMAIN,
+and so does `git-remote`). From machine-b, `machine-b` resolves to its own link-local address. The trap is
+real for `.example.internal` names; the stated mechanism was too broad. Not re-checked from machine-a, so this
+correction is scoped to machine-b.
+
+Phase 7 is one command, run **on machine-b**, with that machine's own token:
 
 ```powershell
 # get machine-b's token (on any machine that can reach the homelab host):
@@ -303,10 +309,75 @@ ssh <broker-host> 'cat /etc/agent-msg-bus/tokens.json'
 .\scripts\bootstrap-client.ps1 -Machine machine-b -Token <machine-b's token>
 ```
 
-That writes the config, installs the binary, registers the relay as a Scheduled Task, and adds the
-SessionStart hook. The offline-queue test is then the interesting part, and it is the one thing this
-design has not yet proven against a machine that genuinely goes away: send to machine-b while it is
-asleep, wake it, and confirm the message arrives on reconnect rather than being lost.
+Build and tests on machine-b: `cargo build --release` clean, **24 tests green** (12 store + 8 integration
++ 4 relay), matching machine-a and the Linux server.
+
+#### ✅ The offline-queue test — PASSED
+
+The one property this design had never been tested against a machine that genuinely leaves.
+
+| Step | What was done | Result |
+|---|---|---|
+| a | Marker A sent while relay up | ✅ pushed within ~1 s, woke an idle session unprompted; acked so it could not be confused with a replay |
+| b | Relay stopped, machine-b off the bus | ✅ broker flipped every machine-b address to `offline`; Monitor surfaced `[WebSocket closed: 1006 Connection ended]` |
+| c | **Two** messages sent while offline | ✅ broker held them — `machine-b/agent-msg-bus.1956ec12  offline  2 pending` |
+| d | Relay restarted, subscription re-armed | ✅ **both replayed, oldest-first, payloads intact**; ack advanced the cursor to `0 pending` |
+
+Two were sent rather than one deliberately: one message cannot distinguish "the queue works" from
+"the queue keeps only the newest". Both arrived, in order.
+
+**Scope of the evidence — read this before citing the result.** The offline window was created by
+stopping the relay process, not by suspending the machine. From the broker's side that is a true
+offline window (socket closed, address `offline`, mail queued), which is what the durable queue
+claims to handle. It is **not** a suspend/resume test: the laptop never slept and the NIC never went
+down. Suspend/resume therefore remains untested — see Known limitations, which is unchanged on that
+point.
+
+#### ⚠️ `Stop-ScheduledTask` does NOT stop the relay — it produces a false pass
+
+The obvious way to run step (b) is `Stop-ScheduledTask -TaskName 'agent-msg-bus relay'`. **It does
+nothing to the relay.** Measured:
+
+```
+relay pid before : 14988
+task state after : Ready
+relay pid after  : 14988      <- same process, still alive
+relay /health    : still 200, still subscribed
+```
+
+Cause: `scripts/bootstrap-client.ps1` registers `wscript.exe` against `relay-hidden.vbs`, which calls
+`WScript.Shell.Run(..., 0, False)` — fire-and-forget. `wscript.exe` exits the instant it spawns the
+relay, so the task has already completed and owns no child to kill.
+
+This matters more than a papercut: anyone running the offline test that way sends a message, watches
+it arrive, and concludes the queue works — **while the machine was never offline at all**. It is a
+false pass on the exact property Phase 7 exists to prove. Use `Stop-Process -Name agent-msg-bus`.
+`Start-ScheduledTask` *does* work to bring it back (verified — new pid).
+
+#### Other findings worth not rediscovering
+
+- **A running relay is not a reachable address.** After restart, `/health` reported `"subscribed":[]`
+  and the broker still showed `offline / 2 pending` until Monitor re-attached. The lazy upstream
+  (`relay.rs`) is working as designed, but "the relay is up" is not the same as "this machine is
+  receiving" — do not use process liveness as the health signal. `agent-msg-bus peers` is the honest one.
+- **Monitor must be re-armed after a relay restart.** Killing the relay kills the local socket, so
+  `persistent: true` ends — exactly Phase 0's requirement 1. The close *is* surfaced (`1006`), so it
+  is actionable, but a human or the skill has to act on it. The relay absorbs *upstream* outages, not
+  its own death.
+- **Rapid replay can coalesce into one notification.** MARKER-B and MARKER-C arrived as two separate
+  frames (the wire contract's one-message-per-frame rule held) but landed in a single Monitor
+  notification, because Monitor batches events within ~200 ms. Both were intact and individually
+  parseable, so nothing was lost — but a session that counts *notifications* rather than parsing
+  frames would undercount a burst.
+- **`bootstrap-client.ps1` writes `settings.json` with a UTF-8 BOM** under Windows PowerShell 5.1,
+  where `Set-Content -Encoding UTF8` emits one. Confirmed by attribution: the pre-bootstrap backup has
+  no BOM, the post-run file does (`EF BB BF`). Claude Code tolerated it — the hook fired and other
+  sessions on machine-b registered normally — so this is a latent wart, not a live break. Worth switching
+  to `utf8NoBOM` / `[IO.File]::WriteAllText` before a stricter parser meets it.
+- **Onboarding needs two things the bootstrap does not cover:** a `Host git-remote` block in
+  `~/.ssh/config` (machine-b had none — `git-remote` did not resolve, and Gitea is on its own host at
+  `<gitea-ip>`), and a per-machine SSH key registered with Gitea. Neither is in any script; both
+  cost time on this machine. The next machine onboarded will hit both.
 
 ---
 
@@ -349,7 +420,16 @@ Still to cover in later phases:
   `systemctl restart agent-msg-bus`. Revocation is therefore not instant unless you restart.
 - **Monitor's WS client sends no headers**, so the token rides in the query string and will appear in
   proxy logs. Fine for LAN-only; revisit before any WAN exposure.
-- **Suspend/resume across a laptop sleeping is untested** for both the relay and Monitor.
+- **Suspend/resume across a laptop sleeping is still untested** for both the relay and Monitor.
+  Phase 7 did *not* close this: its offline window was made by stopping the relay process, which is a
+  genuine broker-side offline window but leaves the NIC up and the machine awake. What a real suspend
+  adds — a socket that dies without a clean close, a clock jump, and DHCP/ARP churn on resume — is
+  exactly what is still unproven. machine-b remains the machine that could prove it.
+- **Killing the relay ends the session's Monitor subscription** and nothing re-arms it automatically.
+  The close is visible (`1006`), not silent, so it is actionable — but until the skill acts on it,
+  recovery is a human step. The relay absorbs upstream outages; it cannot absorb its own restart.
+- **`Stop-ScheduledTask` does not stop the relay** (detached `wscript` shim — see Phase 7). Any
+  runbook that uses it to simulate an outage is testing nothing.
 - **`wss://` from Monitor is untested** — and moot for now, since the private-IP guard blocks the
   vhost anyway. Caddy's internal CA *is* trusted by machine-a's cert store (verified over HTTPS).
 
