@@ -5,7 +5,7 @@ machines, in different repos — message each other, and have the message **acte
 rather than whenever someone next checks.
 
 Replaces the file-based `msgbus` (`Tools/machine-a/tools/msgbus/`). Full design, decisions and phasing:
-[`homelab/docs/agentbus-plan.md`](https://git.example.internal/alon/homelab/src/branch/main/docs/agentbus-plan.md).
+[`docs/plan.md`](docs/plan.md).
 
 **Status: Phase 1, in progress.** Not deployed. The old bus is still the live one.
 
