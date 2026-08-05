@@ -44,6 +44,8 @@ pub struct KnownPeer {
     pub cwd: String,
     pub live: bool,
     pub pending: usize,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 impl Client {
@@ -146,6 +148,15 @@ impl Client {
             .and_then(|x| x.as_array())
             .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
             .unwrap_or_default())
+    }
+
+    /// Make `to` answer to `from` as well, and inherit its reading position.
+    pub fn migrate(&self, from: &str, to: &str) -> Result<(usize, String), ClientError> {
+        let v = self.post("/migrate", serde_json::json!({"from": from, "to": to}))?;
+        Ok((
+            v.get("pending_now").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+            v.get("adopted_cursor").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        ))
     }
 
     pub fn forget(&self, addr: &str) -> Result<bool, ClientError> {

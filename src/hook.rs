@@ -50,6 +50,76 @@ pub fn load_config() -> Option<Config> {
     serde_json::from_str(&raw).ok()
 }
 
+/// Names that say nothing about which session they are.
+///
+/// Carried over from the old bus, where the rule was sound: every session reaches for these, which
+/// is precisely why they are the ones that collide. Rejected as either half of the name, so
+/// `homelab.main` is refused too.
+const RESERVED: &[&str] = &[
+    "main", "master", "first", "second", "default", "session", "claude", "agent", "me", "new",
+    "temp", "tmp", "test", "home", "user", "root", "primary", "current", "this",
+];
+
+fn pin_path() -> Option<PathBuf> {
+    let session = std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|s| !s.is_empty())?;
+    Some(config_path().parent()?.join("pins").join(session))
+}
+
+/// The pinned address for this session, if any.
+///
+/// Keyed by session id, not by repo: two sessions in one repo must not silently share an address.
+/// That was a real bug in the old bus — its whoami file was machine-wide, so the second session to
+/// start took over the first one's identity and consumed its mail.
+pub fn pinned_address() -> Option<String> {
+    let p = pin_path()?;
+    let a = std::fs::read_to_string(p).ok()?.trim().to_string();
+    if a.is_empty() {
+        None
+    } else {
+        Some(a)
+    }
+}
+
+pub fn validate_address(addr: &str) -> Result<(), String> {
+    let Some((machine, name)) = addr.split_once('/') else {
+        return Err("address must look like <machine>/<repo>.<role>".into());
+    };
+    if machine.is_empty() || name.is_empty() {
+        return Err("address must look like <machine>/<repo>.<role>".into());
+    }
+    if !addr.chars().all(|c| c.is_alphanumeric() || "/._-*".contains(c)) {
+        return Err("address may only contain letters, digits, and / . _ - ".into());
+    }
+    for part in name.split('.') {
+        if RESERVED.contains(&part.to_lowercase().as_str()) {
+            return Err(format!(
+                "'{part}' is too generic to identify a session — every session reaches for these, \
+                 which is why they collide. Use something that says what this session is doing."
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn set_pin(addr: &str) -> Result<PathBuf, String> {
+    validate_address(addr)?;
+    let p = pin_path().ok_or("no CLAUDE_CODE_SESSION_ID; cannot pin outside a Claude Code session")?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, addr).map_err(|e| e.to_string())?;
+    Ok(p)
+}
+
+pub fn clear_pin() -> Result<bool, String> {
+    let p = pin_path().ok_or("no CLAUDE_CODE_SESSION_ID")?;
+    if p.exists() {
+        std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// `<machine>/<repo>.<session-prefix>`.
 ///
 /// The session prefix is not decoration. The old bus's fallback was the bare directory name, so two
@@ -57,6 +127,10 @@ pub fn load_config() -> Option<Config> {
 /// each consuming messages meant for the other. Including it means an unpinned session is still
 /// unique; naming it later only makes it memorable.
 pub fn derive_address(machine: &str, cwd: &str, session_id: &str) -> String {
+    // A pin wins: the session has declared who it is, which is more reliable than anything derived.
+    if let Some(p) = pinned_address() {
+        return p;
+    }
     let repo = repo_name(cwd);
     let short: String = session_id.chars().take(8).collect();
     let short = if short.is_empty() { "nosession".to_string() } else { short };

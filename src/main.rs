@@ -85,6 +85,19 @@ enum Cmd {
     Ack { addr: String, up_to_id: String },
     /// Who is on the bus.
     Peers,
+    /// Migrate a mailbox: <to> starts answering to <from> and inherits its unread mail.
+    ///
+    /// Use when a session ended and its successor has a different derived address, so mail queued
+    /// for the dead one would otherwise be stranded. Existing messages are not rewritten — the
+    /// alias is resolved at delivery time, so history stays true.
+    Migrate { from: String, to: String },
+    /// Pin this session's address so it stops being derived from the session id.
+    ///
+    /// Two problems, one fix: a derived address changes every restart, so a mailbox cannot carry
+    /// over, and every session-directory pair leaves a permanent registry entry.
+    Pin { addr: String },
+    /// Drop this session's pin and go back to the derived address.
+    Unpin,
     /// Retire an address (drops its registration and cursor, not its message history).
     Forget { addr: String },
     /// Read stored messages for an address. Does NOT consume them or move the cursor.
@@ -350,6 +363,39 @@ fn run_client(cli: &Cli) {
                 }
             })
             .map_err(Into::into),
+        Cmd::Migrate { from, to } => c
+            .migrate(from, to)
+            .map(|(pending, cursor)| {
+                println!("{to} now also answers to {from}");
+                println!("  adopted cursor : {}", if cursor.is_empty() { "(beginning)" } else { &cursor });
+                println!("  pending now    : {pending}");
+                if pending == 0 {
+                    println!("  note: nothing was waiting for {from} — the migration is still in");
+                    println!("        effect for anything sent to that name from now on.");
+                }
+            })
+            .map_err(Into::into),
+        Cmd::Pin { addr } => match agent_msg_bus::hook::set_pin(addr) {
+            Ok(p) => {
+                println!("pinned this session to {addr}");
+                println!("  {}", p.display());
+                println!("Re-run the SessionStart hook or `whoami` to see it take effect, and");
+                println!("re-arm your Monitor subscription against the new address.");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        },
+        Cmd::Unpin => match agent_msg_bus::hook::clear_pin() {
+            Ok(true) => {
+                println!("pin cleared; back to the derived address");
+                Ok(())
+            }
+            Ok(false) => {
+                println!("no pin was set");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        },
         Cmd::Forget { addr } => c
             .forget(addr)
             .map(|existed| {

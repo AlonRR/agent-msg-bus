@@ -124,6 +124,14 @@ impl Store {
                addr TEXT PRIMARY KEY,
                up_to TEXT NOT NULL
              );
+             -- An address that also receives mail sent to `alias`. This is how a mailbox migrates
+             -- without rewriting history: the stored `to` field is never touched, so what was
+             -- actually sent stays true, and delivery resolves the alias at read time.
+             CREATE TABLE IF NOT EXISTS aliases(
+               alias TEXT PRIMARY KEY,
+               target TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS registry(
                addr TEXT PRIMARY KEY,
                session_id TEXT NOT NULL,
@@ -170,8 +178,63 @@ impl Store {
         Ok(id)
     }
 
+    /// Every name `addr` answers to: itself, plus any alias pointing at it.
+    pub fn names_for(&self, addr: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT alias FROM aliases WHERE target = ?1")?;
+        let rows = stmt.query_map(params![addr], |r| r.get::<_, String>(0))?;
+        let mut names = vec![addr.to_string()];
+        for r in rows {
+            names.push(r?);
+        }
+        Ok(names)
+    }
+
+    /// Migrate a mailbox: `to` starts answering to `from` as well, and inherits its reading
+    /// position so `from`'s undelivered mail is actually visible.
+    ///
+    /// Both halves are required. The alias alone is not enough: `to` was registered later, so its
+    /// cursor sits at the head and it would see none of `from`'s backlog — the same
+    /// "a new address gets no history" rule that normally protects against flooding would silently
+    /// defeat the migration. Taking the *older* cursor is what makes the mail appear, and taking
+    /// the older one rather than `from`'s outright means migrating twice cannot move a cursor
+    /// forwards and skip mail.
+    ///
+    /// The stored `to` field on existing messages is never rewritten: what was actually sent stays
+    /// true, and the alias is resolved at read time instead.
+    pub fn migrate(&self, from: &str, to: &str) -> Result<(usize, String)> {
+        let (_, now) = mint_id();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO aliases(alias, target, created_at) VALUES (?1, ?2, ?3)",
+            params![from, to, now],
+        )?;
+        let from_cursor: String = self
+            .conn
+            .query_row("SELECT up_to FROM cursors WHERE addr = ?1", params![from], |r| r.get(0))
+            .unwrap_or_default();
+        let to_cursor: String = self
+            .conn
+            .query_row("SELECT up_to FROM cursors WHERE addr = ?1", params![to], |r| r.get(0))
+            .unwrap_or_default();
+        let adopted = if from_cursor < to_cursor { from_cursor } else { to_cursor };
+        self.conn.execute(
+            "INSERT INTO cursors(addr, up_to) VALUES (?1, ?2)
+             ON CONFLICT(addr) DO UPDATE SET up_to = ?2",
+            params![to, adopted],
+        )?;
+        let now_pending = self.pending_for(to)?.len();
+        Ok((now_pending, adopted))
+    }
+
+    pub fn aliases_of(&self, target: &str) -> Result<Vec<String>> {
+        let mut stmt =
+            self.conn.prepare("SELECT alias FROM aliases WHERE target = ?1 ORDER BY alias")?;
+        let rows = stmt.query_map(params![target], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     /// Undelivered messages for `addr`, oldest first. Idempotent until acked.
     pub fn pending_for(&self, addr: &str) -> Result<Vec<Message>> {
+        let names = self.names_for(addr)?;
         let cursor: String = self
             .conn
             .query_row("SELECT up_to FROM cursors WHERE addr = ?1", params![addr], |r| r.get(0))
@@ -198,10 +261,13 @@ impl Store {
 
         // Pattern matching stays in Rust rather than SQL GLOB: one implementation, directly unit
         // tested, with no dependency on SQLite's glob dialect quirks.
+        //
+        // Matched against every name this address answers to, so a migrated mailbox receives mail
+        // that was addressed to its predecessor. The sender is still excluded by its own address.
         let mut out = Vec::new();
         for row in rows {
             let m = row?;
-            if addr_matches(&m.to, addr) {
+            if names.iter().any(|n| addr_matches(&m.to, n)) {
                 out.push(m);
             }
         }
@@ -271,10 +337,12 @@ impl Store {
             })
         })?;
         // Sent-or-received: a session recovering a conversation wants both halves, not just inbound.
+        // Aliases count too, so a migrated mailbox can read its predecessor's history.
+        let names = self.names_for(addr)?;
         let mut out = Vec::new();
         for row in rows {
             let m = row?;
-            if addr_matches(&m.to, addr) || m.from == addr {
+            if names.iter().any(|n| addr_matches(&m.to, n) || &m.from == n) {
                 out.push(m);
             }
         }
@@ -590,6 +658,87 @@ mod tests {
         assert_eq!(s.peers().unwrap().len(), 1);
         // History survives: forget retires an identity, not the record of what was said.
         assert_eq!(s.history("machine-a/b", None, 20).unwrap().len(), 1);
+    }
+
+    // ---- mailbox migration -------------------------------------------------
+
+    /// The case this exists for: a session dies, its successor gets a different derived address,
+    /// and mail already queued for the dead one must not be stranded.
+    #[test]
+    fn migrate_delivers_the_old_addresss_backlog_to_the_new_one() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/homelab.old")).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/homelab.old", "queued for the dead session")).unwrap();
+
+        // The successor registers later, so its cursor starts at the head and it sees nothing.
+        s.register(&reg("machine-a/homelab.new")).unwrap();
+        assert_eq!(s.pending_for("machine-a/homelab.new").unwrap().len(), 0, "precondition");
+
+        let (pending, _) = s.migrate("machine-a/homelab.old", "machine-a/homelab.new").unwrap();
+        assert_eq!(pending, 1);
+        let got = s.pending_for("machine-a/homelab.new").unwrap();
+        assert_eq!(got.len(), 1, "backlog did not follow the migration");
+        assert_eq!(got[0].subject, "queued for the dead session");
+    }
+
+    /// The alias alone is not enough, and this is the trap: without adopting the older cursor the
+    /// successor is protected from the very backlog it is trying to inherit.
+    #[test]
+    fn migrate_adopts_the_older_cursor_not_the_newer() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/a", "old mail")).unwrap();
+        s.register(&reg("machine-a/b")).unwrap(); // cursor at head, ahead of a's
+
+        let (_, adopted) = s.migrate("machine-a/a", "machine-a/b").unwrap();
+        let a_cursor = s.pending_for("machine-a/a").unwrap();
+        assert_eq!(a_cursor.len(), 1, "sanity: a still has its own backlog");
+        assert!(adopted.is_empty() || adopted < "20260805".to_string(), "adopted cursor: {adopted}");
+        assert_eq!(s.pending_for("machine-a/b").unwrap().len(), 1);
+    }
+
+    /// Migrating twice must not skip mail by dragging the cursor forwards.
+    #[test]
+    fn migrating_twice_never_moves_the_cursor_forwards() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/a", "one")).unwrap();
+        s.register(&reg("machine-a/b")).unwrap();
+
+        s.migrate("machine-a/a", "machine-a/b").unwrap();
+        let first = s.pending_for("machine-a/b").unwrap().len();
+        s.migrate("machine-a/a", "machine-a/b").unwrap();
+        assert_eq!(s.pending_for("machine-a/b").unwrap().len(), first, "second migrate lost mail");
+    }
+
+    #[test]
+    fn a_migrated_mailbox_receives_mail_still_addressed_to_the_old_name() {
+        // Senders that have not learned the new address must keep working.
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.register(&reg("machine-a/b")).unwrap();
+        s.migrate("machine-a/a", "machine-a/b").unwrap();
+
+        s.send(&msg("machine-a/sender", "machine-a/a", "sent to the old name")).unwrap();
+        let got = s.pending_for("machine-a/b").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].subject, "sent to the old name");
+        assert_eq!(got[0].to, "machine-a/a", "stored `to` was rewritten; history must stay true");
+    }
+
+    #[test]
+    fn migration_does_not_make_a_sender_receive_its_own_message() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.register(&reg("machine-a/b")).unwrap();
+        s.migrate("machine-a/a", "machine-a/b").unwrap();
+        // b now answers to a. A broadcast from b must still not come back to b.
+        s.send(&msg("machine-a/b", "machine-a/*", "broadcast")).unwrap();
+        assert_eq!(s.pending_for("machine-a/b").unwrap().len(), 0);
     }
 
     #[test]

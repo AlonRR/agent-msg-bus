@@ -44,6 +44,7 @@ pub fn app(state: AppState) -> Router {
         .route("/ack", post(ack))
         .route("/peers", get(peers))
         .route("/forget", post(forget))
+        .route("/migrate", post(migrate))
         .route("/messages", get(messages))
         .route("/prune", post(prune))
         .route("/sub", get(sub))
@@ -273,6 +274,49 @@ async fn prune(
 }
 
 #[derive(Deserialize)]
+pub struct MigrateBody {
+    pub from: String,
+    pub to: String,
+}
+
+async fn migrate(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(b): Json<MigrateBody>,
+) -> Response {
+    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+        return unauthorized();
+    }
+    if b.from == b.to {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "from and to are the same address"})),
+        )
+            .into_response();
+    }
+    // Refuse while the source still has a live socket. Migrating a mailbox out from under a working
+    // session would give two addresses one queue and let each consume the other's mail — the same
+    // shape as the old bus's machine-wide whoami file.
+    if st.hub.is_live(&b.from) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("{} still has a live subscriber; disconnect it first", b.from)
+            })),
+        )
+            .into_response();
+    }
+    match st.store.lock().unwrap().migrate(&b.from, &b.to) {
+        Ok((pending, adopted)) => Json(serde_json::json!({
+            "from": b.from, "to": b.to, "pending_now": pending, "adopted_cursor": adopted
+        }))
+        .into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct ForgetBody {
     pub addr: String,
 }
@@ -317,6 +361,9 @@ struct KnownPeer {
     cwd: String,
     live: bool,
     pending: usize,
+    /// Other names this address answers to, from migrations. Surfaced so a mailbox that has
+    /// inherited an identity is visible as such rather than being a hidden routing rule.
+    aliases: Vec<String>,
 }
 
 async fn peers(
@@ -337,6 +384,7 @@ async fn peers(
         .map(|r| KnownPeer {
             live: st.hub.is_live(&r.addr),
             pending: store.pending_for(&r.addr).map(|v| v.len()).unwrap_or(0),
+            aliases: store.aliases_of(&r.addr).unwrap_or_default(),
             addr: r.addr,
             machine: r.machine,
             repo: r.repo,
