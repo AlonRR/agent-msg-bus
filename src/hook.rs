@@ -210,7 +210,12 @@ pub fn run() -> ! {
              Monitor({{ws: {{url: \"{sub_url}\"}}, persistent: true, description: \"agent-msg-bus inbox\"}})\n\
          \n\
          To send:  {me} send --from {addr} --to <address> --kind fyi|request|blocking \
-         --subject \"...\" --body \"...\"\n\
+         --subject \"...\" --body-file <path>\n\
+         For anything longer than a line, write the body to a file and use --body-file (or \
+         --body-file - for stdin). A body passed as a shell argument gets interpolated by that \
+         shell first - backticks run as command substitution in bash, `$` expands in bash and in \
+         double-quoted PowerShell - and the send still succeeds, so the corruption is silent and \
+         the recipient reads prose that is fluent and wrong.\n\
          To see who is on the bus:  {me} peers\n\
          After handling messages:  {me} ack {addr} <last-message-id>\n\
          \n\

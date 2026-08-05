@@ -68,6 +68,16 @@ enum Cmd {
         subject: String,
         #[arg(long, default_value = "")]
         body: String,
+        /// Read the body from a file, or from stdin with `-`.
+        ///
+        /// Prefer this for anything non-trivial. A body passed as a shell argument is interpolated
+        /// by that shell first: backticks become command substitution in bash, and `$` expands in
+        /// both bash and double-quoted PowerShell. The result is a body with silent holes in it —
+        /// `send` still exits 0 and returns an id, so the sender sees success while the recipient
+        /// reads prose that is fluent and wrong. Message bodies *about* shell commands are exactly
+        /// the ones most likely to contain both characters.
+        #[arg(long)]
+        body_file: Option<String>,
         #[arg(long, default_value = "")]
         reply_to: String,
     },
@@ -278,8 +288,30 @@ fn run_client(cli: &Cli) {
             .register(addr, session_id, machine, repo, cwd, *pid)
             .map(|_| println!("registered {addr}"))
             .map_err(Into::into),
-        Cmd::Send { from, to, kind, subject, body, reply_to } => {
-            c.send(from, to, kind, subject, body, reply_to).map(|id| println!("{id}")).map_err(Into::into)
+        Cmd::Send { from, to, kind, subject, body, body_file, reply_to } => {
+            let resolved = match body_file.as_deref() {
+                Some("-") => {
+                    let mut s = String::new();
+                    match std::io::Read::read_to_string(&mut std::io::stdin(), &mut s) {
+                        Ok(_) => s,
+                        Err(e) => {
+                            eprintln!("agent-msg-bus: cannot read body from stdin: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Some(p) => match std::fs::read_to_string(p) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("agent-msg-bus: cannot read body file {p}: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => body.clone(),
+            };
+            c.send(from, to, kind, subject, &resolved, reply_to)
+                .map(|id| println!("{id}"))
+                .map_err(Into::into)
         }
         Cmd::Ack { addr, up_to_id } => {
             c.ack(addr, up_to_id).map(|_| println!("acked {addr} up to {up_to_id}")).map_err(Into::into)
