@@ -85,7 +85,6 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger, $repeat) -Settings $settings `
     -Description 'Holds the agent-msg-bus broker connection and re-serves it on loopback.' | Out-Null
 Start-ScheduledTask -TaskName $taskName
-Start-Sleep -Seconds 3
 Write-Host "installed $exe and registered scheduled task"
 
 # --- 3. SessionStart hook -----------------------------------------------------
@@ -122,11 +121,23 @@ if ($already) {
 
 # --- 4. verify ----------------------------------------------------------------
 Write-Host ''
-try {
-    $h = (Invoke-WebRequest -Uri "http://$Listen/health" -UseBasicParsing -TimeoutSec 5).Content
-    Write-Host "relay healthy: $h"
-} catch {
-    Write-Warning "relay is NOT up on $Listen. Messages will not arrive until it is."
+# Poll, do not sleep-then-check-once: relay startup can exceed a fixed short wait, and a false
+# "relay is NOT up" points straight at the supervision machinery and sends people hunting a bug
+# that is not there.
+$healthy = $null
+$deadline = (Get-Date).AddSeconds(15)
+while ((Get-Date) -lt $deadline) {
+    try {
+        $healthy = (Invoke-WebRequest -Uri "http://$Listen/health" -UseBasicParsing -TimeoutSec 2).Content
+        break
+    } catch {
+        Start-Sleep -Seconds 1
+    }
+}
+if ($healthy) {
+    Write-Host "relay healthy: $healthy"
+} else {
+    Write-Warning "relay is NOT up on $Listen after 15s. Messages will not arrive until it is."
     Write-Warning "Check: Get-ScheduledTaskInfo -TaskName '$taskName'"
 }
 & $exe peers

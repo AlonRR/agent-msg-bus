@@ -89,13 +89,27 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger, 
 Write-Host "registered scheduled task: $taskName (blocking shim + 1-minute repetition supervisor)"
 
 Start-ScheduledTask -TaskName $taskName
-Start-Sleep -Seconds 3
 
-try {
-    $h = (Invoke-WebRequest -Uri "http://$Listen/health" -UseBasicParsing -TimeoutSec 5).Content
-    Write-Host "relay healthy: $h"
-} catch {
-    Write-Warning "relay did not come up on $Listen - check: Get-ScheduledTaskInfo -TaskName '$taskName'"
+# Poll rather than sleep-then-check-once. A single request after a fixed 3s produced a false
+# "relay did not come up" on machine-b, where wscript plus relay startup occasionally exceeds three
+# seconds. That warning points at exactly the supervision area we spent a long time fixing, so a
+# false one sends the next person chasing a bug that is not there - a check that lies is worse than
+# no check.
+$healthy = $null
+$deadline = (Get-Date).AddSeconds(15)
+while ((Get-Date) -lt $deadline) {
+    try {
+        $healthy = (Invoke-WebRequest -Uri "http://$Listen/health" -UseBasicParsing -TimeoutSec 2).Content
+        break
+    } catch {
+        Start-Sleep -Seconds 1
+    }
+}
+if ($healthy) {
+    Write-Host "relay healthy: $healthy"
+} else {
+    Write-Warning "relay did not come up on $Listen within 15s. Messages will not arrive until it does."
+    Write-Warning "Check: Get-ScheduledTaskInfo -TaskName '$taskName'"
 }
 
 Write-Host ''
