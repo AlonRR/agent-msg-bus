@@ -201,11 +201,11 @@ words, never the user's.
 | 0 | Verify Monitor wakes an idle session | Result recorded above | ✅ passed |
 | 1a | Repo skeleton, `.gitattributes`, README, pushed | Builds | ✅ `d072e2c` |
 | 1b | Store: messages, cursors, registry | 12 tests green | ✅ `56b8d63` |
-| 1c | HTTP `/register` `/send` `/ack` `/peers` | Tests green | ▫️ next |
-| 1d | WebSocket `/sub` + replay on reconnect | Tests green | ▫️ |
-| 1e | Token auth | Tests green | ▫️ |
-| 2 | Deploy to the broker host via the `homelab-add-service` skill | Caddy vhost, firewall, Proxmox notes, homelab manual page | ▫️ |
-| 3 | Client CLI: `send` / `peers` / `whoami` | Works on Windows **and** Linux | ▫️ |
+| 1c | HTTP `/register` `/send` `/ack` `/peers` | Tests green | ✅ `ca7a8d5` |
+| 1d | WebSocket `/sub` + replay on reconnect | Tests green | ✅ `ca7a8d5` |
+| 1e | Token auth | Tests green | ✅ `ca7a8d5` |
+| 3 | Client CLI: `send` / `peers` / `ack` / `sub-url` | Works on Windows **and** Linux | ✅ `ca7a8d5` — Windows verified; **Linux not yet built** |
+| 2 | Deploy to the broker host via the `homelab-add-service` skill | Caddy vhost, firewall, Proxmox notes, homelab manual page | ▫️ needs go-ahead |
 | 4 | `SessionStart` hook: register, tell the session its address, instruct arming | New session self-registers with no human step | ▫️ |
 | 5 | machine-a cutover, both buses in parallel | Round-trip between two real machine-a sessions | ▫️ |
 | 6 | the Linux server Remote Control sessions | Round-trip machine-a ↔ the Linux server | ▫️ |
