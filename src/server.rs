@@ -492,7 +492,11 @@ async fn drive(
     // recoverable, a lost message is not.
     let backlog = st.store.lock().unwrap().pending_for(&addr).unwrap_or_default();
     for m in backlog {
-        if send_msg(&mut tx, &m).await.is_err() {
+        // Marked as a replay. Acting on a message *feels* like handling it, so the separate `ack`
+        // step is easy to skip - and an unacked message then arrives again on every reconnect,
+        // looking identical to a fresh duplicate. Saying "you have seen this and never acked it"
+        // turns a silent repeat into a signal.
+        if send_msg(&mut tx, &m, true).await.is_err() {
             st.hub.release(&addr, conn_id);
             return;
         }
@@ -505,7 +509,7 @@ async fn drive(
         tokio::select! {
             msg = rx.recv() => match msg {
                 Some(m) => {
-                    if send_msg(&mut tx, &m).await.is_err() { break; }
+                    if send_msg(&mut tx, &m, false).await.is_err() { break; }
                 }
                 None => break, // sender dropped: this address was force-claimed by another socket
             },
@@ -532,7 +536,21 @@ async fn drive(
 async fn send_msg(
     tx: &mut futures_util::stream::SplitSink<WebSocket, Ws>,
     m: &Message,
+    replay: bool,
 ) -> Result<(), axum::Error> {
-    let json = serde_json::to_string(m).unwrap_or_else(|_| "{}".into());
-    tx.send(Ws::Text(json.into())).await
+    let mut v = serde_json::to_value(m).unwrap_or_else(|_| serde_json::json!({}));
+    if replay {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("replay".into(), serde_json::Value::Bool(true));
+            o.insert(
+                "replay_note".into(),
+                serde_json::Value::String(format!(
+                    "You have been sent this before and never acked it. If you have already handled \
+                     it, run: agent-msg-bus ack {} {}",
+                    m.to, m.id
+                )),
+            );
+        }
+    }
+    tx.send(Ws::Text(v.to_string().into())).await
 }

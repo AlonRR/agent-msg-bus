@@ -216,6 +216,40 @@ async fn an_unacked_message_replays_on_reconnect_but_an_acked_one_does_not() {
     assert!(third.is_none(), "an acked message was replayed: {third:?}");
 }
 
+/// A replayed message says so. Acting on a message feels like handling it, so the separate `ack`
+/// step gets skipped — and the message then arrives again on every reconnect looking exactly like a
+/// fresh duplicate. The flag turns a silent repeat into a signal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replayed_message_is_marked_as_a_replay_but_a_live_one_is_not() {
+    let h = start().await;
+    let c = h.client();
+    let c2 = h.client();
+    blocking(move || {
+        c2.register("machine-a/a", "s1", "machine-a", "r", "/x", 1).unwrap();
+        c2.register("machine-a/b", "s2", "machine-a", "r", "/x", 2).unwrap();
+    })
+    .await;
+
+    // Delivered live to an attached subscriber: not a replay.
+    let mut sock = connect(&h, "machine-a/b").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    blocking(move || c.send("machine-a/a", "machine-a/b", "fyi", "first delivery", "", "").unwrap()).await;
+    let live = next_text(&mut sock, Duration::from_secs(5)).await.expect("no live delivery");
+    assert!(live.get("replay").is_none(), "a first delivery was marked as a replay");
+
+    // Reconnect without acking: the same message comes back, and now it admits it.
+    drop(sock);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let mut sock = connect(&h, "machine-a/b").await;
+    let again = next_text(&mut sock, Duration::from_secs(5)).await.expect("unacked message lost");
+    assert_eq!(again["id"], live["id"]);
+    assert_eq!(again["replay"], true, "a replayed message was not marked");
+    assert!(
+        again["replay_note"].as_str().unwrap_or("").contains("never acked"),
+        "the replay note should say why it is being sent again"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sender_never_receives_its_own_broadcast() {
     let h = start().await;
