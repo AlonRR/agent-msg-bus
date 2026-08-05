@@ -241,6 +241,17 @@ impl Store {
         Ok(())
     }
 
+    /// Retire an address: drop its registration and its cursor.
+    ///
+    /// Messages already sent to it stay in `messages` — this removes the *identity*, not history.
+    /// Needed because a bad registration would otherwise sit in `peers` forever, and a stale
+    /// address that looks live is the kind of thing that gets trusted later.
+    pub fn forget(&self, addr: &str) -> Result<bool> {
+        let n = self.conn.execute("DELETE FROM registry WHERE addr = ?1", params![addr])?;
+        self.conn.execute("DELETE FROM cursors WHERE addr = ?1", params![addr])?;
+        Ok(n > 0)
+    }
+
     pub fn peers(&self) -> Result<Vec<Registration>> {
         let mut stmt = self
             .conn

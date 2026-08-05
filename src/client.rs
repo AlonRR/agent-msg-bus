@@ -120,6 +120,11 @@ impl Client {
         Ok(())
     }
 
+    pub fn forget(&self, addr: &str) -> Result<bool, ClientError> {
+        let v = self.post("/forget", serde_json::json!({"addr": addr}))?;
+        Ok(v.get("forgotten").and_then(|x| x.as_bool()).unwrap_or(false))
+    }
+
     pub fn peers(&self) -> Result<PeersOut, ClientError> {
         let v = self.get("/peers")?;
         serde_json::from_value(v).map_err(|e| ClientError::Http(e.to_string()))

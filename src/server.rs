@@ -43,6 +43,7 @@ pub fn app(state: AppState) -> Router {
         .route("/send", post(send))
         .route("/ack", post(ack))
         .route("/peers", get(peers))
+        .route("/forget", post(forget))
         .route("/sub", get(sub))
         .with_state(state)
 }
@@ -181,6 +182,37 @@ async fn ack(
     }
     match st.store.lock().unwrap().ack(&b.addr, &b.up_to_id) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ForgetBody {
+    pub addr: String,
+}
+
+async fn forget(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(b): Json<ForgetBody>,
+) -> Response {
+    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+        return unauthorized();
+    }
+    // Refuse while a socket is live, so this cannot be used to yank an address out from under a
+    // working session.
+    if st.hub.is_live(&b.addr) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("{} has a live subscriber; disconnect it first", b.addr)
+            })),
+        )
+            .into_response();
+    }
+    match st.store.lock().unwrap().forget(&b.addr) {
+        Ok(existed) => Json(serde_json::json!({"forgotten": existed})).into_response(),
         Err(e) => server_error(e),
     }
 }

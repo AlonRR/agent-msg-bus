@@ -21,14 +21,15 @@
 //! "offline", which means mail queues rather than being pushed into a void.
 
 use axum::extract::ws::{Message as Ws, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use serde::Deserialize;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MAX_BACKOFF: u64 = 30;
@@ -38,30 +39,64 @@ const MAX_BACKOFF: u64 = 30;
 /// outage, not on every retry.
 const ANNOUNCE_AFTER_BACKOFF: u64 = 16;
 
+/// **One relay per machine, multiplexing every session on it.**
+///
+/// The first cut was one relay per address, which forced a port per session and tied a process
+/// lifecycle to a session — the exact shape the standing session-limits policy warns against, since
+/// anything that must outlive a session belongs in a real service. This version listens once on a
+/// fixed loopback port and opens a separate upstream connection per `addr`, so a session only needs
+/// to know its own address, not a port allocation.
 #[derive(Clone)]
 pub struct RelayState {
-    pub upstream_url: Arc<String>,
-    pub addr: Arc<String>,
-    /// One local subscriber at a time, mirroring the broker's one-socket-per-address rule.
-    pub busy: Arc<AtomicBool>,
+    pub broker: Arc<String>,
+    pub token: Arc<String>,
+    /// Addresses currently held by a local subscriber, mirroring the broker's one-socket-per-address
+    /// rule so two sessions cannot quietly share one mailbox.
+    pub busy: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Deserialize)]
+pub struct SubParams {
+    pub addr: String,
 }
 
 pub fn app(state: RelayState) -> Router {
     Router::new()
-        .route("/health", get(|| async { Json(serde_json::json!({"ok": true, "role": "relay"})) }))
+        .route("/health", get(health))
         .route("/sub", get(sub))
         .with_state(state)
 }
 
-async fn sub(State(st): State<RelayState>, ws: WebSocketUpgrade) -> Response {
-    if st.busy.swap(true, Ordering::SeqCst) {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "relay already has a local subscriber"})),
-        )
-            .into_response();
+async fn health(State(st): State<RelayState>) -> Response {
+    let held: Vec<String> = {
+        let b = st.busy.lock().unwrap();
+        let mut v: Vec<String> = b.iter().cloned().collect();
+        v.sort();
+        v
+    };
+    Json(serde_json::json!({"ok": true, "role": "relay", "broker": *st.broker, "subscribed": held}))
+        .into_response()
+}
+
+async fn sub(
+    State(st): State<RelayState>,
+    Query(p): Query<SubParams>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    {
+        let mut b = st.busy.lock().unwrap();
+        if !b.insert(p.addr.clone()) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("{} already has a local subscriber on this relay", p.addr)
+                })),
+            )
+                .into_response();
+        }
     }
-    ws.on_upgrade(move |socket| pump(socket, st))
+    let addr = p.addr.clone();
+    ws.on_upgrade(move |socket| pump(socket, st, addr))
 }
 
 fn status_frame(addr: &str, state: &str, detail: &str) -> String {
@@ -75,18 +110,22 @@ fn status_frame(addr: &str, state: &str, detail: &str) -> String {
 }
 
 /// Hold the local socket; keep an upstream connection under it for as long as the local one lives.
-async fn pump(local: WebSocket, st: RelayState) {
+async fn pump(local: WebSocket, st: RelayState, addr: String) {
+    let release = |st: &RelayState| {
+        st.busy.lock().unwrap().remove(&addr);
+    };
+    let upstream = upstream_url(&st.broker, &addr, &st.token);
     let (mut ltx, mut lrx) = local.split();
     let mut backoff: u64 = 1;
     let mut announced_down = false;
 
     loop {
-        match tokio_tungstenite::connect_async(st.upstream_url.as_str()).await {
+        match tokio_tungstenite::connect_async(upstream.as_str()).await {
             Ok((upstream, _)) => {
                 if announced_down {
                     let _ = ltx
                         .send(Ws::Text(
-                            status_frame(&st.addr, "upstream_restored", "reconnected to the broker")
+                            status_frame(&addr, "upstream_restored", "reconnected to the broker")
                                 .into(),
                         ))
                         .await;
@@ -103,7 +142,7 @@ async fn pump(local: WebSocket, st: RelayState) {
                                 // each frame into one notification; merging here would collapse
                                 // separate messages into a single event.
                                 if ltx.send(Ws::Text(t.to_string().into())).await.is_err() {
-                                    st.busy.store(false, Ordering::SeqCst);
+                                    release(&st);
                                     return;
                                 }
                             }
@@ -114,7 +153,7 @@ async fn pump(local: WebSocket, st: RelayState) {
                             None | Some(Err(_)) | Some(Ok(Ws::Close(_))) => {
                                 // The session went away. Drop upstream too, so the broker sees this
                                 // address as offline and queues rather than pushing into a void.
-                                st.busy.store(false, Ordering::SeqCst);
+                                release(&st);
                                 return;
                             }
                             _ => {}
@@ -127,7 +166,7 @@ async fn pump(local: WebSocket, st: RelayState) {
                     let _ = ltx
                         .send(Ws::Text(
                             status_frame(
-                                &st.addr,
+                                &addr,
                                 "upstream_unreachable",
                                 &format!("cannot reach the broker: {e}"),
                             )
@@ -146,7 +185,7 @@ async fn pump(local: WebSocket, st: RelayState) {
             _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
             down = lrx.next() => {
                 if matches!(down, None | Some(Err(_)) | Some(Ok(Ws::Close(_)))) {
-                    st.busy.store(false, Ordering::SeqCst);
+                    release(&st);
                     return;
                 }
             }
