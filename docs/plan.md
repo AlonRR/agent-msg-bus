@@ -359,10 +359,11 @@ claims to handle. It is **not** a suspend/resume test: the laptop never slept an
 down. Suspend/resume therefore remains untested — see Known limitations, which is unchanged on that
 point.
 
-#### ⚠️ `Stop-ScheduledTask` does NOT stop the relay — it produces a false pass
+#### ⚠️ `Stop-ScheduledTask` did NOT stop the relay before `d1dc268` — it produced a false pass
 
-The obvious way to run step (b) is `Stop-ScheduledTask -TaskName 'agent-msg-bus relay'`. **It does
-nothing to the relay.** Measured:
+**Superseded by `d1dc268`, kept because the failure it caused is instructive.** Against the
+fire-and-forget shim, the obvious way to run step (b) —
+`Stop-ScheduledTask -TaskName 'agent-msg-bus relay'` — did nothing to the relay. Measured on machine-b:
 
 ```
 relay pid before : 14988
@@ -371,14 +372,21 @@ relay pid after  : 14988      <- same process, still alive
 relay /health    : still 200, still subscribed
 ```
 
-Cause: `scripts/bootstrap-client.ps1` registers `wscript.exe` against `relay-hidden.vbs`, which calls
-`WScript.Shell.Run(..., 0, False)` — fire-and-forget. `wscript.exe` exits the instant it spawns the
-relay, so the task has already completed and owns no child to kill.
+Cause: `bootstrap-client.ps1` registered `wscript.exe` against `relay-hidden.vbs` calling
+`WScript.Shell.Run(..., 0, False)` — fire-and-forget. `wscript.exe` exited the instant it spawned the
+relay, so the task had already completed and owned no child to kill.
 
-This matters more than a papercut: anyone running the offline test that way sends a message, watches
-it arrive, and concludes the queue works — **while the machine was never offline at all**. It is a
-false pass on the exact property Phase 7 exists to prove. Use `Stop-Process -Name agent-msg-bus`.
-`Start-ScheduledTask` *does* work to bring it back (verified — new pid).
+This mattered more than a papercut: anyone running the offline test that way sends a message, watches
+it arrive, and concludes the queue works — **while the machine was never offline at all**. A false
+pass on the exact property Phase 7 exists to prove. The Phase 7 run above therefore used
+`Stop-Process -Name agent-msg-bus`, which is what made the offline window real.
+
+`d1dc268` changes the shim to `Run(..., 0, True)` + `WScript.Quit rc`, so `wscript.exe` now stays
+alive as the relay's parent for the task's lifetime. **`Stop-ScheduledTask` should therefore be
+effective from `d1dc268` onward — but that has not been re-measured on machine-b**, which was still
+running the old shim when this was written. Do not treat it as verified until someone stops the task
+and confirms the pid is gone. Until then `Stop-Process -Name agent-msg-bus` remains the lever known
+to work.
 
 #### Other findings worth not rediscovering
 
@@ -454,8 +462,10 @@ Still to cover in later phases:
 - **Killing the relay ends the session's Monitor subscription** and nothing re-arms it automatically.
   The close is visible (`1006`), not silent, so it is actionable — but until the skill acts on it,
   recovery is a human step. The relay absorbs upstream outages; it cannot absorb its own restart.
-- **`Stop-ScheduledTask` does not stop the relay** (detached `wscript` shim — see Phase 7). Any
-  runbook that uses it to simulate an outage is testing nothing.
+- **`Stop-ScheduledTask` did not stop the relay before `d1dc268`** (detached `wscript` shim — see
+  Phase 7). Any runbook that used it to simulate an outage was testing nothing. `d1dc268` makes the
+  shim wait, which should fix this; **not yet re-measured on machine-b**, so `Stop-Process` stays the
+  lever known to work until someone confirms.
 - **`wss://` from Monitor is untested** — and moot for now, since the private-IP guard blocks the
   vhost anyway. Caddy's internal CA *is* trusted by machine-a's cert store (verified over HTTPS).
 
