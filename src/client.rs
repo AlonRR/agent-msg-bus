@@ -114,6 +114,11 @@ impl Client {
                 "subject": subject, "body": body, "reply_to": reply_to
             }),
         )?;
+        // Surface the broker's explanation when nothing was pushed live, so `pushed_to: 0` stops
+        // being mistaken for a delivery failure.
+        if let Some(note) = v.get("note").and_then(|x| x.as_str()) {
+            eprintln!("agent-msg-bus: {note}");
+        }
         Ok(v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string())
     }
 

@@ -165,7 +165,32 @@ async fn send(
     };
 
     let pushed = st.hub.deliver(&stored);
-    Json(serde_json::json!({"id": stored.id, "pushed_to": pushed})).into_response()
+
+    // `pushed_to: 0` is ambiguous, and it is the only number a sender sees. It means "nobody live
+    // matched", which covers three very different situations: the recipient is offline and the
+    // message queued (fine), the address is a typo (not fine), or the sender addressed itself and a
+    // sender is never echoed its own message (fine, and invisible).
+    //
+    // machine-b hit the third while probing its own inbox - self-send is what anyone reaches for first
+    // to test delivery - and got the exact signature of a dead subscription three times while every
+    // other indicator said healthy. Reporting *why* nothing was pushed costs one field and removes a
+    // false alarm that reads as the precise failure this whole system exists to eliminate.
+    let self_addressed = crate::store::addr_matches(&stored.to, &stored.from);
+    let reason = if pushed > 0 {
+        None
+    } else if self_addressed {
+        Some("a sender is never sent its own message; this is not a delivery failure")
+    } else {
+        Some("no live subscriber matched; the message is queued and will be delivered on connect")
+    };
+
+    Json(serde_json::json!({
+        "id": stored.id,
+        "pushed_to": pushed,
+        "self_addressed": self_addressed,
+        "note": reason,
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

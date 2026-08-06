@@ -278,6 +278,56 @@ async fn an_address_that_subscribes_before_registering_still_appears_in_peers() 
     assert!(p.live.contains(&"machine-a/early".to_string()));
 }
 
+/// `pushed_to: 0` must say WHY. Self-send is what anyone reaches for first to test their own inbox,
+/// and it returns the exact signature of a dead subscription — machine-b nearly reported it as a
+/// regression while every other indicator said healthy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_that_pushed_to_nobody_explains_why() {
+    let h = start().await;
+    let c = h.client();
+    blocking(move || c.register("machine-a/solo", "s1", "machine-a", "r", "/x", 1).unwrap()).await;
+
+    let _sock = connect(&h, "machine-a/solo").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Self-send: live subscriber, but a sender is never echoed its own message.
+    let base = h.base.clone();
+    let selfsend: serde_json::Value = blocking(move || {
+        ureq::post(&format!("{base}/send"))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(serde_json::json!({
+                "from": "machine-a/solo", "to": "machine-a/solo", "subject": "probe", "body": ""
+            }))
+            .unwrap()
+            .into_json()
+            .unwrap()
+    })
+    .await;
+    assert_eq!(selfsend["pushed_to"], 0);
+    assert_eq!(selfsend["self_addressed"], true);
+    assert!(
+        selfsend["note"].as_str().unwrap_or("").contains("never sent its own message"),
+        "self-send gave no explanation: {selfsend:?}"
+    );
+
+    // Nobody home: also zero, but for a different reason, and it must say so.
+    let base = h.base.clone();
+    let offline: serde_json::Value = blocking(move || {
+        ureq::post(&format!("{base}/send"))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(serde_json::json!({
+                "from": "machine-a/solo", "to": "machine-a/nobody", "subject": "probe", "body": ""
+            }))
+            .unwrap()
+            .into_json()
+            .unwrap()
+    })
+    .await;
+    assert_eq!(offline["pushed_to"], 0);
+    assert_eq!(offline["self_addressed"], false);
+    assert!(offline["note"].as_str().unwrap_or("").contains("queued"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sender_never_receives_its_own_broadcast() {
     let h = start().await;
