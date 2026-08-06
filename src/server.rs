@@ -46,6 +46,8 @@ pub fn app(state: AppState) -> Router {
         .route("/forget", post(forget))
         .route("/migrate", post(migrate))
         .route("/messages", get(messages))
+        .route("/orphans", get(orphans))
+        .route("/orphans/delete", post(delete_orphan))
         .route("/prune", post(prune))
         .route("/sub", get(sub))
         .with_state(state)
@@ -176,18 +178,30 @@ async fn send(
     // other indicator said healthy. Reporting *why* nothing was pushed costs one field and removes a
     // false alarm that reads as the precise failure this whole system exists to eliminate.
     let self_addressed = crate::store::addr_matches(&stored.to, &stored.from);
+    // "Queued, will be delivered on connect" is reassuring and WRONG when the recipient does not
+    // exist: nothing will ever connect as that address, and the message is then stored, invisible to
+    // every listing, and unreachable by forget or prune. A mistyped recipient must not be told the
+    // same thing as a patient one.
+    let known = st.store.lock().unwrap().recipient_is_known(&stored.to).unwrap_or(true);
     let reason = if pushed > 0 {
         None
     } else if self_addressed {
-        Some("a sender is never sent its own message; this is not a delivery failure")
+        Some("a sender is never sent its own message; this is not a delivery failure".to_string())
+    } else if known {
+        Some("queued for a known address that is not currently subscribed; it will be delivered on connect".to_string())
     } else {
-        Some("no live subscriber matched; the message is queued and will be delivered on connect")
+        Some(format!(
+            "WARNING: no registration answers to '{}'. The message is stored but nothing will ever \
+             collect it - check the spelling. `agent-msg-bus orphans` lists mail in this state.",
+            stored.to
+        ))
     };
 
     Json(serde_json::json!({
         "id": stored.id,
         "pushed_to": pushed,
         "self_addressed": self_addressed,
+        "recipient_known": known,
         "note": reason,
     }))
     .into_response()
@@ -231,6 +245,62 @@ async fn messages(
     let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
     match st.store.lock().unwrap().history(addr, since, limit) {
         Ok(v) => Json(serde_json::json!({"messages": v})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+/// Mail addressed to something no registration answers to — storage with no owner.
+async fn orphans(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+        return unauthorized();
+    }
+    let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
+    match st.store.lock().unwrap().orphaned_messages(limit) {
+        Ok(v) => Json(serde_json::json!({"orphans": v})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DeleteOrphanBody {
+    pub id: String,
+}
+
+/// Delete a stored message. Scoped to orphans deliberately: this is the only way to clear mail with
+/// no owner, and it must not become a general "delete anyone's message" facility.
+async fn delete_orphan(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(b): Json<DeleteOrphanBody>,
+) -> Response {
+    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+        return unauthorized();
+    }
+    let store = st.store.lock().unwrap();
+    let msg = match store.by_id(&b.id) {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such message"})))
+                .into_response()
+        }
+        Err(e) => return server_error(e),
+    };
+    if store.recipient_is_known(&msg.to).unwrap_or(true) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("{} has a registration; this message is not orphaned", msg.to)
+            })),
+        )
+            .into_response();
+    }
+    match store.delete_message(&b.id) {
+        Ok(deleted) => Json(serde_json::json!({"deleted": deleted, "to": msg.to})).into_response(),
         Err(e) => server_error(e),
     }
 }
@@ -392,8 +462,27 @@ async fn forget(
         )
             .into_response();
     }
-    match st.store.lock().unwrap().forget(&b.addr) {
-        Ok(existed) => Json(serde_json::json!({"forgotten": existed})).into_response(),
+    let store = st.store.lock().unwrap();
+    // Retiring an address ORPHANS anything still addressed to it: the messages stay in storage with
+    // no registration to collect them, invisible to `peers` and unreachable by `forget` afterwards.
+    // Found by noticing machine-a/homelab.build in the orphan list - mail stranded by an earlier forget
+    // in this very session. Say it at the moment of the decision, when it can still be reconsidered.
+    let stranded = store.pending_for(&b.addr).map(|v| v.len()).unwrap_or(0);
+    match store.forget(&b.addr) {
+        Ok(existed) => Json(serde_json::json!({
+            "forgotten": existed,
+            "orphaned": stranded,
+            "note": if stranded > 0 {
+                Some(format!(
+                    "{stranded} undelivered message(s) for {} are now orphaned - no registration \
+                     will collect them. `agent-msg-bus orphans` lists them.",
+                    b.addr
+                ))
+            } else {
+                None
+            },
+        }))
+        .into_response(),
         Err(e) => server_error(e),
     }
 }

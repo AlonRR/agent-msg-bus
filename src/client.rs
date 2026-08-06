@@ -173,8 +173,24 @@ impl Client {
         ))
     }
 
+    /// Mail addressed to something no registration answers to.
+    pub fn orphans(&self, limit: usize) -> Result<Vec<crate::store::Message>, ClientError> {
+        let v = self.get(&format!("/orphans?limit={limit}"))?;
+        serde_json::from_value(v.get("orphans").cloned().unwrap_or_default())
+            .map_err(|e| ClientError::Http(e.to_string()))
+    }
+
+    pub fn delete_orphan(&self, id: &str) -> Result<bool, ClientError> {
+        let v = self.post("/orphans/delete", serde_json::json!({"id": id}))?;
+        Ok(v.get("deleted").and_then(|x| x.as_bool()).unwrap_or(false))
+    }
+
     pub fn forget(&self, addr: &str) -> Result<bool, ClientError> {
         let v = self.post("/forget", serde_json::json!({"addr": addr}))?;
+        // Retiring an address strands anything still queued for it. Say so at the moment it happens.
+        if let Some(note) = v.get("note").and_then(|x| x.as_str()) {
+            eprintln!("agent-msg-bus: {note}");
+        }
         Ok(v.get("forgotten").and_then(|x| x.as_bool()).unwrap_or(false))
     }
 

@@ -310,13 +310,15 @@ async fn a_send_that_pushed_to_nobody_explains_why() {
         "self-send gave no explanation: {selfsend:?}"
     );
 
-    // Nobody home: also zero, but for a different reason, and it must say so.
+    // Known address, not currently subscribed: zero pushed, but it really will be delivered.
+    let c2 = h.client();
+    blocking(move || c2.register("machine-a/known-away", "s2", "machine-a", "r", "/x", 2).unwrap()).await;
     let base = h.base.clone();
     let offline: serde_json::Value = blocking(move || {
         ureq::post(&format!("{base}/send"))
             .set("Authorization", &format!("Bearer {TOKEN}"))
             .send_json(serde_json::json!({
-                "from": "machine-a/solo", "to": "machine-a/nobody", "subject": "probe", "body": ""
+                "from": "machine-a/solo", "to": "machine-a/known-away", "subject": "probe", "body": ""
             }))
             .unwrap()
             .into_json()
@@ -324,8 +326,30 @@ async fn a_send_that_pushed_to_nobody_explains_why() {
     })
     .await;
     assert_eq!(offline["pushed_to"], 0);
-    assert_eq!(offline["self_addressed"], false);
-    assert!(offline["note"].as_str().unwrap_or("").contains("queued"));
+    assert_eq!(offline["recipient_known"], true);
+    assert!(offline["note"].as_str().unwrap_or("").contains("delivered on connect"));
+
+    // Nonexistent address: also zero, and it must NOT be reassuring. Nothing will ever collect it.
+    let base = h.base.clone();
+    let typo: serde_json::Value = blocking(move || {
+        ureq::post(&format!("{base}/send"))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(serde_json::json!({
+                "from": "machine-a/solo", "to": "machine-a/typoed-name", "subject": "probe", "body": ""
+            }))
+            .unwrap()
+            .into_json()
+            .unwrap()
+    })
+    .await;
+    assert_eq!(typo["pushed_to"], 0);
+    assert_eq!(typo["recipient_known"], false);
+    let note = typo["note"].as_str().unwrap_or("");
+    assert!(note.contains("WARNING"), "a typo was not warned about: {note}");
+    assert!(
+        !note.contains("will be delivered"),
+        "a typo was told its message would be delivered: {note}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

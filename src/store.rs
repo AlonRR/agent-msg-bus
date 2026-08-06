@@ -423,6 +423,69 @@ impl Store {
         rows.collect()
     }
 
+    /// Does any registered address answer to this `to` pattern?
+    ///
+    /// The difference between "queued for a session that has not subscribed yet" and "queued for an
+    /// address that does not exist" is the difference between patience and a typo, and the sender
+    /// cannot tell them apart from the outside.
+    pub fn recipient_is_known(&self, to: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare("SELECT addr FROM registry")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in rows {
+            let addr = r?;
+            if addr_matches(to, &addr) {
+                return Ok(true);
+            }
+            // An alias is a real name too: mail to a migrated-from address is not orphaned.
+            if !self.names_for(&addr)?.iter().all(|n| !addr_matches(to, n)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Messages addressed to something no registration answers to.
+    ///
+    /// This is storage with no owner: it is not a stale registry entry, so nothing enumerates it and
+    /// neither `forget` nor `prune` can reach it. Without a way to list it, a mistyped recipient is
+    /// accepted, stored forever, and invisible — the sender having been told it would be delivered.
+    pub fn orphaned_messages(&self, limit: usize) -> Result<Vec<Message>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, sender, recipient, kind, subject, body, reply_to
+               FROM messages ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Message {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                from: r.get(2)?,
+                to: r.get(3)?,
+                kind: r.get(4)?,
+                subject: r.get(5)?,
+                body: r.get(6)?,
+                reply_to: r.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let m = row?;
+            if out.len() >= limit {
+                break;
+            }
+            if !self.recipient_is_known(&m.to)? {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete a stored message outright. The only way to clear orphaned mail, since there is no
+    /// registration for `forget` to remove.
+    pub fn delete_message(&self, id: &str) -> Result<bool> {
+        let n = self.conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    }
+
     /// Retire an address: drop its registration and its cursor.
     ///
     /// Messages already sent to it stay in `messages` — this removes the *identity*, not history.
@@ -847,6 +910,49 @@ mod tests {
         let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
         assert!(stale.contains(&"machine-a/never".to_string()));
         assert!(!stale.contains(&"machine-a/joined".to_string()), "a joined address was short-expired");
+    }
+
+    // ---- orphaned mail -----------------------------------------------------
+
+    /// Mail to an address nothing answers to is stored, undeliverable, and — before this — invisible
+    /// to every listing, unreachable by `forget` (no registration to remove) and by `prune` (same).
+    /// Found by machine-b while inventing a guaranteed-offline target for a test.
+    #[test]
+    fn mail_to_a_nonexistent_address_is_findable_and_clearable() {
+        let s = store();
+        s.register(&reg("machine-a/real")).unwrap();
+        let good = s.send(&msg("machine-a/real", "machine-a/real2", "to a typo")).unwrap();
+        s.register(&reg("machine-a/real2")).unwrap();
+        let orphan = s.send(&msg("machine-a/real", "machine-a/does-not-exist", "orphaned")).unwrap();
+
+        assert!(s.recipient_is_known("machine-a/real2").unwrap());
+        assert!(!s.recipient_is_known("machine-a/does-not-exist").unwrap());
+
+        let found = s.orphaned_messages(50).unwrap();
+        assert_eq!(found.len(), 1, "expected exactly the orphan, got {found:?}");
+        assert_eq!(found[0].id, orphan);
+        assert!(found.iter().all(|m| m.id != good), "a deliverable message was called orphaned");
+
+        assert!(s.delete_message(&orphan).unwrap());
+        assert!(s.orphaned_messages(50).unwrap().is_empty());
+    }
+
+    /// A wildcard recipient is not orphaned just because it is a pattern.
+    #[test]
+    fn a_wildcard_recipient_counts_as_known_when_something_matches_it() {
+        let s = store();
+        s.register(&reg("machine-a/alpha")).unwrap();
+        assert!(s.recipient_is_known("machine-a/*").unwrap());
+        assert!(!s.recipient_is_known("machine-b/*").unwrap());
+    }
+
+    /// A migrated-from address still has an owner, so mail to it is not orphaned.
+    #[test]
+    fn an_alias_target_keeps_the_old_name_from_looking_orphaned() {
+        let s = store();
+        s.register(&reg("machine-a/new")).unwrap();
+        s.migrate("machine-a/gone", "machine-a/new").unwrap();
+        assert!(s.recipient_is_known("machine-a/gone").unwrap(), "an aliased name looked orphaned");
     }
 
     #[test]

@@ -104,6 +104,16 @@ enum Cmd {
     Unpin,
     /// Retire an address (drops its registration and cursor, not its message history).
     Forget { addr: String },
+    /// List mail addressed to something no registration answers to.
+    ///
+    /// Storage with no owner: no registration means nothing enumerates it and neither `forget` nor
+    /// `prune` can reach it. Usually a mistyped recipient. `--delete <id>` clears one.
+    Orphans {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        delete: Option<String>,
+    },
     /// Read stored messages for an address. Does NOT consume them or move the cursor.
     ///
     /// Use this to recover a message that arrived truncated in a notification — delivery is
@@ -402,6 +412,27 @@ fn run_client(cli: &Cli) {
                 Ok(())
             }
             Err(e) => Err(e.into()),
+        },
+        Cmd::Orphans { limit, delete } => match delete {
+            Some(id) => c
+                .delete_orphan(id)
+                .map(|d| println!("{}", if d { format!("deleted {id}") } else { "nothing deleted".into() }))
+                .map_err(Into::into),
+            None => c
+                .orphans(*limit)
+                .map(|ms| {
+                    if ms.is_empty() {
+                        println!("no orphaned mail");
+                        return;
+                    }
+                    println!("{} orphaned message(s) - addressed to something that does not exist:", ms.len());
+                    for m in ms {
+                        println!("  {}  {} -> {}", m.id, m.from, m.to);
+                        println!("      {}", m.subject);
+                    }
+                    println!("clear one with: agent-msg-bus orphans --delete <id>");
+                })
+                .map_err(Into::into),
         },
         Cmd::Forget { addr } => c
             .forget(addr)
