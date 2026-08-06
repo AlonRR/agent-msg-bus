@@ -153,6 +153,16 @@ enum Cmd {
     SessionStart,
     /// Print this session's derived address and its Monitor subscribe URL.
     Whoami,
+    /// Subscribe and print each message as a line, reconnecting forever.
+    ///
+    /// Use this with Monitor's `command:` form instead of `ws:`. Monitor's ws source ENDS the watch
+    /// when the socket closes and does not retry, so a relay restart leaves the session deaf until a
+    /// human re-arms it. This reconnects internally, so the watch is never torn down.
+    Watch {
+        addr: String,
+        #[arg(long)]
+        relay: Option<String>,
+    },
 }
 
 /// Resolve broker URL and token: explicit flag/env first, then `~/.agent-msg-bus/config.json`.
@@ -188,9 +198,20 @@ fn main() {
             relay(&listen, &url, &token)
         }
         Cmd::SessionStart => agent_msg_bus::hook::run(),
+        Cmd::Watch { ref addr, ref relay } => {
+            let relay = relay.clone().or_else(|| {
+                agent_msg_bus::hook::load_config().map(|c| c.relay)
+            }).unwrap_or_else(|| "127.0.0.1:9451".to_string());
+            watch(&relay, addr)
+        }
         Cmd::Whoami => whoami(),
         _ => run_client(&cli),
     }
+}
+
+#[tokio::main]
+async fn watch(relay: &str, addr: &str) -> ! {
+    agent_msg_bus::watch::run(relay, addr).await
 }
 
 fn whoami() {
@@ -472,9 +493,8 @@ fn run_client(cli: &Cli) {
             println!("{}", c.sub_url(addr));
             Ok(())
         }
-        Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami => {
-            unreachable!("handled in main")
-        }
+        Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami
+        | Cmd::Watch { .. } => unreachable!("handled in main"),
     };
     if let Err(e) = result {
         eprintln!("agent-msg-bus: {e}");

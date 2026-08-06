@@ -96,7 +96,16 @@ async fn sub(
         }
     }
     let addr = p.addr.clone();
+    eprintln!("relay: {addr} subscribed");
     ws.on_upgrade(move |socket| pump(socket, st, addr))
+}
+
+/// One line per lifecycle event. The relay used to log a two-line banner and then nothing at all —
+/// no connect, no disconnect, no upstream error — so a relay that accepted a handshake and then
+/// dropped it after two seconds on an upstream failure looked identical to one working perfectly.
+/// That silence cost real diagnostic time, which is the same complaint that retired the file bus.
+fn log_event(addr: &str, what: &str) {
+    eprintln!("relay: {addr} {what}");
 }
 
 fn status_frame(addr: &str, state: &str, detail: &str) -> String {
@@ -122,6 +131,7 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
     loop {
         match tokio_tungstenite::connect_async(upstream.as_str()).await {
             Ok((upstream, _)) => {
+                log_event(&addr, "upstream connected");
                 if announced_down {
                     let _ = ltx
                         .send(Ws::Text(
@@ -147,12 +157,16 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                                 }
                             }
                             Some(Ok(_)) => {}          // pings/pongs/binary: transport noise
-                            _ => break,                 // upstream gone -> reconnect below
+                            _ => {
+                                log_event(&addr, "upstream closed; reconnecting");
+                                break;
+                            }
                         },
                         down = lrx.next() => match down {
                             None | Some(Err(_)) | Some(Ok(Ws::Close(_))) => {
                                 // The session went away. Drop upstream too, so the broker sees this
                                 // address as offline and queues rather than pushing into a void.
+                                log_event(&addr, "local subscriber disconnected");
                                 release(&st);
                                 return;
                             }
@@ -175,7 +189,7 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                         .await;
                     announced_down = true;
                 }
-                eprintln!("relay: upstream connect failed ({e}); retrying in {backoff}s");
+                log_event(&addr, &format!("upstream connect FAILED ({e}); retrying in {backoff}s"));
             }
         }
 
