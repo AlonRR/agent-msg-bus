@@ -522,6 +522,34 @@ this section is Windows-only.
 
 ---
 
+## The failure mode that produced most of this project's bugs
+
+Nearly every defect found here — in the old bus, in this one, and in the reasoning about both — had
+the same shape: **something that reads exactly like a correct result, and is not.** Collected because
+recognising the shape is worth more than any individual fix.
+
+| What looked right | What was true |
+|---|---|
+| Old README: *"push delivery verified end-to-end"* | Never verified from an *idle* session, the only case that mattered |
+| A hook registered and firing | `watchPaths` was given a glob, which is not expanded — silent |
+| `RestartCount=999, RestartInterval=PT1M` | Restart-on-failure never fires for an action that exits non-zero |
+| `pushed_to: 0` | Meant three unrelated things, one of them entirely benign |
+| A `send` that returned an id and said "queued" | Recipient did not exist; nothing would ever collect it |
+| `peers` omitting a live, delivering session | Membership was read from a stored flag instead of the socket |
+| A verification run that printed nothing | Ran a **stale binary** — `cargo test` builds debug, the release artefact was old |
+| *"I measured the scheduled task, it has one trigger"* | True twelve hours earlier; reported as current without re-checking |
+
+The last two are the same error in different materials: **a stale artefact confirming the previous
+behaviour is indistinguishable from a fix that did not work, and a stale measurement is
+indistinguishable from a fresh one.** Neither looks doubtful. Both were caught only because someone
+re-ran the check rather than trusting the memory of having run it.
+
+The working rule that came out of it, from a session that stated it better than this repo had:
+*a setting describes intent, only a kill measures behaviour* — and **"I measured this" decays into
+"I remember measuring this" faster than it feels like it should.**
+
+---
+
 ## Known limitations (accepted for v1, written down so they are not rediscovered as surprises)
 
 - **A token authenticates a machine, not an address.** Any holder of a valid token can `send` with
