@@ -279,8 +279,19 @@ pub fn sweep_provisional(st: &AppState, provisional_hours: i64) -> Vec<String> {
         if st.hub.is_live(&a) {
             continue;
         }
-        if store.forget(&a).unwrap_or(false) {
-            removed.push(a);
+        match store.retire(&a) {
+            Ok((true, stranded)) => {
+                if stranded > 0 {
+                    // Must never be silent. `stale_provisional` now refuses anything with traffic,
+                    // so this should be unreachable - which is exactly why it is worth shouting
+                    // about if it ever happens.
+                    println!(
+                        "sweep: WARNING forgot {a} and STRANDED {stranded} undelivered message(s)                          - see `agent-msg-bus orphans`"
+                    );
+                }
+                removed.push(a);
+            }
+            _ => {}
         }
     }
     removed

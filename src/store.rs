@@ -393,7 +393,49 @@ impl Store {
               WHERE provisional = 1 AND registered_at < ?1 ORDER BY addr",
         )?;
         let rows = stmt.query_map(params![cutoff_ts], |r| r.get::<_, String>(0))?;
-        rows.collect()
+        let mut out = Vec::new();
+        for r in rows {
+            let addr = r?;
+            // Traffic protects an address regardless of its flag or age. Enforced HERE rather than
+            // in each caller, because the previous stranding guard lived in the `forget` handler and
+            // the sweeper - a second caller - simply did not have it.
+            if self.has_traffic(&addr)? {
+                continue;
+            }
+            out.push(addr);
+        }
+        Ok(out)
+    }
+
+    /// Has this address ever sent or been sent anything?
+    ///
+    /// Traffic is proof of participation, and it outranks the `provisional` flag. The flag means
+    /// "has never subscribed *since promotion existed*" — for any address registered before that
+    /// change it means "no record either way", and those two are not the same thing. Nothing
+    /// distinguished them, so the sweeper deleted the second kind: `machine-b/agent-msg-bus.1956ec12`
+    /// had subscribed, sent, and received, but subscribed *before* promotion shipped, so its flag
+    /// still read provisional and it was swept along with genuine churn.
+    ///
+    /// "Has never joined" and "has traffic" must not be able to be true at once. When they are, the
+    /// traffic is the stronger signal.
+    pub fn has_traffic(&self, addr: &str) -> Result<bool> {
+        let sent: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE sender = ?1",
+            params![addr],
+            |r| r.get(0),
+        )?;
+        if sent > 0 {
+            return Ok(true);
+        }
+        // Recipients may be patterns, so this cannot be a plain equality test.
+        let mut stmt = self.conn.prepare("SELECT DISTINCT recipient FROM messages")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in rows {
+            if addr_matches(&r?, addr) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Registrations with no live socket that have not re-registered since `cutoff_ts`.
@@ -492,9 +534,20 @@ impl Store {
     /// Needed because a bad registration would otherwise sit in `peers` forever, and a stale
     /// address that looks live is the kind of thing that gets trusted later.
     pub fn forget(&self, addr: &str) -> Result<bool> {
+        Ok(self.retire(addr)?.0)
+    }
+
+    /// Retire an address, reporting how many undelivered messages it strands.
+    ///
+    /// Returns `(existed, stranded)`. The stranding count is computed HERE, before the deletion, so
+    /// every caller receives it. It used to be computed in the `forget` HTTP handler instead — and
+    /// the sweeper, a second caller added later, therefore stranded mail silently on a 30-minute
+    /// timer. Fixing a caller rather than the invariant is what allowed that.
+    pub fn retire(&self, addr: &str) -> Result<(bool, usize)> {
+        let stranded = self.pending_for(addr).map(|v| v.len()).unwrap_or(0);
         let n = self.conn.execute("DELETE FROM registry WHERE addr = ?1", params![addr])?;
         self.conn.execute("DELETE FROM cursors WHERE addr = ?1", params![addr])?;
-        Ok(n > 0)
+        Ok((n > 0, stranded))
     }
 
     /// Addresses on the bus. By default only those that have actually joined — `peers` answers
@@ -953,6 +1006,60 @@ mod tests {
         s.register(&reg("machine-a/new")).unwrap();
         s.migrate("machine-a/gone", "machine-a/new").unwrap();
         assert!(s.recipient_is_known("machine-a/gone").unwrap(), "an aliased name looked orphaned");
+    }
+
+    // ---- the sweeper must never take a participant --------------------------
+
+    /// The real incident: `machine-b/agent-msg-bus.1956ec12` had subscribed, sent and received — but it
+    /// subscribed *before* promotion shipped, so its stored flag still read provisional and the
+    /// sweeper deleted it, stranding the offline-queue proof. `provisional` meant "never joined" for
+    /// new rows and "no record either way" for old ones, and nothing told those apart.
+    #[test]
+    fn an_address_with_traffic_is_never_swept_however_old_or_provisional() {
+        let s = store();
+        s.register(&reg("machine-a/participant")).unwrap();
+        s.register(&reg("machine-a/genuine-churn")).unwrap();
+        // Traffic, but never promoted — exactly the pre-migration shape.
+        s.send(&msg("machine-a/participant", "machine-a/somewhere", "I did things")).unwrap();
+
+        let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
+        assert!(
+            !stale.contains(&"machine-a/participant".to_string()),
+            "an address with traffic was offered up for sweeping: {stale:?}"
+        );
+        assert!(
+            stale.contains(&"machine-a/genuine-churn".to_string()),
+            "genuine churn was not swept: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn traffic_counts_when_the_address_only_received_and_only_via_a_wildcard() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/quiet-receiver")).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/*", "broadcast")).unwrap();
+
+        assert!(
+            s.has_traffic("machine-a/quiet-receiver").unwrap(),
+            "a wildcard recipient did not count as traffic"
+        );
+        let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
+        assert!(!stale.contains(&"machine-a/quiet-receiver".to_string()));
+    }
+
+    /// Retirement must report what it strands, at the store level, so no caller can be the quiet
+    /// one. The previous guard lived in the `forget` HTTP handler; the sweeper bypassed it.
+    #[test]
+    fn retire_reports_stranded_mail_to_every_caller() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.register(&reg("machine-a/doomed")).unwrap();
+        s.send(&msg("machine-a/a", "machine-a/doomed", "you will never read this")).unwrap();
+
+        let (existed, stranded) = s.retire("machine-a/doomed").unwrap();
+        assert!(existed);
+        assert_eq!(stranded, 1, "retire did not report the mail it stranded");
     }
 
     #[test]
