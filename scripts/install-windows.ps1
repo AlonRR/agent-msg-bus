@@ -32,11 +32,23 @@ if (-not (Test-Path $cfg)) {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $exe = Join-Path $InstallDir 'agent-msg-bus.exe'
 
-# The running relay holds a lock on its own image, so it has to stop before the copy.
-Get-CimInstance Win32_Process -Filter "Name='agent-msg-bus.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*relay*' } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-Start-Sleep -Milliseconds 500
+# EVERY process running this image holds a lock on it, not just the relay. This filter used to match
+# only '*relay*', which was correct until `watch` shipped - a session's subscription runs the SAME
+# binary, so it kept a lock the installer could not clear and the copy failed with "being used by
+# another process". Stop them all, and name what was stopped: a killed `watch` ends that session's
+# subscription, which it must be told about rather than left to discover.
+$holders = @(Get-CimInstance Win32_Process -Filter "Name='agent-msg-bus.exe'" -ErrorAction SilentlyContinue)
+foreach ($h in $holders) {
+    $kind = if ($h.CommandLine -match '\bwatch\b') { 'watch (a session subscription)' }
+            elseif ($h.CommandLine -match '\brelay\b') { 'relay' }
+            else { 'agent-msg-bus' }
+    Write-Host "  stopping $kind (pid $($h.ProcessId))"
+    Stop-Process -Id $h.ProcessId -Force -ErrorAction SilentlyContinue
+}
+if ($holders | Where-Object { $_.CommandLine -match '\bwatch\b' }) {
+    Write-Warning "A `watch` was stopped - any session using it must re-arm its Monitor subscription."
+}
+Start-Sleep -Milliseconds 800
 Copy-Item $built $exe -Force
 Write-Host "installed $exe"
 

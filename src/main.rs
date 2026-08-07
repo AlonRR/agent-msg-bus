@@ -41,6 +41,12 @@ enum Cmd {
         /// a silent downgrade to open access.
         #[arg(long)]
         insecure_no_auth: bool,
+        /// How often to sweep aged-out provisional registrations. 0 disables the sweeper.
+        #[arg(long, default_value_t = 30)]
+        sweep_minutes: u64,
+        /// Provisional registrations older than this, with no live socket, are forgotten.
+        #[arg(long, default_value_t = 6)]
+        provisional_hours: i64,
     },
     /// Claim an address.
     Register {
@@ -189,8 +195,8 @@ fn resolve_conn(cli: &Cli) -> (String, String) {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Serve { listen, db, tokens, insecure_no_auth } => {
-            serve(&listen, &db, tokens.as_deref(), insecure_no_auth)
+        Cmd::Serve { listen, db, tokens, insecure_no_auth, sweep_minutes, provisional_hours } => {
+            serve(&listen, &db, tokens.as_deref(), insecure_no_auth, sweep_minutes, provisional_hours)
         }
         Cmd::Relay { ref listen } => {
             let listen = listen.clone();
@@ -273,7 +279,14 @@ async fn relay(listen: &str, broker: &str, token: &str) {
 }
 
 #[tokio::main]
-async fn serve(listen: &str, db: &str, tokens: Option<&str>, insecure: bool) {
+async fn serve(
+    listen: &str,
+    db: &str,
+    tokens: Option<&str>,
+    insecure: bool,
+    sweep_minutes: u64,
+    provisional_hours: i64,
+) {
     let auth = match (tokens, insecure) {
         (Some(path), _) => match Auth::from_file(path) {
             Ok(a) => a,
@@ -309,6 +322,12 @@ async fn serve(listen: &str, db: &str, tokens: Option<&str>, insecure: bool) {
         auth: Arc::new(auth),
     };
 
+    // The sweeper is what makes `provisional_hours` a behaviour rather than an intention. Without
+    // it the value was only reachable through /prune, which nobody runs.
+    if sweep_minutes > 0 {
+        agent_msg_bus::server::spawn_sweeper(state.clone(), sweep_minutes, provisional_hours);
+    }
+
     let listener = match tokio::net::TcpListener::bind(listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -317,6 +336,11 @@ async fn serve(listen: &str, db: &str, tokens: Option<&str>, insecure: bool) {
         }
     };
     println!("agent-msg-bus listening on {listen}, db {db}");
+    if sweep_minutes > 0 {
+        println!("sweeping provisional registrations older than {provisional_hours}h every {sweep_minutes}m");
+    } else {
+        println!("provisional sweeper DISABLED - entries will accumulate until `prune` is run by hand");
+    }
 
     // Graceful shutdown so connected sockets get a proper 1001 close rather than the bare TCP drop
     // that the Phase 0 probe produced (which clients see as 1006 and cannot distinguish from a

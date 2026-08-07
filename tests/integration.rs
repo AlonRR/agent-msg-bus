@@ -19,6 +19,7 @@ static N: AtomicU32 = AtomicU32::new(0);
 
 struct Harness {
     base: String,
+    state: AppState,
     _dir: std::path::PathBuf,
 }
 
@@ -57,11 +58,12 @@ async fn start() -> Harness {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let handle_state = state.clone();
     tokio::spawn(async move {
         axum::serve(listener, app(state)).await.unwrap();
     });
 
-    Harness { base: format!("http://127.0.0.1:{port}"), _dir: dir }
+    Harness { base: format!("http://127.0.0.1:{port}"), state: handle_state, _dir: dir }
 }
 
 /// ureq is blocking; keep it off the runtime threads driving the server.
@@ -350,6 +352,37 @@ async fn a_send_that_pushed_to_nobody_explains_why() {
         !note.contains("will be delivered"),
         "a typo was told its message would be delivered: {note}"
     );
+}
+
+/// `provisional_hours` must be a behaviour, not an intention. It used to be reachable only through
+/// `/prune`, a command nobody ran, so entries advertised as "expiring in hours" were still
+/// registered 35 hours later. Same shape as `RestartCount=999` never firing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_sweeper_forgets_aged_provisional_entries_but_never_a_live_one() {
+    let h = start().await;
+    let c = h.client();
+    blocking(move || {
+        c.register("machine-a/aged", "s1", "machine-a", "r", "/x", 1).unwrap();
+        c.register("machine-a/aged-but-live", "s2", "machine-a", "r", "/x", 2).unwrap();
+    })
+    .await;
+
+    // Hold a socket on one of them. A live socket must outrank any clock.
+    let _sock = connect(&h, "machine-a/aged-but-live").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // -1h cutoff => everything registered "now" is already past it.
+    let removed = agent_msg_bus::server::sweep_provisional(&h.state, -1);
+
+    assert!(removed.contains(&"machine-a/aged".to_string()), "aged entry survived: {removed:?}");
+    assert!(
+        !removed.contains(&"machine-a/aged-but-live".to_string()),
+        "the sweeper removed an address with a live socket"
+    );
+
+    let c2 = h.client();
+    let p = blocking(move || c2.peers(true).unwrap()).await;
+    assert!(!p.known.iter().any(|k| k.addr == "machine-a/aged"), "swept entry still in the registry");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

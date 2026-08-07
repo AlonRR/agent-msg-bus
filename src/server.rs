@@ -249,6 +249,71 @@ async fn messages(
     }
 }
 
+/// UTC cutoff `n` hours ago, in the same string form as `registered_at`.
+fn cutoff_hours_ago(hours: i64) -> String {
+    let t = time::OffsetDateTime::now_utc() - time::Duration::hours(hours);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+        t.year(),
+        t.month() as u8,
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second()
+    )
+}
+
+/// Forget provisional addresses that have aged out and hold no live socket.
+///
+/// Returns what it removed so the caller can log it.
+pub fn sweep_provisional(st: &AppState, provisional_hours: i64) -> Vec<String> {
+    let cutoff = cutoff_hours_ago(provisional_hours);
+    let store = st.store.lock().unwrap();
+    let candidates = match store.stale_provisional(&cutoff) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut removed = Vec::new();
+    for a in candidates {
+        // A live socket outranks any clock, exactly as it outranks the stored flag in `peers`.
+        if st.hub.is_live(&a) {
+            continue;
+        }
+        if store.forget(&a).unwrap_or(false) {
+            removed.push(a);
+        }
+    }
+    removed
+}
+
+/// Run `sweep_provisional` on a timer for the life of the broker.
+///
+/// **Why this exists.** `provisional_hours` used to be reachable only through `/prune`, a command
+/// nobody runs — so "expires in hours" described an intention with nothing driving it, and 26
+/// entries were found still registered up to 35 hours later. That is the same shape as
+/// `RestartCount=999` never firing: a setting that reads as a guarantee, with no mechanism behind
+/// it. Found by machine-a/homelab.8e13fdc7 reading the source rather than the behaviour, after this
+/// repo had already written that pattern down as its recurring failure mode and then reproduced it.
+pub fn spawn_sweeper(state: AppState, every_minutes: u64, provisional_hours: i64) {
+    tokio::spawn(async move {
+        let mut tick =
+            tokio::time::interval(std::time::Duration::from_secs(every_minutes.max(1) * 60));
+        loop {
+            tick.tick().await;
+            let removed = sweep_provisional(&state, provisional_hours);
+            if !removed.is_empty() {
+                // Say what it did. A janitor that works silently is indistinguishable from one that
+                // does not run, which is the whole reason this was missed.
+                println!(
+                    "sweep: forgot {} provisional address(es) older than {provisional_hours}h: {}",
+                    removed.len(),
+                    removed.join(", ")
+                );
+            }
+        }
+    });
+}
+
 /// Mail addressed to something no registration answers to — storage with no owner.
 async fn orphans(
     State(st): State<AppState>,
