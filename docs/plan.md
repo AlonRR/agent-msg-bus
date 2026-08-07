@@ -538,8 +538,25 @@ recognising the shape is worth more than any individual fix.
 | `peers` omitting a live, delivering session | Membership was read from a stored flag instead of the socket |
 | A verification run that printed nothing | Ran a **stale binary** — `cargo test` builds debug, the release artefact was old |
 | *"I measured the scheduled task, it has one trigger"* | True twelve hours earlier; reported as current without re-checking |
+| A guard protecting any address *"with traffic, wildcards included"* | One `machine-b/*` broadcast froze **every** address on that machine, forever — 12 of 14 sweep candidates |
+| A freshly-built Linux binary with a current timestamp | Still the **previous** sha — the backgrounded build had died before the source even synced |
 
-The last two are the same error in different materials: **a stale artefact confirming the previous
+The wildcard row is worth reading twice, because that guard was not merely too broad — it was
+**wrong in both directions at once, and the second error concealed the first.** It counted a
+broadcast as participation (freezing a machine's registry so it could only grow) *while the sweeper
+relied on that same over-broad match to prevent stranding*. Narrowing it alone would have traded the
+leak for lost mail. Two entangled mistakes can present as one working feature, and fixing only the
+half that is visible is how the other half ships.
+
+Its origin is the more general trap, and the one to carry forward: **the test asserting
+wildcards-count-as-traffic was written while fixing a real incident that never needed it.**
+`machine-b/agent-msg-bus.1956ec12` had 1 sent and 3 *exactly*-addressed messages — ordinary
+participation. The wildcard clause was a generalisation past the evidence that motivated it, added in
+the same commit that fixed the bug, and it is what broke the next thing. **A fix that reaches further
+than its evidence writes a test that then defends the excess** — after which the overreach looks like
+a deliberate property, because it has a test.
+
+The last two rows of the table are the same error in different materials: **a stale artefact confirming the previous
 behaviour is indistinguishable from a fix that did not work, and a stale measurement is
 indistinguishable from a fresh one.** Neither looks doubtful. Both were caught only because someone
 re-ran the check rather than trusting the memory of having run it.
