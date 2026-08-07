@@ -393,13 +393,30 @@ impl Store {
               WHERE provisional = 1 AND registered_at < ?1 ORDER BY addr",
         )?;
         let rows = stmt.query_map(params![cutoff_ts], |r| r.get::<_, String>(0))?;
+        let addrs: Vec<String> = rows.collect::<Result<Vec<_>>>()?;
+        self.without_trafficked(addrs)
+    }
+
+    /// Drop any address that took part, or that still holds unread mail. THE single place
+    /// bulk-retirement candidates are filtered.
+    ///
+    /// It exists as its own function because the guard has now been added to one query and missed on
+    /// another twice: first the stranding check went into the `forget` handler and the sweeper
+    /// bypassed it, then this guard went into `stale_provisional` and `stale_registrations` - the
+    /// `prune --days` path - bypassed it. Both callers now go through here, so a third candidate
+    /// query cannot silently be the unguarded one.
+    ///
+    /// Two predicates rather than one, because the first version of this collapsed them and was
+    /// wrong in both directions at once: it counted a broadcast as participation (freezing a whole
+    /// machine's registry forever) while relying on that same over-broad match to prevent stranding.
+    /// Narrowing it alone would have traded a leak for lost mail.
+    ///
+    /// `forget` deliberately does NOT use this: retiring a trafficked address by explicit human
+    /// action is legitimate, which is why that path reports what it strands instead of refusing.
+    fn without_trafficked(&self, addrs: Vec<String>) -> Result<Vec<String>> {
         let mut out = Vec::new();
-        for r in rows {
-            let addr = r?;
-            // Traffic protects an address regardless of its flag or age. Enforced HERE rather than
-            // in each caller, because the previous stranding guard lived in the `forget` handler and
-            // the sweeper - a second caller - simply did not have it.
-            if self.has_traffic(&addr)? {
+        for addr in addrs {
+            if self.has_traffic(&addr)? || self.has_pending(&addr)? {
                 continue;
             }
             out.push(addr);
@@ -427,15 +444,30 @@ impl Store {
         if sent > 0 {
             return Ok(true);
         }
-        // Recipients may be patterns, so this cannot be a plain equality test.
-        let mut stmt = self.conn.prepare("SELECT DISTINCT recipient FROM messages")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        for r in rows {
-            if addr_matches(&r?, addr) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        // Deliberately an equality test, NOT `addr_matches`. A wildcard recipient is how a
+        // broadcast reaches this address, so pattern-matching is correct for DELIVERY - but
+        // retention asks whether THIS address took part, and "someone addressed the whole
+        // machine once" is not evidence that it did. Matching patterns here meant a single
+        // historical `machine-b/*` froze every machine-b address, past and future, permanently
+        // unsweepable - the machine's registry could then only ever grow. Undelivered
+        // broadcast mail is protected by `has_pending` instead, which is the narrower thing
+        // that was actually worth protecting.
+        let addressed: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE recipient = ?1",
+            params![addr],
+            |r| r.get(0),
+        )?;
+        Ok(addressed > 0)
+    }
+
+    /// Does this address still hold mail nobody has read?
+    ///
+    /// Separate from `has_traffic` because the two answer different questions, and a broadcast is
+    /// where they come apart: receiving one is not participation, but sweeping an address that has
+    /// not read one yet still destroys a message. `retire` only *reports* what it strands, so the
+    /// prevention has to live in the candidate query.
+    fn has_pending(&self, addr: &str) -> Result<bool> {
+        Ok(!self.pending_for(addr)?.is_empty())
     }
 
     /// Registrations with no live socket that have not re-registered since `cutoff_ts`.
@@ -462,7 +494,11 @@ impl Store {
                 pid: r.get(5)?,
             })
         })?;
-        rows.collect()
+        let all: Vec<Registration> = rows.collect::<Result<Vec<_>>>()?;
+        // Same guard as the provisional path. `prune --days N` used to bypass it entirely, so a
+        // trafficked address could be retired in bulk and its mail stranded.
+        let keep = self.without_trafficked(all.iter().map(|r| r.addr.clone()).collect())?;
+        Ok(all.into_iter().filter(|r| keep.contains(&r.addr)).collect())
     }
 
     /// Does any registered address answer to this `to` pattern?
@@ -1033,19 +1069,92 @@ mod tests {
         );
     }
 
+    /// The `prune --days N` path bypassed the guard entirely - it had been added to
+    /// `stale_provisional` only. Found by dry-running prune against the LIVE broker, which listed a
+    /// trafficked address as sweepable. Both candidate queries now share one filter, so this asserts
+    /// the other one.
     #[test]
-    fn traffic_counts_when_the_address_only_received_and_only_via_a_wildcard() {
+    fn a_broadcast_alone_does_not_protect_an_address_from_sweeping() {
+        // A wildcard recipient means "everyone on that machine", so `addr_matches` is right for
+        // DELIVERY - but treating it as participation makes one historical `machine-b/*` broadcast
+        // protect every address that machine will ever have, forever. Retention asks a different
+        // question than delivery: did THIS address take part?
+        let s = store();
+        s.register(&reg("machine-a/only-broadcast")).unwrap();
+        let id = s.send(&msg("machine-a/sender", "machine-a/*", "broadcast")).unwrap();
+        s.ack("machine-a/only-broadcast", &id).unwrap();
+
+        let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
+        assert!(
+            stale.contains(&"machine-a/only-broadcast".to_string()),
+            "a broadcast it had already read froze it permanently: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn pending_mail_protects_an_address_even_when_it_arrived_by_broadcast() {
+        // The other half. The sweeper only REPORTS stranding, so whatever prevents it has to be
+        // in the candidate query. Narrowing participation without adding this would trade an
+        // over-broad guard for stranded mail.
+        let s = store();
+        s.register(&reg("machine-a/unread-broadcast")).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/*", "broadcast")).unwrap();
+
+        let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
+        assert!(
+            !stale.contains(&"machine-a/unread-broadcast".to_string()),
+            "offered up an address holding undelivered mail: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn the_age_based_prune_path_also_refuses_an_address_with_traffic() {
+        let s = store();
+        s.register(&reg("machine-a/participant")).unwrap();
+        s.register(&reg("machine-a/genuine-churn")).unwrap();
+        s.send(&msg("machine-a/other", "machine-a/participant", "traffic")).unwrap();
+
+        let stale = s.stale_registrations("2999-01-01T00:00:00.000Z").unwrap();
+        let addrs: Vec<String> = stale.into_iter().map(|r| r.addr).collect();
+        assert!(
+            !addrs.contains(&"machine-a/participant".to_string()),
+            "the age path offered up a trafficked address: {addrs:?}"
+        );
+        assert!(
+            addrs.contains(&"machine-a/genuine-churn".to_string()),
+            "the age path stopped returning genuine churn: {addrs:?}"
+        );
+    }
+
+    #[test]
+    fn a_broadcast_is_delivery_not_participation_but_still_protects_unread_mail() {
+        // This test used to assert the opposite - that a wildcard recipient counts as traffic -
+        // written while fixing `machine-b/agent-msg-bus.1956ec12`. Checking the broker afterwards
+        // showed that address had 1 sent and 3 EXACTLY-addressed messages, so the wildcard clause
+        // was never what saved it: the generalisation went past the evidence, and the cost was
+        // that one `machine-b/*` broadcast made every machine-b address unsweepable forever.
+        //
+        // What the incident actually needed is below - and the protection an unread broadcast
+        // deserves now comes from pending mail, which is the narrower true reason.
         let s = store();
         s.register(&reg("machine-a/sender")).unwrap();
         s.register(&reg("machine-a/quiet-receiver")).unwrap();
         s.send(&msg("machine-a/sender", "machine-a/*", "broadcast")).unwrap();
 
         assert!(
-            s.has_traffic("machine-a/quiet-receiver").unwrap(),
-            "a wildcard recipient did not count as traffic"
+            !s.has_traffic("machine-a/quiet-receiver").unwrap(),
+            "a broadcast was counted as this address participating"
         );
-        let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
-        assert!(!stale.contains(&"machine-a/quiet-receiver".to_string()));
+        assert!(
+            !s.stale_provisional("2999-01-01T00:00:00.000Z")
+                .unwrap()
+                .contains(&"machine-a/quiet-receiver".to_string()),
+            "offered up an address holding an unread broadcast"
+        );
+
+        // Exact addressing IS participation, which is what 1956ec12 had.
+        s.send(&msg("machine-a/sender", "machine-a/quiet-receiver", "direct")).unwrap();
+        assert!(s.has_traffic("machine-a/quiet-receiver").unwrap());
     }
 
     /// Retirement must report what it strands, at the store level, so no caller can be the quiet
