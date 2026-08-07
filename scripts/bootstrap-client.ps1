@@ -137,8 +137,11 @@ while ((Get-Date) -lt $deadline) {
 if ($healthy) {
     Write-Host "relay healthy: $healthy"
 } else {
-    Write-Warning "relay is NOT up on $Listen after 15s. Messages will not arrive until it is."
-    Write-Warning "Check: Get-ScheduledTaskInfo -TaskName '$taskName'"
+    # Correct about the fact, calm about the severity - the supervisor covers this unattended.
+    Write-Host "relay not up yet after 15s on $Listen." -ForegroundColor Yellow
+    Write-Host "  Usually fine: the task's 1-minute repetition trigger will start it." -ForegroundColor Yellow
+    Write-Host "  Investigate only if still down after ~2 minutes:" -ForegroundColor Yellow
+    Write-Host "    Get-ScheduledTaskInfo -TaskName '$taskName'" -ForegroundColor Yellow
 }
 & $exe peers
 Write-Host ''

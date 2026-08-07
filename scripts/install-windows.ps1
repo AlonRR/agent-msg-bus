@@ -120,8 +120,16 @@ while ((Get-Date) -lt $deadline) {
 if ($healthy) {
     Write-Host "relay healthy: $healthy"
 } else {
-    Write-Warning "relay did not come up on $Listen within 15s. Messages will not arrive until it does."
-    Write-Warning "Check: Get-ScheduledTaskInfo -TaskName '$taskName'"
+    # Right about the fact, deliberately calm about the severity. The earlier one-shot 3s check cried
+    # wolf; widening it to a 15s poll fixed the sampling but kept wording that read as "investigate",
+    # which sends the next person chasing a non-problem the supervisor handles unattended. A check
+    # that is correct and needlessly alarming still costs someone an investigation.
+    Write-Host "relay not up yet after 15s on $Listen." -ForegroundColor Yellow
+    Write-Host "  This is usually fine: the task's 1-minute repetition trigger will start it." -ForegroundColor Yellow
+    Write-Host "  A cold binary on a loaded machine can simply take longer than the poll." -ForegroundColor Yellow
+    Write-Host "  Investigate only if it is still down after ~2 minutes:" -ForegroundColor Yellow
+    Write-Host "    Get-ScheduledTaskInfo -TaskName '$taskName'" -ForegroundColor Yellow
+    Write-Host "    curl http://$Listen/health" -ForegroundColor Yellow
 }
 
 Write-Host ''
