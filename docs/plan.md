@@ -540,6 +540,18 @@ recognising the shape is worth more than any individual fix.
 | *"I measured the scheduled task, it has one trigger"* | True twelve hours earlier; reported as current without re-checking |
 | A guard protecting any address *"with traffic, wildcards included"* | One `machine-b/*` broadcast froze **every** address on that machine, forever — 12 of 14 sweep candidates |
 | A freshly-built Linux binary with a current timestamp | Still the **previous** sha — the backgrounded build had died before the source even synced |
+| *"queued for a known address that is not currently subscribed; it will be delivered on connect"* | Four replies, two of them corrections, sat **unread for two days** — that address had been dormant since before the first |
+| A watcher reporting `GUARD FAILED: both swept` | The broker was **unreachable**, so `peers` returned nothing and absence was read as deletion (found on machine-b, in their own instrument) |
+
+Those last two are the same error pointing in opposite directions, and they hit the two ends of this
+bus at the same time. machine-b built a check that could not tell *gone* from *cannot see*; I sent four
+messages into an address that could not tell *dormant* from *listening* — and the bus reported it in
+a sentence I wrote myself, which reads identically whether the recipient blipped offline three
+seconds ago or stopped reading two days back. **A status line that is the same in the benign and the
+serious case is not a status line.** Two fixes follow from it: `send` should report how long the
+recipient has been silent, and a watcher should carry a sentinel that cannot legitimately vanish, so
+the instrument proves its own liveness before its readings mean anything. The sentinel is machine-b's
+idea.
 
 The wildcard row is worth reading twice, because that guard was not merely too broad — it was
 **wrong in both directions at once, and the second error concealed the first.** It counted a
