@@ -210,7 +210,7 @@ fn main() {
             }).unwrap_or_else(|| "127.0.0.1:9451".to_string());
             watch(&relay, addr)
         }
-        Cmd::Whoami => whoami(),
+        Cmd::Whoami => whoami(&cli),
         _ => run_client(&cli),
     }
 }
@@ -220,7 +220,7 @@ async fn watch(relay: &str, addr: &str) -> ! {
     agent_msg_bus::watch::run(relay, addr).await
 }
 
-fn whoami() {
+fn whoami(cli: &Cli) {
     let Some(cfg) = agent_msg_bus::hook::load_config() else {
         eprintln!(
             "agent-msg-bus: no config at {}",
@@ -231,14 +231,29 @@ fn whoami() {
     let session = std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default();
     let cwd = std::env::current_dir().unwrap_or_default().to_string_lossy().to_string();
     let addr = agent_msg_bus::hook::derive_address(&cfg.machine, &cwd, &session);
+
+    // Ask the broker whether this derived address is real BEFORE handing out a subscribe URL for it.
+    // An unchecked URL is how a session gets a silently dead inbox: the relay accepts the socket,
+    // `peers` reports it live, and nothing is ever sent there because nobody knows the address.
+    // Use the RESOLVED connection, not cfg directly - otherwise --url is silently ignored here
+    // while working everywhere else, which is its own small version of this bug.
+    let (url, token) = resolve_conn(cli);
+    let peers = agent_msg_bus::client::Client::new(&url, &token)
+        .peers(true)
+        .map_err(|e| e.to_string());
+    let status = agent_msg_bus::identity::classify(&addr, &peers);
+
     println!("address : {addr}");
-    println!("broker  : {}", cfg.url);
+    println!("broker  : {url}");
     println!("relay   : {}", cfg.relay);
     println!(
         "subscribe: ws://{}/sub?addr={}",
         cfg.relay,
         agent_msg_bus::client::urlencode(&addr)
     );
+    for line in agent_msg_bus::identity::advisory(&addr, &status) {
+        eprintln!("{line}");
+    }
 }
 
 #[tokio::main]
@@ -384,6 +399,16 @@ fn run_client(cli: &Cli) {
                 },
                 None => body.clone(),
             };
+            // Warn, never refuse: an unknown `--to` already only warns, three sessions are live on
+            // this bus, and a send that starts rejecting mid-flight is a worse failure than the one
+            // being fixed. The cost of a bad `--from` is not this message - it is every reply to it.
+            let peers = c.peers(true).map_err(|e| e.to_string());
+            for line in agent_msg_bus::identity::advisory(
+                from,
+                &agent_msg_bus::identity::classify(from, &peers),
+            ) {
+                eprintln!("{line}");
+            }
             c.send(from, to, kind, subject, &resolved, reply_to)
                 .map(|id| println!("{id}"))
                 .map_err(Into::into)

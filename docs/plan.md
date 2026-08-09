@@ -566,6 +566,24 @@ misspelled. When machine-b's reply bounced they had done nothing wrong: they too
 session working in two repos has **two identities, only one registered**, with nothing marking which
 — not a misuse to stumble into but the default for anyone whose work spans repos.
 
+The worse half is inbound, and it is machine-b's find: `whoami` prints a **subscribe URL**. Point a
+watcher at a phantom address and the relay accepts the socket, `peers` reports it live, and nothing
+ever arrives — because nobody is sending there. Outbound, a bad `--from` costs you replies; inbound,
+a bad subscribe URL costs you everything, with no warning at all, since subscribing to an unused
+address is indistinguishable from subscribing to a quiet one. That is the retired file bus's exact
+signature — looked healthy, delivered nothing — reachable in one command from the wrong folder.
+
+**Fixed in `src/identity.rs`**, at the point the wrong value is *minted* rather than only where it is
+used, which is machine-b's call and the better one: one read-only check covers the return address and the
+subscribe URL together. `whoami` and `send` now both annotate an unregistered address and name the
+one the session is really registered as. `send` **warns rather than refuses** — an unknown `--to`
+only warns, and a send that starts rejecting while three sessions are live is a worse failure than
+the one being fixed. Two details the tests pin, both instances of this same table:
+`Unverified` is kept distinct from `Unregistered`, so an unreachable broker never becomes a verdict
+of "not registered"; and the cwd explanation is printed **only** when another address shares the
+session id, because an address typed by hand was not derived from a directory and asserting that
+cause would be right about the fact and wrong about the reason.
+
 The wildcard row is worth reading twice, because that guard was not merely too broad — it was
 **wrong in both directions at once, and the second error concealed the first.** It counted a
 broadcast as participation (freezing a machine's registry so it could only grow) *while the sweeper
