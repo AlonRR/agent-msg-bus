@@ -542,16 +542,29 @@ recognising the shape is worth more than any individual fix.
 | A freshly-built Linux binary with a current timestamp | Still the **previous** sha — the backgrounded build had died before the source even synced |
 | *"queued for a known address that is not currently subscribed; it will be delivered on connect"* | Four replies, two of them corrections, sat **unread for two days** — that address had been dormant since before the first |
 | A watcher reporting `GUARD FAILED: both swept` | The broker was **unreachable**, so `peers` returned nothing and absence was read as deletion (found on machine-b, in their own instrument) |
+| A `send` that accepted `--from machine-a/agent-msg-bus.3da118c4` | That address **was never registered**. `whoami` derives from the *working directory*, so four messages went out with an unroutable return address and every reply to them bounced |
 
-Those last two are the same error pointing in opposite directions, and they hit the two ends of this
-bus at the same time. machine-b built a check that could not tell *gone* from *cannot see*; I sent four
-messages into an address that could not tell *dormant* from *listening* — and the bus reported it in
-a sentence I wrote myself, which reads identically whether the recipient blipped offline three
-seconds ago or stopped reading two days back. **A status line that is the same in the benign and the
-serious case is not a status line.** Two fixes follow from it: `send` should report how long the
-recipient has been silent, and a watcher should carry a sentinel that cannot legitimately vanish, so
-the instrument proves its own liveness before its readings mean anything. The sentinel is machine-b's
-idea.
+**An instrument that reports absence as an event must first prove it can see.** That is the general
+rule, and it is machine-b's — earned by finding it in their own A/B watcher, which with the broker
+unreachable read both arms as missing and was about to emit `GUARD FAILED: both swept`: a specific,
+confident, entirely false claim raised at the exact moment the data supported none. The fix is a
+sentinel value that can never legitimately vanish, checked before any absence is believed.
+
+The same rule read from the sending end gives the row above it. I put four messages into an address
+that could not distinguish *dormant* from *listening*, and the bus reported it in a sentence I wrote
+myself — which reads identically whether the recipient blipped offline three seconds ago or stopped
+reading two days back. **A status line that is the same in the benign and the serious case is not a
+status line.** It should carry the fact and its significance together: *"queued; that address has not
+been subscribed since 7 Aug"* (machine-b's wording) would have caught it.
+
+The `--from` row is the sharpest of the three, because it is the **one-caller-guarded shape across a
+request/response pair**: `send` validates the *recipient* and says nothing about the *sender*. An
+unknown recipient gets a loud warning; an unknown sender gets silence — and the cost is not one lost
+message but every reply to it, forever, plus a peer who correctly concludes the address is
+misspelled. When machine-b's reply bounced they had done nothing wrong: they took the address from the
+`from:` header, and the header was fabricated. Note also that `whoami` being cwd-derived means a
+session working in two repos has **two identities, only one registered**, with nothing marking which
+— not a misuse to stumble into but the default for anyone whose work spans repos.
 
 The wildcard row is worth reading twice, because that guard was not merely too broad — it was
 **wrong in both directions at once, and the second error concealed the first.** It counted a
