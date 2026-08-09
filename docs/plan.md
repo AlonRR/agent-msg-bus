@@ -608,6 +608,28 @@ The working rule that came out of it, from a session that stated it better than 
 *a setting describes intent, only a kill measures behaviour* — and **"I measured this" decays into
 "I remember measuring this" faster than it feels like it should.**
 
+### The one sentence, if the table gets only one
+
+Every row above is the same mechanism: **something reported the right-looking thing for a reason
+unrelated to the thing being reported.** The 3-second health check, `RestartCount`, the provisional
+clock, `pushed_to: 0`, the wildcard traffic guard — each was correct on its face and correct for the
+wrong reason, which is why re-reading them never helped and re-running them always did.
+
+The sharpest instance is the smallest, and it is a *test*. Verifying the unreachable-broker path with
+`--url http://127.0.0.1:1 whoami` printed a plausible warning and looked like a pass. It was not:
+`whoami` read its config directly and ignored `--url`, so the command had queried the **live** broker
+and correctly reported that address as unregistered. Right output, right verdict, and **the code
+under test never executed.**
+
+> **A test that cannot fail is indistinguishable from a test that passes.** The only thing separating
+> them is whether you have checked that its failure path can actually fail.
+
+That is machine-b's formulation, and it is stronger than the sentinel rule it grew out of, for the reason
+they gave: a check that fails loudly gets caught eventually — a check that *succeeds* for the wrong
+reason is load-bearing forever. It generalises the whole table, and it is the argument for the two
+habits this project keeps rediscovering: run the failure path deliberately before trusting the
+success path, and disable the guard to confirm the tests notice.
+
 ---
 
 ## Known limitations (accepted for v1, written down so they are not rediscovered as surprises)
