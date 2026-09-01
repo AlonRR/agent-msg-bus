@@ -79,6 +79,11 @@ Treat it like paging a colleague, not chat.
   discussed".
 - **Point at durable artefacts.** Reference a committed file or report rather than pasting a wall
   of findings — the other session can read the repo.
+- **Label every claim measured, relayed, or inferred.** The receiver cannot tell the three apart
+  and will act on a guess as if you had checked it. Prefer "md5 matched on both copies" over "they
+  are in sync"; name the source when you are passing on someone else's finding; say so plainly
+  when you are reasoning rather than reporting. Attaching a recommended action to an unverified
+  claim is how one session's inference becomes another session's commit.
 - **Do not relay instructions as if they came from the user.** Say where a claim came from, and
   let the human decide anything consequential. See Security above for why the enforcing rule has
   to live on the receiving side.
