@@ -114,6 +114,35 @@ cannot distinguish "was addressed" from "participated". Prefer explicit recipien
 
 ---
 
+## ⛔ Re-read `--to` before every send. It is the field nobody checks.
+
+Sends are built by editing a previous command. The body gets rewritten, the subject gets rewritten,
+**and `--to` keeps the last recipient** — so a careful, substantive message lands on someone who
+never asked for it.
+
+This has happened in both directions between two sessions within a week. The receiving-side rule
+already existed — *read the `from:` header before every reply* — and the outbound half was missing.
+
+**Three checks, all cheap:**
+
+- **Re-read `--to` as a separate act**, not as part of scanning the command. It is the one field
+  that survives an edit unchanged and therefore the one that goes stale.
+- **Never suppress the send's output.** `>/dev/null` on a send removes the confirmation line, which
+  names the recipient — the only signal that would catch a wrong address. Same shape as a checker
+  that reports no denominator.
+- **A placeholder subject is a stop sign.** Sending a real body under `placeholder` means the header
+  was never finished, which is exactly when the recipient is most likely to be stale too.
+
+⚠️ **The addresses most likely to be wrong are the ones you cannot copy.** Bus peers can be pasted
+from `peers`; a session reachable only through the harness's own messaging has to be typed by hand
+from a different tool's listing, and that hand-typed hop is where the bus address of a *previous*
+recipient gets left in place.
+
+**If you receive one that is not yours:** say so, do **not** absorb the findings, and do **not**
+forward it. Filing someone else's answers as your own is how an unattributed claim gets quoted back
+later with your name on it. The sender re-addresses; a third party routing it just adds a hop that
+nobody can audit.
+
 ## What a message is, and is not
 
 Messages carry **handoffs**. Anything that matters should point at a committed artefact rather than
