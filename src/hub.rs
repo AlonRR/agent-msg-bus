@@ -78,20 +78,46 @@ impl Hub {
         self.conns.lock().unwrap().contains_key(addr)
     }
 
-    /// Push a message to every live address it is addressed to, except the sender.
+    /// Push a message to a caller-chosen set of live addresses, except the sender.
+    ///
+    /// The set is decided by the caller rather than here, because deciding it needs the store: a
+    /// socket holds ONE address, but a mailbox can answer to several, so after a migration the
+    /// successor holds the new name while the message is addressed to a name it inherited. Matching
+    /// `msg.to` against the socket's own address - which is what this did - meant a live successor
+    /// was never pushed to at all. The message still arrived, on that session's next reconnect
+    /// replay, which is why the symptom looked like a merely cosmetic status line on the sending
+    /// side; what had actually happened is that push delivery quietly degraded into polling for
+    /// every migrated address, and waking an idle session is the whole point of this bus.
+    ///
+    /// Resolving in the caller also keeps the store lock from ever being taken while the hub lock
+    /// is held, which is the opposite of the order every other path uses.
     ///
     /// Best-effort by design: anything not delivered here is still in the store and replays on the
     /// recipient's next connect. Delivery is never assumed from a successful push - only from an
     /// explicit ack.
-    pub fn deliver(&self, msg: &Message) -> usize {
+    pub fn deliver_to(&self, msg: &Message, targets: &[String]) -> usize {
         let conns = self.conns.lock().unwrap();
         let mut sent = 0;
-        for (addr, (_, tx)) in conns.iter() {
-            if addr != &msg.from && addr_matches(&msg.to, addr) && tx.send(msg.clone()).is_ok() {
-                sent += 1;
+        for addr in targets {
+            if addr == &msg.from {
+                continue;
+            }
+            if let Some((_, tx)) = conns.get(addr) {
+                if tx.send(msg.clone()).is_ok() {
+                    sent += 1;
+                }
             }
         }
         sent
+    }
+
+    /// Live addresses this message would reach if aliases did not exist.
+    ///
+    /// Kept for callers with no store to consult - the relay's own fan-out - and used by
+    /// `deliver_to`'s callers only as a starting set.
+    pub fn matching(&self, pattern: &str) -> Vec<String> {
+        let conns = self.conns.lock().unwrap();
+        conns.keys().filter(|a| addr_matches(pattern, a)).cloned().collect()
     }
 }
 

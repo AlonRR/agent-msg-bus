@@ -456,10 +456,17 @@ fn run_client(cli: &Cli) {
                 println!("{to} now also answers to {from}");
                 println!("  adopted cursor : {}", if cursor.is_empty() { "(beginning)" } else { &cursor });
                 println!("  pending now    : {pending}");
+                if cursor.is_empty() {
+                    println!("  note: this mailbox starts from the beginning, so mail already read");
+                    println!("        under another name will be delivered again. A replayed frame");
+                    println!("        carries \"replay\": true. Acking under either name now advances");
+                    println!("        the same cursor.");
+                }
                 if pending == 0 {
                     println!("  note: nothing was waiting for {from} — the migration is still in");
                     println!("        effect for anything sent to that name from now on.");
                 }
+                println!("{to} is now a registered address; re-arm your subscription against it.");
             })
             .map_err(Into::into),
         Cmd::Pin { addr } => match agent_msg_bus::hook::set_pin(addr) {

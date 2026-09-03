@@ -166,7 +166,25 @@ async fn send(
         }
     };
 
-    let pushed = st.hub.deliver(&stored);
+    // Which live sockets should be pushed to? Not simply the ones whose own address matches `to`:
+    // after a migration the successor's socket holds the NEW name while the message is addressed to
+    // a name it inherited, so the match has to be made against every name the mailbox answers to.
+    // See `Hub::deliver_to` for what the narrower version cost.
+    let targets: Vec<String> = {
+        let live = st.hub.live();
+        let store = st.store.lock().unwrap();
+        live.into_iter()
+            .filter(|addr| {
+                store
+                    .names_for(addr)
+                    .map(|names| {
+                        names.iter().any(|n| crate::store::addr_matches(&stored.to, n))
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+    };
+    let pushed = st.hub.deliver_to(&stored, &targets);
 
     // `pushed_to: 0` is ambiguous, and it is the only number a sender sees. It means "nobody live
     // matched", which covers three very different situations: the recipient is offline and the
@@ -627,6 +645,25 @@ async fn peers(
             regs.sort_by(|a, b| a.addr.cmp(&b.addr));
         }
     }
+
+    // A LIVE SOCKET IS MEMBERSHIP EVEN WHEN NOTHING IN THE REGISTRY BACKS IT. The repair above can
+    // only promote a row that already exists; an address with no row at all — which `migrate` used
+    // to produce, and which a forget/prune race can still produce — stayed absent from the roster
+    // while subscribed and draining mail. Anything holding a socket is listed, row or no row.
+    for addr in st.hub.live() {
+        if !regs.iter().any(|r| r.addr == addr) {
+            regs.push(crate::store::Registration {
+                machine: addr.split('/').next().unwrap_or_default().to_string(),
+                addr,
+                session_id: String::new(),
+                repo: String::new(),
+                cwd: String::new(),
+                pid: 0,
+            });
+        }
+    }
+    regs.sort_by(|a, b| a.addr.cmp(&b.addr));
+
     let known = regs
         .into_iter()
         .map(|r| KnownPeer {

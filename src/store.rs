@@ -209,15 +209,72 @@ impl Store {
         Ok(id)
     }
 
-    /// Every name `addr` answers to: itself, plus any alias pointing at it.
+    /// Every name `addr` answers to: itself, plus every alias that resolves to it.
+    ///
+    /// Transitive, because migrations chain. `a -> b` then `b -> c` leaves mail sent to `a` owned
+    /// by `c`, and a single-level lookup strands it at `b`, which by then has no session behind it.
+    /// Membership is checked before each push, so a cycle terminates instead of walking forever.
     pub fn names_for(&self, addr: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT alias FROM aliases WHERE target = ?1")?;
-        let rows = stmt.query_map(params![addr], |r| r.get::<_, String>(0))?;
         let mut names = vec![addr.to_string()];
-        for r in rows {
-            names.push(r?);
+        let mut i = 0;
+        while i < names.len() {
+            let cur = names[i].clone();
+            let mut stmt = self.conn.prepare("SELECT alias FROM aliases WHERE target = ?1")?;
+            let rows = stmt.query_map(params![cur], |r| r.get::<_, String>(0))?;
+            for r in rows {
+                let alias = r?;
+                if !names.contains(&alias) {
+                    names.push(alias);
+                }
+            }
+            i += 1;
         }
         Ok(names)
+    }
+
+    /// The address that actually owns this mailbox: follow the alias chain to its end.
+    ///
+    /// One mailbox, one cursor. Everything that reads or advances a reading position resolves
+    /// through here first, so an ack under a predecessor's name advances the same cursor a read
+    /// under the successor's name consults. Without it the predecessor kept a cursor nothing could
+    /// ever move again, and went on reporting mail the mailbox had already acked.
+    ///
+    /// A cycle — `migrate a -> b` then `migrate b -> a`, which is operator error — stops at the
+    /// first repeat rather than hanging the broker.
+    pub fn mailbox_of(&self, addr: &str) -> Result<String> {
+        let mut cur = addr.to_string();
+        let mut seen = vec![cur.clone()];
+        loop {
+            let next: Option<String> = self
+                .conn
+                .query_row("SELECT target FROM aliases WHERE alias = ?1", params![cur], |r| {
+                    r.get(0)
+                })
+                .ok();
+            match next {
+                Some(t) if !seen.contains(&t) => {
+                    seen.push(t.clone());
+                    cur = t;
+                }
+                _ => return Ok(cur),
+            }
+        }
+    }
+
+    /// Has anything ever been addressed to this exact name, including by wildcard?
+    ///
+    /// Deliberately does NOT consider aliases: its only caller asks about a migration's successor
+    /// *after* the alias has been written, and counting the predecessor's mail there would answer
+    /// the wrong question. Paid once per migration, never per delivery.
+    fn any_mail_addressed_to_name(&self, name: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT recipient FROM messages")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in rows {
+            if addr_matches(&r?, name) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Migrate a mailbox: `to` starts answering to `from` as well, and inherits its reading
@@ -238,15 +295,65 @@ impl Store {
             "INSERT OR REPLACE INTO aliases(alias, target, created_at) VALUES (?1, ?2, ?3)",
             params![from, to, now],
         )?;
-        let from_cursor: String = self
+        let from_cursor: Option<String> = self
             .conn
             .query_row("SELECT up_to FROM cursors WHERE addr = ?1", params![from], |r| r.get(0))
-            .unwrap_or_default();
-        let to_cursor: String = self
+            .ok();
+        let to_cursor: Option<String> = self
             .conn
             .query_row("SELECT up_to FROM cursors WHERE addr = ?1", params![to], |r| r.get(0))
-            .unwrap_or_default();
-        let adopted = if from_cursor < to_cursor { from_cursor } else { to_cursor };
+            .ok();
+
+        let adopted = match (from_cursor, to_cursor) {
+            (Some(f), Some(t)) => {
+                if f < t {
+                    f
+                } else {
+                    t
+                }
+            }
+            // ABSENT IS NOT THE SAME AS "AT THE BEGINNING", and reading it that way redelivered the
+            // predecessor's entire acked history on every migration into a fresh address. A missing
+            // cursor came back as the empty string, which sorts before every id, so the minimum was
+            // always the beginning — and a migrating session cannot tell a replay from something it
+            // genuinely missed. A successor with no mailbox of its own has nothing to preserve, so
+            // it takes the predecessor's position instead.
+            //
+            // The exception is mail already addressed to the successor's own name: there the
+            // beginning is the only adoption that cannot strand it.
+            (Some(f), None) => {
+                if self.any_mail_addressed_to_name(to)? {
+                    String::new()
+                } else {
+                    f
+                }
+            }
+            (None, Some(t)) => t,
+            (None, None) => String::new(),
+        };
+
+        // A migration is a statement that `to` is a real address, so give it a registry row. Without
+        // one it has no `peers` entry at all, and a session that migrated and then subscribed was
+        // left draining its mail while every other session read the roster and saw only the
+        // predecessor, offline — this project's signature failure, healthy-looking and disconnected.
+        //
+        // Never overwrite an existing row: one written by a real SessionStart hook carries a repo
+        // and cwd that this cannot know.
+        let registered: bool = self
+            .conn
+            .query_row("SELECT 1 FROM registry WHERE addr = ?1", params![to], |_| Ok(true))
+            .unwrap_or(false);
+        if !registered {
+            self.register(&Registration {
+                addr: to.to_string(),
+                session_id: String::new(),
+                machine: to.split('/').next().unwrap_or_default().to_string(),
+                repo: String::new(),
+                cwd: String::new(),
+                pid: 0,
+            })?;
+        }
+
         self.conn.execute(
             "INSERT INTO cursors(addr, up_to) VALUES (?1, ?2)
              ON CONFLICT(addr) DO UPDATE SET up_to = ?2",
@@ -265,10 +372,14 @@ impl Store {
 
     /// Undelivered messages for `addr`, oldest first. Idempotent until acked.
     pub fn pending_for(&self, addr: &str) -> Result<Vec<Message>> {
-        let names = self.names_for(addr)?;
+        // Resolve to the mailbox first. An aliased name has no reading position of its own any
+        // more, and consulting the stale one it kept is what left a migrated-from address reporting
+        // mail the mailbox had already acked, with no ack able to move the number.
+        let owner = self.mailbox_of(addr)?;
+        let names = self.names_for(&owner)?;
         let cursor: String = self
             .conn
-            .query_row("SELECT up_to FROM cursors WHERE addr = ?1", params![addr], |r| r.get(0))
+            .query_row("SELECT up_to FROM cursors WHERE addr = ?1", params![owner], |r| r.get(0))
             .unwrap_or_default();
 
         let mut stmt = self.conn.prepare(
@@ -277,7 +388,7 @@ impl Store {
               WHERE id > ?1 AND sender <> ?2
               ORDER BY id ASC",
         )?;
-        let rows = stmt.query_map(params![cursor, addr], |r| {
+        let rows = stmt.query_map(params![cursor, owner], |r| {
             Ok(Message {
                 id: r.get(0)?,
                 ts: r.get(1)?,
@@ -329,11 +440,16 @@ impl Store {
     }
 
     /// Advance the cursor. Never moves backwards.
+    ///
+    /// Resolved to the mailbox, so an ack under any name it answers to advances the one cursor it
+    /// has. A session acking under its predecessor's name would otherwise write to a cursor nothing
+    /// consults, and be shown the same mail on every reconnect.
     pub fn ack(&self, addr: &str, up_to: &str) -> Result<()> {
+        let owner = self.mailbox_of(addr)?;
         self.conn.execute(
             "INSERT INTO cursors(addr, up_to) VALUES (?1, ?2)
              ON CONFLICT(addr) DO UPDATE SET up_to = ?2 WHERE ?2 > cursors.up_to",
-            params![addr, up_to],
+            params![owner, up_to],
         )?;
         Ok(())
     }
@@ -589,11 +705,16 @@ impl Store {
     /// Addresses on the bus. By default only those that have actually joined — `peers` answers
     /// "who is here", and an address that has never subscribed is not.
     pub fn peers(&self, include_provisional: bool) -> Result<Vec<Registration>> {
+        // An address that is now only an alias is not a second participant — it is another name for
+        // one mailbox, and it already appears on that mailbox's row under `aliases`. Left in, it
+        // shows up as a session of its own, permanently offline, carrying a `pending` count nothing
+        // drains; that row is exactly what a peer reads to decide whether the session is reachable.
         let sql = if include_provisional {
-            "SELECT addr, session_id, machine, repo, cwd, pid FROM registry ORDER BY addr"
+            "SELECT addr, session_id, machine, repo, cwd, pid FROM registry
+              WHERE addr NOT IN (SELECT alias FROM aliases) ORDER BY addr"
         } else {
             "SELECT addr, session_id, machine, repo, cwd, pid FROM registry
-              WHERE provisional = 0 ORDER BY addr"
+              WHERE provisional = 0 AND addr NOT IN (SELECT alias FROM aliases) ORDER BY addr"
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |r| {
@@ -1178,5 +1299,146 @@ mod tests {
         s.register(&reg("machine-b/notes")).unwrap();
         let peers = s.peers(true).unwrap();
         assert_eq!(peers.len(), 2);
+    }
+
+    // ---- migration: a successor is a mailbox, not a second participant -----
+    //
+    // These encode findings reported from a live session on 3 Sep 2026, which did a legitimate
+    // address change after its cwd moved and was left receiving mail while every peer's `peers`
+    // output said it was offline. That is this project's signature failure shape: healthy-looking
+    // and disconnected.
+
+    /// `migrate` wrote an alias and a cursor and nothing else, so the successor had no registry
+    /// row. It was subscribed and draining its backlog while `peers` listed only the OLD address,
+    /// offline - a peer deciding whether it was reachable would have concluded no.
+    #[test]
+    fn migrate_gives_the_successor_a_registration_of_its_own() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        s.migrate("machine-a/old", "machine-a/new").unwrap();
+        let addrs: Vec<String> = s.peers(true).unwrap().into_iter().map(|r| r.addr).collect();
+        assert!(
+            addrs.contains(&"machine-a/new".to_string()),
+            "the successor has no registry row, so no peer can see it: {addrs:?}"
+        );
+    }
+
+    /// Once an address is an alias it is not a separate participant - it is a second name for one
+    /// mailbox. Listing it as its own row shows the same session twice, one of them permanently
+    /// "offline", which is the line a peer reads to decide whether to write to it.
+    #[test]
+    fn peers_does_not_list_an_address_that_is_now_only_an_alias() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        s.register(&reg("machine-a/new")).unwrap();
+        s.migrate("machine-a/old", "machine-a/new").unwrap();
+        let addrs: Vec<String> = s.peers(true).unwrap().into_iter().map(|r| r.addr).collect();
+        assert_eq!(
+            addrs,
+            vec!["machine-a/new".to_string()],
+            "the predecessor is still listed as a peer in its own right: {addrs:?}"
+        );
+    }
+
+    /// The count shown against an aliased name must be the mailbox's, not a tally frozen against a
+    /// cursor nothing advances any more. Acks land on the target, so the alias's own cursor never
+    /// moves again and its `pending` is stuck at whatever it was on the day of the migration.
+    #[test]
+    fn pending_for_an_alias_tracks_the_mailbox_it_now_belongs_to() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        let id = s.send(&msg("machine-a/sender", "machine-a/old", "one")).unwrap();
+        s.register(&reg("machine-a/new")).unwrap();
+        s.migrate("machine-a/old", "machine-a/new").unwrap();
+        s.ack("machine-a/new", &id).unwrap();
+        assert_eq!(s.pending_for("machine-a/new").unwrap().len(), 0);
+        assert_eq!(
+            s.pending_for("machine-a/old").unwrap().len(),
+            0,
+            "the predecessor still reports mail the mailbox has already acked"
+        );
+    }
+
+    /// An ack under any name the mailbox answers to advances the one cursor. Otherwise a session
+    /// that acks under its old name writes to a cursor nothing reads, and the mail replays forever.
+    #[test]
+    fn an_ack_under_a_predecessors_name_advances_the_mailbox_cursor() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        let id = s.send(&msg("machine-a/sender", "machine-a/old", "one")).unwrap();
+        s.register(&reg("machine-a/new")).unwrap();
+        s.migrate("machine-a/old", "machine-a/new").unwrap();
+        s.ack("machine-a/old", &id).unwrap();
+        assert_eq!(
+            s.pending_for("machine-a/new").unwrap().len(),
+            0,
+            "an ack under the old name did not reach the mailbox it now belongs to"
+        );
+    }
+
+    /// A successor that has never had a mailbox of its own must not force the predecessor's whole
+    /// history to be redelivered. An absent cursor sorts as the empty string, which is the OLDEST
+    /// possible position, so `min(from, to)` always chose the beginning and every already-acked
+    /// message replayed - and a migrating session cannot tell a replay from something it missed.
+    #[test]
+    fn migrating_into_a_fresh_address_does_not_replay_already_acked_mail() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        let id = s.send(&msg("machine-a/sender", "machine-a/old", "read and acked")).unwrap();
+        s.ack("machine-a/old", &id).unwrap();
+        let (pending, adopted) = s.migrate("machine-a/old", "machine-a/fresh").unwrap();
+        assert_eq!(pending, 0, "the predecessor's acked mail was redelivered to the successor");
+        assert_eq!(adopted, id, "adopted the beginning instead of the predecessor's position");
+    }
+
+    /// The exception to the rule above: if mail was already addressed to the successor's own name
+    /// before the migration, the beginning is the only adoption that cannot strand it.
+    #[test]
+    fn a_successor_with_mail_of_its_own_still_adopts_the_beginning() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        let id =
+            s.send(&msg("machine-a/sender", "machine-a/old", "acked on the old name")).unwrap();
+        s.ack("machine-a/old", &id).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/fresh", "waiting under the new name")).unwrap();
+        s.migrate("machine-a/old", "machine-a/fresh").unwrap();
+        let subjects: Vec<String> =
+            s.pending_for("machine-a/fresh").unwrap().into_iter().map(|m| m.subject).collect();
+        assert!(
+            subjects.contains(&"waiting under the new name".to_string()),
+            "the successor's own unread mail was skipped: {subjects:?}"
+        );
+    }
+
+    /// Migrating twice chains the aliases. Resolving only one level strands mail sent to the first
+    /// name at the second, which by then has no session behind it.
+    #[test]
+    fn a_chain_of_migrations_still_delivers_to_the_final_mailbox() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/a", "for the first name")).unwrap();
+        s.register(&reg("machine-a/b")).unwrap();
+        s.migrate("machine-a/a", "machine-a/b").unwrap();
+        s.register(&reg("machine-a/c")).unwrap();
+        s.migrate("machine-a/b", "machine-a/c").unwrap();
+        let subjects: Vec<String> =
+            s.pending_for("machine-a/c").unwrap().into_iter().map(|m| m.subject).collect();
+        assert!(
+            subjects.contains(&"for the first name".to_string()),
+            "mail to the first name never reached the final mailbox: {subjects:?}"
+        );
+    }
+
+    /// A cycle is operator error, not a reason to hang the broker. `migrate a -> b` followed by
+    /// `migrate b -> a` must terminate rather than walk the alias table forever.
+    #[test]
+    fn a_circular_migration_terminates_instead_of_looping() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.register(&reg("machine-a/b")).unwrap();
+        s.migrate("machine-a/a", "machine-a/b").unwrap();
+        s.migrate("machine-a/b", "machine-a/a").unwrap();
+        let _ = s.pending_for("machine-a/a").unwrap();
+        let _ = s.names_for("machine-a/b").unwrap();
     }
 }

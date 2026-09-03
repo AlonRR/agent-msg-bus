@@ -462,3 +462,116 @@ async fn peers_reports_live_state_from_the_socket_not_a_guess() {
     let b = p.known.iter().find(|k| k.addr == "machine-a/b").unwrap();
     assert!(!b.live, "an address with no socket was reported live");
 }
+
+/// Mail addressed to a migrated-FROM name must be PUSHED to the successor's live socket, not left
+/// to surface whenever that session next happens to reconnect.
+///
+/// The hub matched `msg.to` against the address a socket holds, and nothing resolved the alias — so
+/// a live successor was never pushed to. The message did arrive eventually, on the next reconnect
+/// replay, which is why this reads as a merely cosmetic status-line bug from the sending side. It
+/// is not: waking an idle session is the entire reason this bus exists, and for every migrated
+/// address that guarantee had quietly degraded to polling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_to_a_migrated_from_name_is_pushed_to_the_live_successor() {
+    let h = start().await;
+
+    let c2 = h.client();
+    blocking(move || {
+        c2.register("machine-a/sender", "s0", "machine-a", "r", "/x", 1).unwrap();
+        c2.register("machine-a/old", "s1", "machine-a", "r", "/x", 2).unwrap();
+        c2.register("machine-a/new", "s2", "machine-a", "r", "/x", 3).unwrap();
+        c2.migrate("machine-a/old", "machine-a/new").unwrap();
+    })
+    .await;
+
+    let mut sock = connect(&h, "machine-a/new").await;
+    tokio::time::sleep(Duration::from_millis(100)).await; // let the claim land before sending
+
+    let c = h.client();
+    let out = blocking(move || {
+        c.send("machine-a/sender", "machine-a/old", "fyi", "to the old name", "body", "").unwrap()
+    })
+    .await;
+
+    let got = next_text(&mut sock, Duration::from_secs(5))
+        .await
+        .expect("nothing was pushed to the live successor");
+    assert_eq!(got["subject"], "to the old name");
+    assert!(!out.is_empty());
+}
+
+/// ...and the sender is told so. `pushed_to: 0` plus "it will be delivered on connect" is the
+/// opposite of the truth when the alias target is subscribed, and that sentence is exactly what a
+/// caller reads to decide whether a message landed or is sitting in a queue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_sender_is_told_a_message_to_an_aliased_name_was_pushed() {
+    let h = start().await;
+
+    let c2 = h.client();
+    blocking(move || {
+        c2.register("machine-a/sender", "s0", "machine-a", "r", "/x", 1).unwrap();
+        c2.register("machine-a/old", "s1", "machine-a", "r", "/x", 2).unwrap();
+        c2.register("machine-a/new", "s2", "machine-a", "r", "/x", 3).unwrap();
+        c2.migrate("machine-a/old", "machine-a/new").unwrap();
+    })
+    .await;
+
+    let _sock = connect(&h, "machine-a/new").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let base = h.base.clone();
+    let body = blocking(move || {
+        let raw: serde_json::Value = ureq::post(&format!("{base}/send"))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(serde_json::json!({
+                "from": "machine-a/sender",
+                "to": "machine-a/old",
+                "kind": "fyi",
+                "subject": "to the old name",
+                "body": "b",
+                "reply_to": ""
+            }))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        raw
+    })
+    .await;
+
+    assert_eq!(
+        body["pushed_to"].as_u64().unwrap(),
+        1,
+        "the live successor was not counted as a push target: {body}"
+    );
+    assert!(
+        body["note"].is_null(),
+        "the sender was told the message is queued while it was in fact pushed: {body}"
+    );
+}
+
+/// A migrated successor must appear in `peers` as the live participant, with the old name shown as
+/// one of its aliases — and the old name must not also appear as its own, permanently offline row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peers_shows_the_successor_live_and_the_predecessor_only_as_an_alias() {
+    let h = start().await;
+
+    let c2 = h.client();
+    blocking(move || {
+        c2.register("machine-a/old", "s1", "machine-a", "r", "/x", 2).unwrap();
+        c2.register("machine-a/new", "s2", "machine-a", "r", "/x", 3).unwrap();
+        c2.migrate("machine-a/old", "machine-a/new").unwrap();
+    })
+    .await;
+
+    let _sock = connect(&h, "machine-a/new").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let c = h.client();
+    let p = blocking(move || c.peers(true).unwrap()).await;
+    let addrs: Vec<String> = p.known.iter().map(|k| k.addr.clone()).collect();
+    assert_eq!(addrs, vec!["machine-a/new".to_string()], "unexpected roster: {addrs:?}");
+
+    let new = &p.known[0];
+    assert!(new.live, "the successor holds a socket but is not reported live");
+    assert_eq!(new.aliases, vec!["machine-a/old".to_string()]);
+}
