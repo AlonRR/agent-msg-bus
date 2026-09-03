@@ -55,6 +55,15 @@ the surface as it stands rather than a diff. From here the tags are real.
 - **`orphans`**: lists mail addressed to something no registration answers to. Without it a mistyped
   recipient was accepted, stored forever, and reachable by nothing.
 - **SessionStart hook** (`session-start`): derives a session's address and prints the subscribe URL.
+- **MPL-2.0 licence.** Until now there was none, which for a public repository means all rights
+  reserved — nobody could legally use or fork it, whatever the README implied.
+- **CI** (`.github/workflows/ci.yml`): clippy (`-D warnings`) and the test suite on both Linux and
+  Windows, because the broker is deployed to one and the clients run on the other from the same
+  binary. Not gated on `cargo fmt`; see the comment in the workflow for why.
+- **Tag-driven releases** (`.github/workflows/release.yml`): builds both platforms and publishes the
+  binaries with checksums. It refuses to publish if the tag and `Cargo.toml` disagree, and again if
+  the built binary does not report the version it is being released as — the one drift the unit test
+  cannot catch, because a wrong tag is applied after the test has passed.
 
 ### Fixed
 

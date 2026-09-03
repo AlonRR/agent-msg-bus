@@ -1034,7 +1034,7 @@ mod tests {
         let (_, adopted) = s.migrate("machine-a/a", "machine-a/b").unwrap();
         let a_cursor = s.pending_for("machine-a/a").unwrap();
         assert_eq!(a_cursor.len(), 1, "sanity: a still has its own backlog");
-        assert!(adopted.is_empty() || adopted < "20260805".to_string(), "adopted cursor: {adopted}");
+        assert!(adopted.is_empty() || adopted.as_str() < "20260805", "adopted cursor: {adopted}");
         assert_eq!(s.pending_for("machine-a/b").unwrap().len(), 1);
     }
 

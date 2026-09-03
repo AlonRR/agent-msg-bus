@@ -1,0 +1,107 @@
+name: release
+
+# Build both platforms' binaries and publish a GitHub Release whenever a version tag (v0.2.0,
+# v1.2.3, …) is pushed. Can also be run by hand against a tag that already exists.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build a release for, e.g. v0.2.0'
+        required: true
+
+permissions:
+  contents: write # create the Release and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # THE INVARIANT THIS PROJECT ACTUALLY DEPENDS ON: the tag and Cargo.toml agree.
+  #
+  # `--version` is wired to the crate version and a unit test asserts that much, so the one way the
+  # binary can still misreport which build it is, is a tag that does not match the version it was
+  # cut from. Nothing in `cargo` checks that, so it is checked here — before anything is built or
+  # published, because a wrong tag is cheap to fix and a wrong *release* is not.
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Tag must match Cargo.toml
+        shell: bash
+        run: |
+          tag='${{ github.event.inputs.tag || github.ref_name }}'
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$tag  Cargo.toml=$crate"
+          if [ "$tag" != "v$crate" ]; then
+            echo "::error::tag $tag does not match Cargo.toml version $crate — bump one of them"
+            exit 1
+          fi
+
+  release:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: agent-msg-bus-linux-x86_64
+            bin: agent-msg-bus
+          - os: windows-latest
+            artifact: agent-msg-bus-windows-x86_64.exe
+            bin: agent-msg-bus.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          fetch-depth: 0 # full history, so the release notes' compare base resolves
+
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      # Confirm the artefact about to be published reports the version it is being published as.
+      # This is the whole point of the release: a binary that can be asked which build it is.
+      - name: Verify the built binary's version
+        shell: bash
+        run: |
+          tag='${{ github.event.inputs.tag || github.ref_name }}'
+          got=$(./target/release/${{ matrix.bin }} --version)
+          echo "$got"
+          [ "$got" = "agent-msg-bus ${tag#v}" ] || { echo "::error::built binary reports '$got'"; exit 1; }
+
+      - name: Stage artifact and checksum
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.artifact }}"
+          cd dist && sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+
+      - name: Publish / update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag='${{ github.event.inputs.tag || github.ref_name }}'
+          gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 \
+            || gh release create "$tag" --repo "${{ github.repository }}" \
+                 --title "$tag" --generate-notes
+          gh release upload "$tag" --repo "${{ github.repository }}" --clobber \
+            "dist/${{ matrix.artifact }}" "dist/${{ matrix.artifact }}.sha256"

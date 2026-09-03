@@ -124,3 +124,8 @@ part of it. Full release steps are at the top of [`CHANGELOG.md`](CHANGELOG.md).
 
 The clients on a bus do not have to be on one version — that is the point of freezing the wire
 contract — but `peers` will not tell you what anyone is running, so ask each machine's binary.
+
+## Licence
+
+[Mozilla Public License 2.0](LICENSE). File-level copyleft: changes to these files stay open, and it
+can be used alongside code under other licences.

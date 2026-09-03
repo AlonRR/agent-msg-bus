@@ -297,27 +297,26 @@ pub fn sweep_provisional(st: &AppState, provisional_hours: i64) -> Vec<String> {
         if st.hub.is_live(&a) {
             continue;
         }
-        match store.retire(&a) {
-            Ok((true, stranded)) => {
-                if stranded > 0 {
-                    // Must never be silent. `stale_provisional` refuses anything holding unread
-                    // mail, so this should be unreachable - which is exactly why it is worth
-                    // shouting about if it ever happens.
-                    //
-                    // The earlier version of this comment named the *wrong* reason: it credited the
-                    // traffic guard, which only covered stranding by accident, because it happened
-                    // to match wildcards too. Narrowing that guard correctly would have made this
-                    // branch live again had `has_pending` not been added alongside it. A comment
-                    // asserting unreachability is load-bearing - it is what the next person checks
-                    // instead of re-deriving - so it has to name the predicate that actually
-                    // guarantees it.
-                    println!(
-                        "sweep: WARNING forgot {a} and STRANDED {stranded} undelivered message(s)                          - see `agent-msg-bus orphans`"
-                    );
-                }
-                removed.push(a);
+        // A retire that fails, or that finds nothing to remove, is simply not a removal. There is no
+        // other arm to write, which is why this is `if let` rather than a `match` with an empty one.
+        if let Ok((true, stranded)) = store.retire(&a) {
+            if stranded > 0 {
+                // Must never be silent. `stale_provisional` refuses anything holding unread
+                // mail, so this should be unreachable - which is exactly why it is worth
+                // shouting about if it ever happens.
+                //
+                // The earlier version of this comment named the *wrong* reason: it credited the
+                // traffic guard, which only covered stranding by accident, because it happened
+                // to match wildcards too. Narrowing that guard correctly would have made this
+                // branch live again had `has_pending` not been added alongside it. A comment
+                // asserting unreachability is load-bearing - it is what the next person checks
+                // instead of re-deriving - so it has to name the predicate that actually
+                // guarantees it.
+                println!(
+                    "sweep: WARNING forgot {a} and STRANDED {stranded} undelivered message(s) - see `agent-msg-bus orphans`"
+                );
             }
-            _ => {}
+            removed.push(a);
         }
     }
     removed

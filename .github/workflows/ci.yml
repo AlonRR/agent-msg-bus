@@ -1,0 +1,63 @@
+name: ci
+
+# Runs on BOTH ubuntu and windows deliberately. The broker is deployed to Linux and the clients and
+# relay run on Windows, from one binary — so "it compiles" is only half an answer if it is answered
+# on one platform. The store, the hook's path handling and the relay's socket behaviour are all
+# places where the two have already diverged.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A build that fails on a warning in CI is worth more than a build that buries one in scrollback.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other platform on the first failure: when a change breaks one of them, the
+      # useful question is immediately "both, or just that one?"
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal --component clippy --no-self-update
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # --locked, so CI builds the dependency versions in Cargo.lock rather than silently resolving
+      # newer ones. Without it a green CI says nothing about the tree anyone else checks out.
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      # The integration tests drive the broker through a real socket but never execute the binary,
+      # so this is the only step that proves it starts and prints at all. Dev profile on purpose: it
+      # reuses what `cargo test` just built, where `--release` would trigger a second full build on
+      # every runner to print one line. The artefact that actually ships is version-checked in
+      # release.yml, against the release binary, which is where that verification belongs.
+      - name: The binary runs and reports its version
+        run: cargo run --locked -- --version
+
+# Deliberately NOT gating on `cargo fmt --check`: the tree is not rustfmt-clean and normalising it
+# would rewrite eight files that have nothing to do with any change being reviewed. Add the gate in
+# the same commit that reformats, not before.

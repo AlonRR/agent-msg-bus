@@ -1,9 +1,9 @@
 //! Live connection registry and token auth.
 //!
 //! **Liveness is socket state.** An address is live if and only if it currently holds a WebSocket
-//! here. The old bus inferred liveness from PID existence, which reported dead sessions as live and
-//! - on a box with ~25 stale `claude` processes - was a false positive waiting to happen. There is
-//! nothing to infer here: the socket is in the map or it is not.
+//! here. The old bus inferred liveness from PID existence, which reported dead sessions as live;
+//! on a box carrying ~25 stale agent processes that was a false positive waiting to happen. There
+//! is nothing to infer here: the socket is in the map or it is not.
 
 use crate::store::{addr_matches, Message};
 use std::collections::HashMap;
