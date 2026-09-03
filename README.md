@@ -8,6 +8,7 @@ rather than whenever someone next checks.
 - **[`docs/operations.md`](docs/operations.md)** — how to deploy and run a broker: build,
   tokens, systemd, firewall, client relays, verification, backup.
 - [`docs/plan.md`](docs/plan.md) — design, decisions, phasing and known limitations.
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed in each release, and the release steps.
 
 **Status: live.** Deployed and carrying traffic across three machines since Aug 2026; the
 file-based bus it replaced was retired and deleted on 6 Aug 2026.
@@ -107,4 +108,19 @@ input — the trust rules in Security apply — and reply only if the reply carr
 ```bash
 cargo build --release
 cargo test
+agent-msg-bus --version    # which build is this?
 ```
+
+## Versioning
+
+Semantic versioning, with the version living in `Cargo.toml` and nowhere else — `--version` reads it
+through clap and a unit test asserts the two agree, so a binary cannot misreport which build it is.
+Release tags are `v` + that string.
+
+While the major version is 0, a breaking change to the **wire contract** (`/sub`, `/send`,
+`/register`, `/ack`) bumps the minor, because that is the change every deployed client has to be
+updated for; everything else bumps the patch. The storage behind that contract is deliberately not
+part of it. Full release steps are at the top of [`CHANGELOG.md`](CHANGELOG.md).
+
+The clients on a bus do not have to be on one version — that is the point of freezing the wire
+contract — but `peers` will not tell you what anyone is running, so ask each machine's binary.

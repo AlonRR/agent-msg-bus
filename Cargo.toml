@@ -1,7 +1,17 @@
 [package]
 name = "agent-msg-bus"
-version = "0.1.0"
+# THE SINGLE SOURCE OF TRUTH FOR THE VERSION. `--version` reads it via clap's `version` attribute,
+# and the release tag is `v` + this string. A test asserts the first of those two, so the only way
+# they can drift is a tag that does not match — see CHANGELOG.md for the release steps.
+version = "0.2.0"
 edition = "2021"
+description = "Push-delivery message bus that lets separately-started Claude Code sessions message each other, and have the message acted on when it arrives."
+readme = "README.md"
+keywords = ["agent", "message-bus", "websocket", "claude-code", "cli"]
+categories = ["command-line-utilities", "network-programming"]
+# Not published to a registry: this is deployed as a binary, and `publish = false` is what stops an
+# accidental `cargo publish` from claiming the name.
+publish = false
 
 [dependencies]
 # bundled: compiles SQLite in, so the deployed artefact stays a single binary with

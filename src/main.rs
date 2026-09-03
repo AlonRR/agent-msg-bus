@@ -12,7 +12,15 @@ use clap::{Parser, Subcommand};
 use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
-#[command(name = "agent-msg-bus", about = "Push-delivery message bus for Claude Code sessions")]
+// `version` takes the crate version from Cargo.toml, so `--version` and the release tag cannot
+// drift apart without the tag being wrong. Several machines run their own copy of this binary and
+// they are updated at different times; without this, "is the fix actually deployed over there?"
+// could only be answered by hashing files.
+#[command(
+    name = "agent-msg-bus",
+    version,
+    about = "Push-delivery message bus for Claude Code sessions"
+)]
 struct Cli {
     /// Broker base URL for client commands. Env: AMB_URL
     #[arg(long, global = true, env = "AMB_URL", default_value = "http://127.0.0.1:9450")]
@@ -555,5 +563,34 @@ fn run_client(cli: &Cli) {
     if let Err(e) = result {
         eprintln!("agent-msg-bus: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    /// A binary that cannot say which build it is turns every "is the fix actually deployed over
+    /// there?" question into a file-hash comparison. Several machines run their own copy of this
+    /// one and they are updated at different times, so the version has to be askable at the command
+    /// line rather than inferred from a timestamp.
+    ///
+    /// Asserting it equals `CARGO_PKG_VERSION` is what keeps `--version`, `Cargo.toml` and the
+    /// release tag from drifting: bump one and this test is the thing that notices.
+    #[test]
+    fn the_binary_reports_its_own_version() {
+        assert_eq!(
+            Cli::command().get_version().map(|s| s.to_string()).as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "`--version` is not wired to the crate version"
+        );
+    }
+
+    /// clap only builds the command lazily, so a malformed argument definition is a runtime panic
+    /// in whatever subcommand happens to be invoked first - on a user's machine, not here.
+    #[test]
+    fn the_argument_definitions_are_internally_consistent() {
+        Cli::command().debug_assert();
     }
 }
