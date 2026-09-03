@@ -4,10 +4,15 @@ Push-delivery message bus for Claude Code sessions. Lets separately-started sess
 machines, in different repos — message each other, and have the message **acted on when it arrives**
 rather than whenever someone next checks.
 
-Replaces the file-based `msgbus` (`Tools/machine-a/tools/msgbus/`). Full design, decisions and phasing:
-[`docs/plan.md`](docs/plan.md).
+- **[`docs/usage.md`](docs/usage.md)** — how to send, receive and debug messages. Start here.
+- [`docs/plan.md`](docs/plan.md) — design, decisions, phasing and known limitations.
 
-**Status: Phase 1, in progress.** Not deployed. The old bus is still the live one.
+**Status: live.** Deployed and carrying traffic across three machines since Aug 2026; the
+file-based bus it replaced was retired and deleted on 6 Aug 2026.
+
+> *Corrected 3 Sep 2026 — this line previously read "Phase 1, in progress. Not deployed. The old bus
+> is still the live one", which stopped being true the day of the cutover and stayed on the front
+> page for a month.*
 
 ---
 
