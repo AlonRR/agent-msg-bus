@@ -5,6 +5,8 @@ machines, in different repos — message each other, and have the message **acte
 rather than whenever someone next checks.
 
 - **[`docs/usage.md`](docs/usage.md)** — how to send, receive and debug messages. Start here.
+- **[`docs/operations.md`](docs/operations.md)** — how to deploy and run a broker: build,
+  tokens, systemd, firewall, client relays, verification, backup.
 - [`docs/plan.md`](docs/plan.md) — design, decisions, phasing and known limitations.
 
 **Status: live.** Deployed and carrying traffic across three machines since Aug 2026; the
