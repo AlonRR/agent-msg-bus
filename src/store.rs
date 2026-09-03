@@ -583,7 +583,23 @@ impl Store {
     /// not read one yet still destroys a message. `retire` only *reports* what it strands, so the
     /// prevention has to live in the candidate query.
     fn has_pending(&self, addr: &str) -> Result<bool> {
-        Ok(!self.pending_for(addr)?.is_empty())
+        Ok(!self.pending_owned_by(addr)?.is_empty())
+    }
+
+    /// Mail this address holds **as a mailbox of its own** — empty for a name that is only an alias.
+    ///
+    /// `pending_for` answers "what would a session reading this name see", so it resolves an alias
+    /// to the mailbox that now owns it. That is right for delivery and for a roster count, and
+    /// wrong for every question of the form *what is lost if this registry row goes away*: an alias
+    /// row carries nothing, because the alias keeps resolving and the mail keeps arriving.
+    ///
+    /// Worth its own function rather than a guard at each call site, because that guard has already
+    /// been added to one candidate query and missed on another twice — see `without_trafficked`.
+    pub fn pending_owned_by(&self, addr: &str) -> Result<Vec<Message>> {
+        if self.mailbox_of(addr)? != addr {
+            return Ok(Vec::new());
+        }
+        self.pending_for(addr)
     }
 
     /// Registrations with no live socket that have not re-registered since `cutoff_ts`.
@@ -696,7 +712,7 @@ impl Store {
     /// the sweeper, a second caller added later, therefore stranded mail silently on a 30-minute
     /// timer. Fixing a caller rather than the invariant is what allowed that.
     pub fn retire(&self, addr: &str) -> Result<(bool, usize)> {
-        let stranded = self.pending_for(addr).map(|v| v.len()).unwrap_or(0);
+        let stranded = self.pending_owned_by(addr).map(|v| v.len()).unwrap_or(0);
         let n = self.conn.execute("DELETE FROM registry WHERE addr = ?1", params![addr])?;
         self.conn.execute("DELETE FROM cursors WHERE addr = ?1", params![addr])?;
         Ok((n > 0, stranded))
@@ -1440,5 +1456,55 @@ mod tests {
         s.migrate("machine-a/b", "machine-a/a").unwrap();
         let _ = s.pending_for("machine-a/a").unwrap();
         let _ = s.names_for("machine-a/b").unwrap();
+    }
+
+    /// Retiring a name that is only an alias strands NOTHING: the alias goes on resolving and the
+    /// mail goes on arriving at the mailbox that owns it. Reporting the successor's whole unread
+    /// backlog as orphaned by that operation is the wrong-status-line failure this project treats
+    /// as a bug - and worse, it points the operator at `orphans`, where none of it will appear,
+    /// because an aliased name is still a known recipient.
+    ///
+    /// This is the cost of `pending_for` resolving aliases: every caller inherited the resolution,
+    /// including the ones asking "what is lost if this registry row goes away".
+    #[test]
+    fn retiring_an_alias_reports_nothing_stranded_because_nothing_is() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        s.register(&reg("machine-a/new")).unwrap();
+        s.migrate("machine-a/old", "machine-a/new").unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/new", "unread by the mailbox")).unwrap();
+        assert_eq!(s.pending_for("machine-a/new").unwrap().len(), 1, "precondition");
+
+        let (existed, stranded) = s.retire("machine-a/old").unwrap();
+        assert!(existed, "precondition: the alias had a registry row to retire");
+        assert_eq!(stranded, 0, "retiring an alias was reported as stranding the mailbox's mail");
+        assert_eq!(
+            s.pending_for("machine-a/new").unwrap().len(),
+            1,
+            "and the mail itself must be untouched"
+        );
+    }
+
+    /// The same mistake on the sweep path: an alias row must not become unprunable because the
+    /// mailbox it points at is holding unread mail. That row carries nothing - deleting it leaves
+    /// the alias resolving - so "still holds unread mail" is simply false of the thing being
+    /// considered.
+    #[test]
+    fn an_alias_row_is_prunable_even_while_the_mailbox_holds_mail() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        s.register(&reg("machine-a/new")).unwrap();
+        s.migrate("machine-a/old", "machine-a/new").unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/new", "for the mailbox")).unwrap();
+
+        let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
+        assert!(
+            stale.contains(&"machine-a/old".to_string()),
+            "the alias row was held back by mail that is not its own: {stale:?}"
+        );
+        assert!(
+            !stale.contains(&"machine-a/new".to_string()),
+            "the mailbox itself must still be protected: {stale:?}"
+        );
     }
 }

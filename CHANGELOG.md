@@ -77,6 +77,12 @@ the surface as it stands rather than a diff. From here the tags are real.
   Acks landed on the target, so the predecessor kept a cursor nothing could advance. `pending` and
   `ack` now both resolve to the mailbox, and an address that is only an alias is no longer listed as
   a participant in its own right — it appears under `aliases` on the row that owns it.
+- **`forget` on an aliased name claimed to orphan mail it did not touch.** Consequence of the fix
+  above: once `pending` resolves an alias to its mailbox, every caller inherits that resolution —
+  including the ones asking "what is lost if this registry row goes away". Retiring an alias strands
+  nothing, because the alias goes on resolving; the count now comes from `pending_owned_by`, which
+  is empty for a name that is only an alias. The same guard stops an alias row becoming unprunable
+  because the mailbox it points at happens to hold unread mail.
 - **Chained migrations stranded mail.** `a → b` then `b → c` left anything sent to `a` owned by `c`
   but resolved only as far as `b`. Alias resolution is transitive throughout, and both walks check
   membership before stepping, so a circular migration terminates instead of hanging the broker.

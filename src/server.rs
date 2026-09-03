@@ -569,7 +569,12 @@ async fn forget(
     // no registration to collect them, invisible to `peers` and unreachable by `forget` afterwards.
     // Found by noticing machine-a/homelab.build in the orphan list - mail stranded by an earlier forget
     // in this very session. Say it at the moment of the decision, when it can still be reconsidered.
-    let stranded = store.pending_for(&b.addr).map(|v| v.len()).unwrap_or(0);
+    // `pending_owned_by`, not `pending_for`: retiring a name that is only an alias strands nothing,
+    // because the alias goes on resolving and the mail goes on arriving at the mailbox that owns it.
+    // Counting the resolved backlog here would report the successor's whole unread mail as orphaned
+    // by an operation that orphaned none of it, and send the operator to `orphans`, which correctly
+    // lists nothing.
+    let stranded = store.pending_owned_by(&b.addr).map(|v| v.len()).unwrap_or(0);
     match store.forget(&b.addr) {
         Ok(existed) => Json(serde_json::json!({
             "forgotten": existed,

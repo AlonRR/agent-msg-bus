@@ -142,6 +142,10 @@ Then the relay — `agent-msg-bus relay --listen 127.0.0.1:9451` — as a **serv
 ## 5. Verify
 
 ```bash
+# WHICH BUILD IS THIS? Ask before reading anything else — every check below can pass on a binary
+# that predates the fix you came here to confirm, and nothing on the wire reports a version.
+agent-msg-bus --version
+
 systemctl is-active agent-msg-bus
 curl -fsS http://<BROKER_HOST>:9450/health
 
@@ -153,9 +157,14 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer wrong' \
   http://<BROKER_HOST>:9450/peers          # expect 401
 
 # on a client machine
+agent-msg-bus --version                    # clients and broker are updated separately
 curl -fsS http://127.0.0.1:9451/health     # shows which addresses it is relaying
 agent-msg-bus peers
 ```
+
+> The clients on a bus do not have to match the broker's version — the wire contract is frozen for
+> exactly that reason — but `peers` will not tell you what anyone is running, so a version question
+> has to be asked of each machine's own binary.
 
 ---
 
