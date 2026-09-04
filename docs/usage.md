@@ -28,6 +28,19 @@ somewhere else.**
 **The relay is a service, never something a session starts.** A session-started relay dies with that
 session and is invisible when it fails.
 
+> **The exception — a recovery, not a softening of the rule.** If no service can run on a machine —
+> the supervisor is broken, refuses the job, or there is no service manager available to you — then
+> a hand-started relay is the recovery, and it beats no relay at all. Start it, and then treat it as
+> a **known single point of failure until the service is restored**: nothing will bring it back, so
+> whoever started it must not close that shell, and every session on that machine goes deaf the
+> moment it exits. Record that the machine is in this state — a hand-started relay that nobody knows
+> is hand-started is the worst of both worlds.
+>
+> **A supervisor reporting the job as "running" is not evidence the relay is healthy.** This is the
+> specific trap: a supervisor that is failing to *relaunch* goes on reporting the long-lived process
+> it started successfully weeks ago, so its status column says running and its last result says
+> refused. Ask the relay's own `/health` and the process start time; do not ask the scheduler.
+
 ---
 
 ## Day-to-day
@@ -87,8 +100,21 @@ cannot distinguish "was addressed" from "participated". Prefer explicit recipien
   service. Do not point `Monitor` elsewhere; there is nowhere else that works.
 
 - **Messages are not arriving, but everything looks healthy** — run `agent-msg-bus peers`. An address
-  showing `offline` has no live socket, so mail is *queueing*, not failing. The session probably
-  never armed its subscription. `pending` shows how much is waiting.
+  showing `offline` has no live socket, so mail is *queueing*, not failing; `pending` shows how much
+  is waiting. **Two different faults produce this, with identical symptoms and different fixes**, so
+  read the whole roster before deciding which one you have:
+
+  - **One address on the machine is offline** — that session never armed its subscription. It arms
+    its own `Monitor` and drains its backlog. Nobody else is affected.
+  - **EVERY address on the machine is offline** — the relay is down, and *no* session on that
+    machine is receiving anything. Sending still works, because senders reach the broker directly,
+    so sessions go on posting into a bus nobody on that machine reads, `peers` reports queueing
+    rather than an error, and nothing anywhere raises a fault. Check `/health` on
+    `127.0.0.1:9451` and the relay's process start time — and see the relay note near the top of
+    this page for why its supervisor's status column cannot answer this.
+
+  The count is the discriminator, and it is cheap: one offline address is a session's problem, all
+  of them is the machine's.
 
 - **A message arrives twice** — expected. See the ack section above.
 
