@@ -641,7 +641,10 @@ hand-migrate its own mailbox to get a stable name, and built the same day.
 > The draft argued that the hook picks a name minutes before the socket opens, so two simultaneous
 > starts would both be told the repo address is free and the loser would be left deaf. That is wrong
 > whenever the subscriber is `watch`: the fallback is *reactive to the 409*, and the 409 comes from
-> the claim itself, atomically. There is no window to lose. The argument only holds for the `ws:`
+> the claim itself, atomically — so no session is ever *silently* left deaf, which is the property
+> that actually matters. (Not the same as "no collision is possible": if both the repo name and the
+> fallback are held, `bind` fails and `watch` retries until one frees. That is a resolvable
+> collision, and it is announced rather than swallowed.) The argument only holds for the `ws:`
 > form, which cannot retry — so the fix was to stop the hook recommending `ws:`, not to change the
 > wire. **Increment 2 is deferred, and may never be needed.**
 >
@@ -767,6 +770,21 @@ pinning a role deliberately, not by making every session's identity accidental.
 ---
 
 ## Known limitations (accepted for v1, written down so they are not rediscovered as surprises)
+
+- **Nothing lists mailboxes that hold unread mail and have no live subscriber.** Designed, not built;
+  asked for by a session that had lost mail this way and then found the same shape bus-wide. A
+  per-*message* orphan at least appears in `orphans`; a whole dead mailbox shows only as a number in
+  a `peers` column nobody has a reason to read, and there is no command that distinguishes "this
+  session is asleep and will be back" from "nothing will ever collect this". Repo-scoped addressing
+  (above) removes the main *cause*, but not the accumulated backlog, and not the blind spot. The
+  same session suggested `prune` offer to migrate rather than only forget — a pruned registration
+  holding unread mail is precisely the case where forgetting is the one outcome that loses it.
+- **`orphans` does not say whether it is reporting history or a live problem.** It lists mail that
+  was undeliverable *when sent*, and an entry does not clear when the mail is later delivered and
+  acked — it clears only on explicit `--delete`. Defensible as history, but the word reads as a
+  current fault, and a session nearly re-chased mail it had already handled. Either the entry should
+  clear on delivery or the listing should say plainly that it is historical; the ambiguity is the
+  bug, not whichever answer is chosen.
 
 - **A token authenticates a machine, not an address.** Any holder of a valid token can `send` with
   any `from` value, so a compromised client could impersonate another session. Acceptable on a

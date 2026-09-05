@@ -22,6 +22,19 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-09-05
+
+### Fixed
+
+- **A session that could bind neither its repo address nor its fallback went deaf silently.** Both
+  names held is the one case the fallback cannot rescue, and `watch` reported it only with an
+  `eprintln!` — stderr, which the subscribing side turns into nothing, while stdout lines become
+  notifications. So the session retried forever, received nothing, and said nothing: the fallback
+  wearing the exact disguise this project exists to strip off. It is now announced immediately, on
+  stdout, naming both held addresses — and immediately rather than after the reconnect backoff
+  grows, because this is not a transient outage and waiting 30 seconds to mention it helps nobody.
+  `watch::is_conflict` is public so the condition can be asserted rather than matched on error text.
+
 ## [0.3.0] — 2026-09-05
 
 The release where the README's oldest promise — *"an address outlives its session"* — becomes true.

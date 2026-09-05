@@ -76,7 +76,7 @@ fn sub_url(relay: &str, addr: &str) -> String {
 ///
 /// Matched on the typed HTTP status rather than on the text of the error, which is a rendering and
 /// can change without notice.
-fn is_conflict(e: &tokio_tungstenite::tungstenite::Error) -> bool {
+pub fn is_conflict(e: &tokio_tungstenite::tungstenite::Error) -> bool {
     matches!(e, tokio_tungstenite::tungstenite::Error::Http(r) if r.status().as_u16() == 409)
 }
 
@@ -170,6 +170,28 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                 // Reaching here means the socket closed — almost always the relay restarting.
                 // Reconnect rather than exiting, which is the entire point of this subcommand.
                 status("reconnecting", "subscription closed (relay restart?); retrying");
+            }
+            Err(e) if !connected_once && is_conflict(&e) => {
+                // BOTH names are held: the fallback cannot help, and this session is receiving
+                // nothing. Announced IMMEDIATELY rather than after the backoff grows, and on stdout
+                // rather than stderr, because Monitor turns stdout lines into notifications and
+                // stderr into nothing — so the previous version of this branch left a session deaf
+                // and silent at the same time, which is the fallback wearing the exact disguise
+                // this project exists to strip off.
+                if !announced_down {
+                    status(
+                        "unreachable",
+                        &format!(
+                            "{addr} and {} are BOTH already held by live sockets on this machine, \
+                             so this session is receiving nothing. Retrying; it will connect when \
+                             one of them is released. Check `agent-msg-bus peers` to see who holds \
+                             them, or pin a role name to claim a mailbox of your own.",
+                            fallback.unwrap_or("(no fallback offered)")
+                        ),
+                    );
+                    announced_down = true;
+                }
+                eprintln!("watch: both names held ({e}); retrying in {backoff}s");
             }
             Err(e) => {
                 // Announce a sustained outage once, not on every retry. A watcher that cannot reach

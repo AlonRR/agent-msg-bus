@@ -228,3 +228,33 @@ async fn a_held_address_with_no_fallback_offered_is_an_error_not_a_rename() {
         "a pinned address quietly bound something else"
     );
 }
+
+/// Both names held is the one case where the fallback cannot help, and it must be LOUD.
+///
+/// `bind` reports it as a conflict rather than binding something arbitrary. What made this worth a
+/// test is what `run` used to do with that error: its only trace was an `eprintln!` on stderr, and
+/// Monitor turns stdout lines into notifications, not stderr — so the session was deaf and silent
+/// at the same time, which is this project's signature failure wearing the fallback's clothes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn both_names_held_is_reported_as_a_conflict_not_silently_swallowed() {
+    let rig = start().await;
+    let relay = format!("127.0.0.1:{}", rig.relay_port);
+
+    let _first = sub_via_relay(&rig, "machine-a/thing").await.expect("first refused");
+    let _second =
+        sub_via_relay(&rig, "machine-a/thing.abc12345").await.expect("fallback holder refused");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let e = agent_msg_bus::watch::bind(
+        &relay,
+        "machine-a/thing",
+        Some("machine-a/thing.abc12345"),
+    )
+    .await
+    .expect_err("bound a name that was already held");
+    assert!(
+        agent_msg_bus::watch::is_conflict(&e),
+        "a collision on both names was not reported as a conflict, so the caller cannot tell it \
+         apart from the relay being down: {e}"
+    );
+}
