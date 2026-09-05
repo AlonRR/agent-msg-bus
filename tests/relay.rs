@@ -173,3 +173,58 @@ async fn upstream_is_opened_only_while_a_local_subscriber_is_attached() {
     let after = blocking(move || c.peers(true).unwrap()).await;
     assert_eq!(after.live, vec!["machine-a/a".to_string()], "subscribing did not open upstream");
 }
+
+/// The second live session in one repo must land on the fallback name, not go deaf.
+///
+/// This is the whole mechanism behind repo-scoped addressing: the repo name is claimed
+/// optimistically, and the collision is discovered ATOMICALLY as a 409 at claim time rather than
+/// guessed in advance from a session id. The relay answers 409 out of its own local `busy` set
+/// before any upstream connection, so the decision is machine-local and needs no broker change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_session_in_one_repo_binds_the_fallback_name() {
+    let rig = start().await;
+    let relay = format!("127.0.0.1:{}", rig.relay_port);
+
+    // First session takes the repo address and holds it.
+    let _held = sub_via_relay(&rig, "machine-a/thing").await.expect("first subscriber refused");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (_sock, bound) =
+        agent_msg_bus::watch::bind(&relay, "machine-a/thing", Some("machine-a/thing.abc12345"))
+            .await
+            .expect("second session got no socket at all");
+    assert_eq!(
+        bound, "machine-a/thing.abc12345",
+        "the second session did not fall back; it would be deaf"
+    );
+}
+
+/// …and when the repo address is free, that is what gets bound. The fallback is an exception, not a
+/// default: if it were taken every time, every session would be back to a session-scoped mailbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_repo_address_is_preferred_whenever_it_is_free() {
+    let rig = start().await;
+    let relay = format!("127.0.0.1:{}", rig.relay_port);
+
+    let (_sock, bound) =
+        agent_msg_bus::watch::bind(&relay, "machine-a/thing", Some("machine-a/thing.abc12345"))
+            .await
+            .expect("no socket");
+    assert_eq!(bound, "machine-a/thing", "took the fallback while the repo address was free");
+}
+
+/// A PIN is an explicit declaration of identity, so it is offered no fallback — and a collision on
+/// one must surface as a failure rather than silently answering to some other name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_address_with_no_fallback_offered_is_an_error_not_a_rename() {
+    let rig = start().await;
+    let relay = format!("127.0.0.1:{}", rig.relay_port);
+
+    let _held = sub_via_relay(&rig, "machine-a/pinned").await.expect("first subscriber refused");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(
+        agent_msg_bus::watch::bind(&relay, "machine-a/pinned", None).await.is_err(),
+        "a pinned address quietly bound something else"
+    );
+}

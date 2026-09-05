@@ -120,21 +120,37 @@ pub fn clear_pin() -> Result<bool, String> {
     Ok(false)
 }
 
-/// `<machine>/<repo>.<session-prefix>`.
+/// The address for "the session working in this repo, on this machine".
 ///
-/// The session prefix is not decoration. The old bus's fallback was the bare directory name, so two
-/// sessions in one repo answered to the same address and silently shared one mailbox and one cursor,
-/// each consuming messages meant for the other. Including it means an unpinned session is still
-/// unique; naming it later only makes it memorable.
-pub fn derive_address(machine: &str, cwd: &str, session_id: &str) -> String {
+/// **Repo-scoped, with no session id in it.** The session id used to sit here, in the slot the
+/// address format reserves for a *role* — which keyed identity to a process lifetime instead of to a
+/// working context, so every restart minted a brand-new empty mailbox and the previous one's mail
+/// was stranded under a name nothing would ever answer to again. Measured on 5 Sep 2026: 27 unread
+/// messages across 14 dead addresses, one repo holding five of them.
+///
+/// Uniqueness between two *concurrent* sessions is not this function's job and never should have
+/// been. It belongs to whoever holds the socket — see `fallback_address`.
+pub fn repo_address(machine: &str, cwd: &str) -> String {
+    format!("{}/{}", machine, repo_name(cwd))
+}
+
+/// The disambiguated name for the SECOND live session in one repo.
+///
+/// Deliberately the old scheme, so the name is recognisable rather than novel. It is used only when
+/// the repo-scoped name is already held by a live socket, which the subscriber discovers atomically
+/// as a 409 at claim time — not guessed in advance from a process id.
+pub fn fallback_address(machine: &str, cwd: &str, session_id: &str) -> String {
+    let short: String = session_id.chars().take(8).collect();
+    let short = if short.is_empty() { "nosession".to_string() } else { short };
+    format!("{}/{}.{}", machine, repo_name(cwd), short)
+}
+
+pub fn derive_address(machine: &str, cwd: &str) -> String {
     // A pin wins: the session has declared who it is, which is more reliable than anything derived.
     if let Some(p) = pinned_address() {
         return p;
     }
-    let repo = repo_name(cwd);
-    let short: String = session_id.chars().take(8).collect();
-    let short = if short.is_empty() { "nosession".to_string() } else { short };
-    format!("{}/{}.{}", machine, repo, short)
+    repo_address(machine, cwd)
 }
 
 fn repo_name(cwd: &str) -> String {
@@ -231,16 +247,19 @@ pub fn run() -> ! {
         )),
     };
 
-    if payload.session_id.is_empty() {
-        emit(
-            "agent-msg-bus: the SessionStart payload carried no session_id, so no unique address \
-             can be derived. This session has NOT been registered. Two sessions in one repo would \
-             otherwise share an address, a mailbox and a cursor, each consuming the other's mail.",
-        );
-    }
-
-    let addr = derive_address(&cfg.machine, &payload.cwd, &payload.session_id);
-    let sub_url = format!("ws://{}/sub?addr={}", cfg.relay, crate::client::urlencode(&addr));
+    // The address is repo-scoped, so a missing session_id no longer prevents deriving one — it only
+    // costs the FALLBACK, which is what a second concurrent session in this repo would need. That is
+    // a degraded state rather than a fatal one, and it is named rather than papered over.
+    let addr = derive_address(&cfg.machine, &payload.cwd);
+    let pinned = pinned_address().is_some();
+    // A pin is an explicit declaration of identity, so it must never be silently swapped for
+    // something else: a 409 on a pinned name is a hard error the session should see, not a cue to
+    // invent `X.review.abc123`. The fallback is offered only for a name we derived.
+    let fallback = if pinned || payload.session_id.is_empty() {
+        None
+    } else {
+        Some(fallback_address(&cfg.machine, &payload.cwd, &payload.session_id))
+    };
 
     // Is the machine's relay actually up? Checked, not assumed - this is the single point where the
     // whole delivery path can be silently absent.
@@ -275,13 +294,48 @@ pub fn run() -> ! {
         ));
     }
 
+    // `command:` rather than `ws:`. Monitor's ws source ENDS the watch when the socket closes and
+    // does not retry, so a relay restart left every session deaf until a human re-armed it. This
+    // banner told sessions to use `ws:` while `watch`'s own docstring told them not to — the banner
+    // was simply never updated. `watch` reconnects internally, and it is also the only path that can
+    // fall back to the disambiguated name when this repo's address is already held.
+    let watch_cmd = match &fallback {
+        Some(f) => format!("{me} watch {addr} --fallback {f}"),
+        None => format!("{me} watch {addr}"),
+    };
+    let identity_note = if pinned {
+        format!(
+            "\nThis address is PINNED, so it is yours explicitly. If another live session already \
+             holds it, `watch` will fail rather than quietly answer to a different name — that is \
+             deliberate. Clear it with `{me} unpin`.\n"
+        )
+    } else if payload.session_id.is_empty() {
+        "\nNOTE: the SessionStart payload carried no session_id, so there is no fallback name. If \
+         another live session in this repo already holds this address, this session has nowhere to \
+         fall back to and will not receive mail. Pin an explicit address to fix that.\n"
+            .to_string()
+    } else {
+        format!(
+            "\nThis address is derived from the REPO, not from the session id, so the mailbox \
+             outlives this session: mail queued while nobody was running is delivered when someone \
+             next picks it up. If a second session in this repo is already holding it, `watch` \
+             binds `{}` instead and says so on its first line.\n",
+            fallback.as_deref().unwrap_or("")
+        )
+    };
+
     emit(&format!(
         "agent-msg-bus is available. This session's address is `{addr}` and it is registered with \
          the broker at {}.\n\
+         {identity_note}\
          \n\
          To receive messages from other Claude Code sessions, arm the subscription once:\n\
          \n\
-             Monitor({{ws: {{url: \"{sub_url}\"}}, persistent: true, description: \"agent-msg-bus inbox\"}})\n\
+             Monitor({{command: \"{watch_cmd}\", persistent: true, description: \"agent-msg-bus inbox\"}})\n\
+         \n\
+         Use the `command:` form, not `ws:`. A `ws:` watch ENDS when its socket closes and does not \
+         retry, so a relay restart leaves this session silently deaf; `watch` reconnects internally \
+         and the watch is never torn down.\n\
          \n\
          To send:  {me} send --from {addr} --to <address> --kind fyi|request|blocking \
          --subject \"...\" --body-file <path>\n\
@@ -305,4 +359,56 @@ pub fn run() -> ! {
          user first.",
         cfg.url
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pure derivations are tested rather than `derive_address`, deliberately: that one consults
+    /// the pin, which reads `CLAUDE_CODE_SESSION_ID` and a real file — and `cargo test` inherits the
+    /// environment of whoever ran it, so a session with a pin would test its own identity instead of
+    /// the function. A test that passes because of the developer's machine is not a test.
+    #[test]
+    fn the_repo_address_carries_no_session_id() {
+        let a = repo_address("machine-a", "/src/agent-msg-bus");
+        assert_eq!(a, "machine-a/agent-msg-bus");
+        assert!(!a.contains('.'), "a session id is back in the role slot: {a}");
+    }
+
+    /// Same repo, two different sessions, one name — which is the entire point. A mailbox belongs to
+    /// the repo, so the session that starts tomorrow inherits what was queued today.
+    #[test]
+    fn two_sessions_in_one_repo_derive_the_same_repo_address() {
+        assert_eq!(
+            repo_address("machine-a", "/src/thing"),
+            repo_address("machine-a", "/src/thing"),
+        );
+    }
+
+    /// The fallback is the OLD scheme on purpose: recognisable, not novel.
+    #[test]
+    fn the_fallback_disambiguates_with_the_session_id() {
+        let f = fallback_address("machine-a", "/src/thing", "0123456789abcdef");
+        assert_eq!(f, "machine-a/thing.01234567", "fallback shape changed");
+        assert_ne!(f, repo_address("machine-a", "/src/thing"));
+    }
+
+    /// A missing session id must not silently produce a name that collides with another session's
+    /// fallback. It is a degraded state and is named as one.
+    #[test]
+    fn a_missing_session_id_still_yields_a_distinguishable_fallback() {
+        assert_eq!(
+            fallback_address("machine-a", "/src/thing", ""),
+            "machine-a/thing.nosession"
+        );
+    }
+
+    /// Both halves must survive `validate_address`, or the hook would hand a session a name that
+    /// `pin` and `register` then refuse.
+    #[test]
+    fn both_derived_forms_are_valid_addresses() {
+        validate_address(&repo_address("machine-a", "/src/agent-msg-bus")).unwrap();
+        validate_address(&fallback_address("machine-a", "/src/agent-msg-bus", "abcdef12")).unwrap();
+    }
 }

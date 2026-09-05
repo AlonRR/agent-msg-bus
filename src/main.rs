@@ -176,6 +176,15 @@ enum Cmd {
         addr: String,
         #[arg(long)]
         relay: Option<String>,
+        /// Name to bind instead if ADDR is already held by another live session on this machine.
+        ///
+        /// This is what makes a repo-scoped address safe to claim optimistically: the collision is
+        /// discovered as a 409 at claim time rather than guessed in advance, so the common case
+        /// (one session per repo) gets the stable name and the rare case still gets a mailbox.
+        /// Omit it for a PINNED address — a pin is an explicit identity, and a collision on one
+        /// should fail loudly rather than quietly answer to a different name.
+        #[arg(long)]
+        fallback: Option<String>,
     },
 }
 
@@ -212,11 +221,11 @@ fn main() {
             relay(&listen, &url, &token)
         }
         Cmd::SessionStart => agent_msg_bus::hook::run(),
-        Cmd::Watch { ref addr, ref relay } => {
+        Cmd::Watch { ref addr, ref relay, ref fallback } => {
             let relay = relay.clone().or_else(|| {
                 agent_msg_bus::hook::load_config().map(|c| c.relay)
             }).unwrap_or_else(|| "127.0.0.1:9451".to_string());
-            watch(&relay, addr)
+            watch(&relay, addr, fallback.clone())
         }
         Cmd::Whoami => whoami(&cli),
         _ => run_client(&cli),
@@ -224,8 +233,8 @@ fn main() {
 }
 
 #[tokio::main]
-async fn watch(relay: &str, addr: &str) -> ! {
-    agent_msg_bus::watch::run(relay, addr).await
+async fn watch(relay: &str, addr: &str, fallback: Option<String>) -> ! {
+    agent_msg_bus::watch::run(relay, addr, fallback.as_deref()).await
 }
 
 fn whoami(cli: &Cli) {
@@ -238,7 +247,35 @@ fn whoami(cli: &Cli) {
     };
     let session = std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default();
     let cwd = std::env::current_dir().unwrap_or_default().to_string_lossy().to_string();
-    let addr = agent_msg_bus::hook::derive_address(&cfg.machine, &cwd, &session);
+    let addr = agent_msg_bus::hook::derive_address(&cfg.machine, &cwd);
+    let pinned = agent_msg_bus::hook::pinned_address().is_some();
+    let fallback = if pinned || session.is_empty() {
+        None
+    } else {
+        Some(agent_msg_bus::hook::fallback_address(&cfg.machine, &cwd, &session))
+    };
+
+    // Which name is ACTUALLY bound, asked of the relay rather than re-derived. Deriving it twice
+    // only ever reproduces the same guess: if this session fell back to the disambiguated name
+    // because the repo address was taken, a derivation cannot know that and `whoami` would confidently
+    // report an address nothing is listening on. The relay knows because it holds the socket.
+    let bound: Option<String> = ureq::get(&format!("http://{}/health", cfg.relay))
+        .timeout(std::time::Duration::from_secs(2))
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<serde_json::Value>().ok())
+        .and_then(|v| {
+            let held: Vec<String> = v
+                .get("subscribed")?
+                .as_array()?
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect();
+            held.iter()
+                .find(|h| *h == &addr)
+                .or_else(|| held.iter().find(|h| Some(h.as_str()) == fallback.as_deref()))
+                .cloned()
+        });
 
     // Ask the broker whether this derived address is real BEFORE handing out a subscribe URL for it.
     // An unchecked URL is how a session gets a silently dead inbox: the relay accepts the socket,
@@ -251,14 +288,22 @@ fn whoami(cli: &Cli) {
         .map_err(|e| e.to_string());
     let status = agent_msg_bus::identity::classify(&addr, &peers);
 
-    println!("address : {addr}");
+    println!("address : {addr}{}", if pinned { "   (pinned)" } else { "   (from the repo)" });
+    if let Some(f) = &fallback {
+        println!("fallback: {f}   (used only if another live session already holds the address)");
+    }
+    match &bound {
+        Some(b) if b == &addr => println!("bound   : {b}   (subscribed on this machine's relay)"),
+        Some(b) => println!("bound   : {b}   ← FELL BACK; the address above is held by another session"),
+        None => println!("bound   : (nothing on this machine's relay is subscribed as either name)"),
+    }
     println!("broker  : {url}");
     println!("relay   : {}", cfg.relay);
-    println!(
-        "subscribe: ws://{}/sub?addr={}",
-        cfg.relay,
-        agent_msg_bus::client::urlencode(&addr)
-    );
+    let watch_cmd = match &fallback {
+        Some(f) => format!("agent-msg-bus watch {addr} --fallback {f}"),
+        None => format!("agent-msg-bus watch {addr}"),
+    };
+    println!("subscribe: Monitor({{command: \"{watch_cmd}\", persistent: true}})");
     for line in agent_msg_bus::identity::advisory(&addr, &status) {
         eprintln!("{line}");
     }
