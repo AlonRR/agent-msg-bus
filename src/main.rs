@@ -5,6 +5,7 @@
 //! same scripts, kept aligned only by whoever remembered to copy one to the other.
 
 use agent_msg_bus::client::Client;
+use agent_msg_bus::identity::Recommend;
 use agent_msg_bus::hub::{Auth, Hub};
 use agent_msg_bus::server::{app, AppState};
 use agent_msg_bus::store::Store;
@@ -384,7 +385,33 @@ fn whoami(cli: &Cli) {
         Some(f) => format!("agent-msg-bus watch {addr} --fallback {f}"),
         None => format!("agent-msg-bus watch {addr}"),
     };
-    println!("subscribe: Monitor({{command: \"{watch_cmd}\", persistent: true}})");
+    // The recommendation is derived from the SAME status as the warning below, so the two cannot
+    // contradict each other. They used to be independent: this line was printed unconditionally and
+    // a warning three lines later said not to subscribe to the address it named. Reported from a
+    // live session, which correctly refused to follow it.
+    match agent_msg_bus::identity::recommend(&status) {
+        Recommend::Subscribe => {
+            println!("subscribe: Monitor({{command: \"{watch_cmd}\", persistent: true}})");
+        }
+        Recommend::RegisterThenSubscribe => {
+            println!("subscribe: NOT YET — this address has no registration, so nothing knows to");
+            println!("           send to it. Claim it first, then subscribe:");
+            println!("             agent-msg-bus register {addr}");
+            println!("             Monitor({{command: \"{watch_cmd}\", persistent: true}})");
+        }
+        Recommend::UseInstead(peer) => {
+            println!("subscribe: NOT to the address above — this session already has a mailbox:");
+            println!("             {peer}");
+            println!("           Subscribing to the derived name would give you a second, empty one");
+            println!("           and split this session's mail across two addresses.");
+        }
+        Recommend::Unknown => {
+            println!("subscribe: unverified — the broker could not be reached, so whether this");
+            println!("           address is registered is unknown. The line below is what you would");
+            println!("           run if it is; check with `peers` once the broker is back.");
+            println!("             Monitor({{command: \"{watch_cmd}\", persistent: true}})");
+        }
+    }
     for line in agent_msg_bus::identity::advisory(&addr, &status) {
         eprintln!("{line}");
     }

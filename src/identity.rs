@@ -62,6 +62,42 @@ pub fn classify(addr: &str, peers: &Result<PeersOut, String>) -> RegStatus {
     RegStatus::Unregistered { session_peer }
 }
 
+/// What `whoami` should tell the caller to DO.
+///
+/// Derived from the same `RegStatus` as the warning, so the two cannot disagree. They used to be
+/// computed independently: `whoami` printed a subscribe command unconditionally and then printed a
+/// warning saying not to subscribe to that address. Both were individually correct and together
+/// useless, because the reader was left to arbitrate — and the reason the command is printed at all
+/// is so that they do not have to.
+#[derive(Debug)]
+pub enum Recommend {
+    /// Registered: subscribing is safe, say so in one line.
+    Subscribe,
+    /// A legitimate address that simply has no registry row yet. Registering is the fix.
+    ///
+    /// This case became the normal one when addresses became repo-scoped. Before that, an
+    /// unregistered derived address nearly always meant a phantom minted from the wrong directory;
+    /// now it usually means "nobody has claimed this repo's mailbox yet", which is not a hazard —
+    /// it is a missing step, and the difference matters because the old advice was "avoid it".
+    RegisterThenSubscribe,
+    /// The same session already has a mailbox under another name. Use that one.
+    ///
+    /// Registering the derived name here would mint a SECOND mailbox for one session and split its
+    /// mail across two addresses, which is worse than the confusion it would resolve.
+    UseInstead(String),
+    /// The broker could not be reached. Recommend nothing confidently in either direction.
+    Unknown,
+}
+
+pub fn recommend(status: &RegStatus) -> Recommend {
+    match status {
+        RegStatus::Registered => Recommend::Subscribe,
+        RegStatus::Unverified(_) => Recommend::Unknown,
+        RegStatus::Unregistered { session_peer: Some(p) } => Recommend::UseInstead(p.clone()),
+        RegStatus::Unregistered { session_peer: None } => Recommend::RegisterThenSubscribe,
+    }
+}
+
 /// The lines `whoami` prints under the address. Returned rather than printed so it can be tested.
 pub fn advisory(addr: &str, status: &RegStatus) -> Vec<String> {
     match status {
@@ -89,10 +125,25 @@ pub fn advisory(addr: &str, status: &RegStatus) -> Vec<String> {
                         "          which differs from the one this session started in.".to_string(),
                     );
                 }
-                None => out.push(
-                    "          No registration exists for it, and no other address shares this session id."
-                        .to_string(),
-                ),
+                // No sibling: this is almost certainly the repo's own address, simply unclaimed.
+                // Since addresses became repo-scoped that is a MISSING STEP, not a hazard, and the
+                // blanket "do not subscribe to it" this branch used to print was advice from the
+                // session-derived era — where an unregistered address really did mean a phantom.
+                // Saying it here sent a session away from its own correct mailbox.
+                None => {
+                    out.push(
+                        "          Nothing has claimed it yet, and no other address shares this session id."
+                            .to_string(),
+                    );
+                    out.push(
+                        "          Register it before relying on it — until something does, senders".to_string(),
+                    );
+                    out.push(
+                        "          are told it does not exist and their mail is orphaned:".to_string(),
+                    );
+                    out.push(format!("            agent-msg-bus register {addr}"));
+                    return out;
+                }
             }
             out.push(
                 "          Do not send --from it (replies bounce) and do not subscribe to it:"
@@ -172,12 +223,92 @@ mod tests {
         let s = classify("machine-a/homelab.3da118c4", &p);
         assert_eq!(s, RegStatus::Unregistered { session_peer: None });
         let text = advisory("machine-a/homelab.3da118c4", &s).join("\n");
-        assert!(text.contains("No registration exists for it"), "{text}");
+        assert!(text.contains("NOT REGISTERED"), "{text}");
         // Must NOT blame the working directory here. An address typed by hand was not derived from
         // anything, and asserting a false cause is the defect this check exists to catch.
         assert!(
             !text.contains("CURRENT DIRECTORY"),
             "claimed a cwd derivation that did not happen: {text}"
         );
+        // And it must name the fix. Since addresses became repo-scoped, an unclaimed address is
+        // usually a missing step rather than a phantom, so the advice that belongs here is how to
+        // claim it — not the blanket "do not subscribe to it" this branch used to print, which sent
+        // a session away from its own correct mailbox.
+        assert!(text.contains("register machine-a/homelab.3da118c4"), "no fix offered: {text}");
+        assert!(
+            !text.contains("do not subscribe to it"),
+            "still telling a session to avoid its own repo address: {text}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recommend_tests {
+    use super::*;
+
+    /// THE INVARIANT THIS FILE EXISTS TO KEEP, and the one it broke: whatever `whoami` tells a
+    /// caller to run must not be the thing it warns them against three lines later.
+    ///
+    /// Reported from a live session on 5 Sep 2026, against 0.4.0: `whoami` printed
+    /// `subscribe: Monitor({command: "... watch machine-a/inventory ..."})` and then
+    /// `WARNING: machine-a/inventory is NOT REGISTERED ... do not subscribe to it`. The recommendation
+    /// and the diagnosis were computed independently and simply disagreed, leaving the reader to
+    /// arbitrate — which is exactly the job printing the line was supposed to remove.
+    #[test]
+    fn no_status_both_warns_and_recommends_a_bare_subscribe() {
+        let cases = [
+            RegStatus::Registered,
+            RegStatus::Unregistered { session_peer: None },
+            RegStatus::Unregistered { session_peer: Some("machine-a/elsewhere".into()) },
+            RegStatus::Unverified("broker down".into()),
+        ];
+        for status in cases {
+            let warns = !advisory("machine-a/thing", &status).is_empty();
+            let bare = matches!(recommend(&status), Recommend::Subscribe);
+            assert!(
+                !(warns && bare),
+                "{status:?} warns AND recommends a plain subscribe — the two disagree"
+            );
+        }
+    }
+
+    /// A registered address is the common case and must stay a single clean line.
+    #[test]
+    fn a_registered_address_is_simply_told_to_subscribe() {
+        assert!(matches!(recommend(&RegStatus::Registered), Recommend::Subscribe));
+    }
+
+    /// Repo-scoped addressing changed what an unregistered address MEANS. It used to imply a
+    /// phantom derived from the wrong directory; now it is usually a perfectly good repo address
+    /// that simply has no row yet, and the fix is to register it — not to avoid it.
+    #[test]
+    fn an_unregistered_address_with_no_sibling_is_told_to_register_first() {
+        assert!(matches!(
+            recommend(&RegStatus::Unregistered { session_peer: None }),
+            Recommend::RegisterThenSubscribe
+        ));
+    }
+
+    /// The original danger is still real and must keep its original answer: same session id, a
+    /// different directory, and a mailbox that already exists somewhere else. Registering the
+    /// derived name here would create a SECOND mailbox and split the session's mail in two.
+    #[test]
+    fn a_sibling_registration_means_use_that_one_not_this() {
+        let r = recommend(&RegStatus::Unregistered {
+            session_peer: Some("machine-a/elsewhere".into()),
+        });
+        match r {
+            Recommend::UseInstead(a) => assert_eq!(a, "machine-a/elsewhere"),
+            other => panic!("expected UseInstead, got {other:?}"),
+        }
+    }
+
+    /// An unreachable broker must never produce a confident instruction in either direction.
+    #[test]
+    fn an_unverified_status_recommends_nothing_confidently() {
+        assert!(matches!(
+            recommend(&RegStatus::Unverified("x".into())),
+            Recommend::Unknown
+        ));
     }
 }

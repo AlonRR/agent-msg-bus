@@ -22,6 +22,32 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-05
+
+### Fixed
+
+- **`whoami` printed a subscribe command for an address it warned against three lines later.**
+  Reported from a live session that picked up 0.4.0, read both halves, and correctly refused to
+  follow the printed line. The recommendation and the diagnosis were computed independently, so
+  nothing stopped them disagreeing — and the whole reason `whoami` prints the command is so the
+  reader does not have to arbitrate. Both now derive from one `RegStatus`, and a test asserts that
+  no status can both warn and recommend a bare subscribe.
+
+  The reporter's point about why it was not merely cosmetic is the reason it is a release on its
+  own: whether the printed line was safe depended on a race they could not see. It was harmless only
+  while something else held the address and the fallback fired; had that claimant gone away, the
+  same line would have bound them to an unregistered address — a socket that connects, a `peers`
+  entry that says live, and mail that never arrives.
+
+- **The advice for an unclaimed address was left over from session-derived addressing.** It said
+  *"do not subscribe to it: the inbox is silently dead"*, which was right when an unregistered
+  derived address meant a phantom minted from the wrong directory. Since 0.3.0 an unregistered
+  repo address is usually just a mailbox nobody has claimed yet — a missing step, not a hazard — so
+  the advice now names the fix (`register <addr>`) instead of sending a session away from its own
+  correct address. The genuine wrong-directory case, where the same session already has a mailbox
+  under another name, keeps its original warning: registering there would mint a second mailbox and
+  split the session's mail in two.
+
 ## [0.4.0] — 2026-09-05
 
 Nothing on the wire carried a version, so "is the fix deployed over there?" could only be answered by
