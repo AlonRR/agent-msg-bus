@@ -632,6 +632,123 @@ success path, and disable the guard to confirm the tests notice.
 
 ---
 
+## Identity should be repo-scoped — the session id is squatting the role slot
+
+**Status: designed, not built.** Written up 5 Sep 2026 after a third session had to hand-migrate its
+own mailbox to get a stable name.
+
+### The error, in one sentence
+
+The address format is `<machine>/<repo>.<role>`, and `derive_address` puts a **session id** in the
+**role** slot — so identity is keyed to a process lifetime instead of to a working context, and every
+restart mints a brand-new empty mailbox.
+
+### Why it is keyed that way, and why that reason does not justify it
+
+The keying is deliberate and the comment on `pinned_address` says why: *two sessions in one repo must
+not silently share an address.* That was a real bug in the old bus, whose whoami file was
+machine-wide, so the second session to start took over the first one's identity and ate its mail.
+That danger is real and must survive any change here.
+
+But it conflates two independent properties:
+
+| Property | What needs it | How it is served today |
+|---|---|---|
+| **Stability over time** — a repo's mailbox outlives any one session | mail queued while nobody was running | **destroyed** by the session suffix |
+| **Uniqueness under concurrency** — two live sessions never share a mailbox | correctness | the suffix… *and also* `Hub::claim`, which already refuses a second live socket with a 409 |
+
+The suffix buys uniqueness that **is already guaranteed by a stronger mechanism**. `claim` decides on
+socket state — this project's own stated principle, "liveness is socket state, not an inference" —
+while the suffix decides on a process id, which is the kind of inference the old bus got wrong. So
+the suffix is redundant against a better guard, and it is paid for with the stability the README
+explicitly promises: *"An address outlives its session… whoever next claims the address drains it."*
+
+Today that sentence is false. It is the design commitment this section exists to make true.
+
+### What it costs, measured
+
+From `peers --all` on 5 Sep 2026, parsed rather than eyeballed:
+
+```
+registry rows              20
+session-suffixed           18   (14 of them offline / dead)
+stable or role-named        2   (one of which was hand-pinned that morning)
+PENDING ON DEAD ADDRESSES  27   messages
+machine-a/tools  ->  5 rows for ONE repo
+```
+
+**27 undelivered messages sit in mailboxes nothing will ever drain**, and every one of them was
+accepted with the sender told it would be delivered on connect. Nothing will connect: those names
+died with their sessions. This is also the accumulation `stale_registrations` was written to mop up —
+the registry "gains an entry per session-directory and never loses one" is a restatement of this bug,
+not an independent one.
+
+And `migrate` — a command whose docstring describes a rare, deliberate rename — has become the
+routine step after every restart. That is the tell.
+
+### The design
+
+Derive `{machine}/{repo}`. Let the suffix appear **only when it is actually needed**, and make that
+decision where liveness is a fact rather than a guess: at the socket.
+
+Three increments, each independently useful, each leaving the tree coherent.
+
+**1. Fallback in `watch` — no wire change, ships alone.**
+`watch` subscribes to `{machine}/{repo}`; on a 409 it falls back to `{machine}/{repo}.{session8}` and
+logs which name it bound and why. Covers the recommended subscribe path with a client-side change
+only.
+*Honest limitation:* the `ws:`/`Monitor` form cannot do this, because it has no retry — which is
+precisely why `watch` exists. Increment 1 leaves that path unchanged.
+
+**2. `/sub` negotiates the name — additive, minor bump.**
+`/sub?addr=<preferred>&fallback=<disambiguated>`. The broker claims `preferred`, or `fallback` if the
+first is held by a live socket, and the **first frame names the address actually bound**.
+This is the increment that makes it correct rather than merely better, because it closes a window
+increment 1 cannot: the hook picks a name at session start, and the socket opens seconds or minutes
+later. Two sessions starting together would both be told the repo name is free, and the loser would
+be left deaf with no fallback — worse than today. Deciding at claim time makes that unrepresentable.
+Old clients ignore the new parameter, so this is a **minor** bump under the rule in `CHANGELOG.md`.
+
+**3. The hook stops guessing.**
+SessionStart emits the preferred name and the fallback rather than an answer, and `whoami` reports
+the **bound** name from the relay's `/health` instead of re-deriving it. Derivation becomes a
+proposal; the socket remains the authority.
+
+### What the freed role slot is then for
+
+`{machine}/{repo}.{role}` finally means what the format always said: `machine-a/agent-msg-bus.review` for
+a session that wants its own mailbox for a specific job. Opt-in via `pin`, which already exists and
+already validates that shape.
+
+### The strongest objection, and the answer
+
+*A repo-scoped mailbox delivers mail to the **next** session in that repo, which may be a different
+task with different context — so a handoff meant for one piece of work could be picked up by a
+session doing something unrelated.*
+
+That is true, and it is the correct semantics for a **mailbox**: it belongs to the repo, not to
+anyone's task. The alternative on offer is not "the right session gets it" — it is the measured
+status quo, where **nobody** gets it. A task-scoped mailbox is a legitimate want, and it is served by
+pinning a role deliberately, not by making every session's identity accidental.
+
+### Migrating the existing mess
+
+- One `migrate` per repo that has stranded mail, onto the repo-scoped name. Cursor adoption is
+  correct as of v0.2.0, so this no longer replays a predecessor's acked history.
+- The 14 dead rows holding nothing become ordinary `prune` candidates.
+- **Do not auto-migrate.** Two live sessions in one repo would collide, and a bulk rename is exactly
+  the operation that should not be inferred.
+
+### Risks to design against
+
+- A session that dies without closing its socket holds the repo name until the broker sees the close.
+  Bounded by TCP, but a half-open socket could hold it; `force=1` and `peers` are the existing
+  escapes, and increment 2 should say plainly which name it bound so the condition is visible.
+- The second session in a repo now gets a suffix as a **loud fallback** rather than as the silent
+  default. Better — but it must be told clearly, or it will read its own name as a bug.
+
+---
+
 ## Known limitations (accepted for v1, written down so they are not rediscovered as surprises)
 
 - **A token authenticates a machine, not an address.** Any holder of a valid token can `send` with
