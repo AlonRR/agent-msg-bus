@@ -543,6 +543,16 @@ recognising the shape is worth more than any individual fix.
 | *"queued for a known address that is not currently subscribed; it will be delivered on connect"* | Four replies, two of them corrections, sat **unread for two days** — that address had been dormant since before the first |
 | A watcher reporting `GUARD FAILED: both swept` | The broker was **unreachable**, so `peers` returned nothing and absence was read as deletion (found on machine-b, in their own instrument) |
 | A `send` that accepted `--from machine-a/agent-msg-bus.3da118c4` | That address **was never registered**. `whoami` derives from the *working directory*, so four messages went out with an unroutable return address and every reply to them bounced |
+| `agent-msg-bus --help \| head -20` showing no `whoami` | `head` cut two lines above it. The **check could not fail**: a truncated pipe exits 0 and says nothing, which is indistinguishable from the thing being absent. Reported as a missing command; it had been there all along |
+| A relay's supervisor reporting `State=Running` | It was reporting the process it launched **13 days earlier**; its most recent relaunch that day was refused with `0x800710E0`. Both readings true at once |
+
+**The instrument is part of the system.** The `head -20` row above is the one worth dwelling on,
+because the session that reported it noticed the pattern itself: *two of its five findings came from
+its own checks being unable to fail, not from the bus.* A check that cannot fail is not weaker
+evidence than one that can — it is not evidence at all, and it wears the same face as a pass. That is
+the same shape as every other row in this table, turned on the tooling instead of the code, which is
+exactly where it is hardest to see. Before believing a clean result, ask what it would have looked
+like had the thing been broken.
 
 **An instrument that reports absence as an event must first prove it can see.** That is the general
 rule, and it is machine-b's — earned by finding it in their own A/B watcher, which with the broker
