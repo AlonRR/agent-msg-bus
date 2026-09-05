@@ -727,8 +727,21 @@ async fn sub(
     };
     // Subscribing is what makes an address real. Until now it was provisional: a valid send target
     // so send-before-subscribe keeps working, but absent from `peers`, which answers "who is here".
-    if let Err(e) = st.store.lock().unwrap().promote(&p.addr) {
-        eprintln!("agent-msg-bus: could not promote {}: {e}", p.addr);
+    //
+    // `ensure_registered` before `promote`, because promote is an UPDATE and does nothing without a
+    // row. An address that subscribes having never registered had neither a row nor a CURSOR, and a
+    // missing cursor reads as the empty string — so it was handed every historical message it
+    // matched. Harmless while every address came from the hook; the common path as soon as a client
+    // can bind a fallback name nobody registered.
+    {
+        let store = st.store.lock().unwrap();
+        let machine = p.addr.split('/').next().unwrap_or_default().to_string();
+        if let Err(e) = store.ensure_registered(&p.addr, &machine) {
+            eprintln!("agent-msg-bus: could not register {}: {e}", p.addr);
+        }
+        if let Err(e) = store.promote(&p.addr) {
+            eprintln!("agent-msg-bus: could not promote {}: {e}", p.addr);
+        }
     }
     let addr = p.addr.clone();
     ws.on_upgrade(move |socket| drive(socket, st, addr, conn_id, rx))

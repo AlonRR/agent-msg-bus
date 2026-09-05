@@ -575,3 +575,50 @@ async fn peers_shows_the_successor_live_and_the_predecessor_only_as_an_alias() {
     assert!(new.live, "the successor holds a socket but is not reported live");
     assert_eq!(new.aliases, vec!["machine-a/old".to_string()]);
 }
+
+/// Subscribing an address nobody registered must not hand it the whole history.
+///
+/// `/sub` only ever called `promote`, an UPDATE that does nothing without a row — so such an address
+/// had no registry row and no CURSOR, and a missing cursor reads as the empty string, which sorts
+/// before every id. Every message it matched replayed on connect. Rare while every address came
+/// from the SessionStart hook; the common path as soon as a client can bind a fallback name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscribing_an_unregistered_address_does_not_replay_the_whole_history() {
+    let h = start().await;
+
+    let c = h.client();
+    blocking(move || {
+        c.register("machine-a/sender", "s0", "machine-a", "r", "/x", 1).unwrap();
+        for i in 0..3 {
+            c.send("machine-a/sender", "machine-a/*", "fyi", &format!("old {i}"), "b", "").unwrap();
+        }
+    })
+    .await;
+
+    // Never registered: straight to the socket, the way a fallback name arrives.
+    let mut sock = connect(&h, "machine-a/never-registered").await;
+    assert!(
+        next_text(&mut sock, Duration::from_millis(700)).await.is_none(),
+        "a brand-new address was replayed history it was never sent"
+    );
+
+    // …and the socket alone was enough to put it on the roster.
+    let c2 = h.client();
+    let p = blocking(move || c2.peers(true).unwrap()).await;
+    let me = p
+        .known
+        .iter()
+        .find(|k| k.addr == "machine-a/never-registered")
+        .expect("subscribing did not create a registry row");
+    assert!(me.live, "it holds a socket but is not reported live");
+
+    // A message sent AFTER it subscribed must still arrive - the cursor starts at the head, it is
+    // not disabled.
+    let c3 = h.client();
+    blocking(move || {
+        c3.send("machine-a/sender", "machine-a/never-registered", "fyi", "new", "b", "").unwrap()
+    })
+    .await;
+    let got = next_text(&mut sock, Duration::from_secs(5)).await.expect("no frame after subscribe");
+    assert_eq!(got["subject"], "new");
+}

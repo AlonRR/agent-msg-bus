@@ -166,6 +166,41 @@ impl Store {
     }
 
     /// Mark an address as having genuinely joined the bus. Called when a subscription is accepted.
+    /// Make sure an address exists in the registry, without disturbing it if it already does.
+    ///
+    /// **Subscribing is the strongest claim there is to an address**, and until now the subscribe
+    /// path could not act on it: it called `promote`, an UPDATE, which does nothing when there is no
+    /// row. An address that subscribed without registering therefore had no registry row and — the
+    /// part that actually hurts — no cursor, so `pending_for` read the empty string and replayed
+    /// every historical message the address matched.
+    ///
+    /// That stayed rare only because every address came from the SessionStart hook. It becomes the
+    /// common path the moment a client can bind a name nobody registered, which is exactly what the
+    /// fallback address does.
+    ///
+    /// Deliberately NOT `register`: that upserts every field, so calling it here with the blank
+    /// metadata the subscribe path has would erase the repo and cwd of any address that reconnects
+    /// — which is every address, on every reconnect.
+    pub fn ensure_registered(&self, addr: &str, machine: &str) -> Result<()> {
+        let (_, ts) = mint_id();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO registry
+               (addr, session_id, machine, repo, cwd, pid, registered_at, provisional)
+             VALUES (?1, '', ?2, '', '', 0, ?3, 1)",
+            params![addr, machine, ts],
+        )?;
+        let head: String = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(id), '') FROM messages", [], |r| r.get(0))?;
+        // OR IGNORE again: a returning address keeps the reading position that makes its unread mail
+        // survive a crash. Only a genuinely new one starts at the head.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO cursors(addr, up_to) VALUES (?1, ?2)",
+            params![addr, head],
+        )?;
+        Ok(())
+    }
+
     pub fn promote(&self, addr: &str) -> Result<()> {
         self.conn
             .execute("UPDATE registry SET provisional = 0 WHERE addr = ?1", params![addr])?;
@@ -1505,6 +1540,68 @@ mod tests {
         assert!(
             !stale.contains(&"machine-a/new".to_string()),
             "the mailbox itself must still be protected: {stale:?}"
+        );
+    }
+
+    // ---- subscribing is the strongest claim to an address ------------------
+
+    /// A socket is the strongest claim there is, but `/sub` only ever `promote`d — an UPDATE, which
+    /// does nothing when there is no row. So an address that subscribed without registering had no
+    /// registry row and, worse, NO CURSOR: `pending_for` then read the empty string and replayed
+    /// every historical message the address matched.
+    ///
+    /// That was a rare path while every address came from the SessionStart hook. It becomes the
+    /// common one as soon as `watch` can bind a fallback name nobody registered.
+    #[test]
+    fn ensure_registered_creates_a_row_and_starts_its_cursor_at_the_head() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/*", "history")).unwrap();
+
+        s.ensure_registered("machine-a/newcomer", "machine-a").unwrap();
+
+        let addrs: Vec<String> = s.peers(true).unwrap().into_iter().map(|r| r.addr).collect();
+        assert!(addrs.contains(&"machine-a/newcomer".to_string()), "no registry row: {addrs:?}");
+        assert_eq!(
+            s.pending_for("machine-a/newcomer").unwrap().len(),
+            0,
+            "a newly seen address was handed the whole history"
+        );
+    }
+
+    /// It must never clobber a registration a real SessionStart hook wrote. `register` upserts every
+    /// field, so calling it from the subscribe path with blank metadata would erase the repo and cwd
+    /// of any address that reconnects — which is every address, on every reconnect.
+    #[test]
+    fn ensure_registered_never_overwrites_metadata_that_is_already_there() {
+        let s = store();
+        s.register(&reg("machine-a/known")).unwrap();
+        s.ensure_registered("machine-a/known", "machine-a").unwrap();
+        let row = s
+            .peers(true)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.addr == "machine-a/known")
+            .expect("row vanished");
+        assert_eq!(row.repo, "homelab", "subscribing erased the repo");
+        assert_eq!(row.cwd, "C:/x", "subscribing erased the cwd");
+    }
+
+    /// And it must not resurrect history for an address that already has a cursor: a returning
+    /// session keeps its reading position, which is what makes its unread mail survive a crash.
+    #[test]
+    fn ensure_registered_leaves_an_existing_cursor_alone() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/known")).unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/known", "unread")).unwrap();
+        assert_eq!(s.pending_for("machine-a/known").unwrap().len(), 1, "precondition");
+
+        s.ensure_registered("machine-a/known", "machine-a").unwrap();
+        assert_eq!(
+            s.pending_for("machine-a/known").unwrap().len(),
+            1,
+            "subscribing moved a returning address's cursor and ate its unread mail"
         );
     }
 }
