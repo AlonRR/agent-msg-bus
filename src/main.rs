@@ -167,6 +167,28 @@ enum Cmd {
     SessionStart,
     /// Print this session's derived address and its Monitor subscribe URL.
     Whoami,
+    /// Replace the installed binary with a newer one, WITHOUT stopping anything.
+    ///
+    /// A running executable cannot be overwritten but can be renamed, so the installed binary is
+    /// moved aside (keeping its version in the name) and the new one copied into place. Processes
+    /// already running keep executing the old file, undisturbed and still on the old build; only new
+    /// invocations pick up the new one.
+    ///
+    /// Nothing is killed and nothing is restarted — which is what makes this safe on a machine whose
+    /// relay supervisor is broken, where killing the relay would leave every session on it deaf with
+    /// no way back. The price is that long-lived processes stay on the old build until something
+    /// restarts them, and this command reports exactly which ones rather than deciding for you.
+    Update {
+        /// New binary to install. Defaults to this repo's `target/release` build.
+        #[arg(long)]
+        from: Option<String>,
+        /// Installed binary to replace. Defaults to this platform's install location.
+        #[arg(long)]
+        to: Option<String>,
+        /// Say what would change, then stop.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Subscribe and print each message as a line, reconnecting forever.
     ///
     /// Use this with Monitor's `command:` form instead of `ws:`. Monitor's ws source ENDS the watch
@@ -228,6 +250,7 @@ fn main() {
             watch(&relay, addr, fallback.clone())
         }
         Cmd::Whoami => whoami(&cli),
+        Cmd::Update { ref from, ref to, dry_run } => update(from.as_deref(), to.as_deref(), dry_run),
         _ => run_client(&cli),
     }
 }
@@ -235,6 +258,64 @@ fn main() {
 #[tokio::main]
 async fn watch(relay: &str, addr: &str, fallback: Option<String>) -> ! {
     agent_msg_bus::watch::run(relay, addr, fallback.as_deref()).await
+}
+
+/// Swap the installed binary. Reports what stays on the old build; never restarts anything.
+fn update(from: Option<&str>, to: Option<&str>, dry_run: bool) {
+    use agent_msg_bus::update as up;
+    let from = from.map(std::path::PathBuf::from).unwrap_or_else(up::default_source_path);
+    let to = to.map(std::path::PathBuf::from).unwrap_or_else(up::default_install_path);
+
+    let plan = match up::plan(&from, &to) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("agent-msg-bus: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("from : {}  ({})", plan.from.display(), plan.from_version);
+    println!(
+        "to   : {}  ({})",
+        plan.to.display(),
+        plan.to_version.clone().unwrap_or_else(|| "not installed, or too old to report".into())
+    );
+
+    if plan.already_current() {
+        println!("\nalready on {}; nothing to do.", plan.from_version);
+        return;
+    }
+    if dry_run {
+        println!("\n--dry-run: would move the installed binary to {}", plan.backup.display());
+        return;
+    }
+
+    if let Err(e) = up::apply(&plan) {
+        eprintln!("agent-msg-bus: {e}");
+        std::process::exit(1);
+    }
+    println!("\ninstalled {} at {}", plan.from_version, plan.to.display());
+    println!("previous build kept at {}", plan.backup.display());
+
+    // The whole point of the rename-swap is that these are STILL RUNNING. Saying so is not a
+    // warning about a failure; it is the completion report. An update that silently left a relay on
+    // the old build would be the same class of quiet half-done state this project keeps fixing.
+    let holders = up::processes_still_on_the_old_build();
+    println!();
+    if holders.is_empty() {
+        println!("Nothing is running the old binary. The next invocation of anything uses the new one.");
+    } else {
+        println!("STILL RUNNING THE OLD BUILD — nothing was killed, by design:");
+        for h in &holders {
+            println!("  {h}");
+        }
+        println!();
+        println!("Each keeps the build it started with until it is restarted:");
+        println!("  - a session's `watch` updates when that session re-arms its subscription;");
+        println!("  - the relay updates only when the relay is restarted, which is a decision about");
+        println!("    whether this machine can get its relay back — check that its supervisor can");
+        println!("    actually relaunch it BEFORE stopping it.");
+    }
 }
 
 fn whoami(cli: &Cli) {
@@ -583,11 +664,16 @@ fn run_client(cli: &Cli) {
                     } else {
                         format!("  (also answers to {})", k.aliases.join(", "))
                     };
+                    // A blank version is an address that registered before versions were on the
+                    // wire. Rendered as `?` rather than left empty, so the column reads as
+                    // "unknown" rather than as a formatting glitch.
+                    let ver = if k.version.is_empty() { "?" } else { k.version.as_str() };
                     println!(
-                        "{:<32} {:<8} {:>3} pending  {}{}",
+                        "{:<32} {:<8} {:>3} pending  {:<8} {}{}",
                         k.addr,
                         if k.live { "live" } else { "offline" },
                         k.pending,
+                        ver,
                         k.repo,
                         alias
                     );
@@ -595,6 +681,22 @@ fn run_client(cli: &Cli) {
                 if p.known.is_empty() {
                     println!("no addresses have joined the bus yet");
                     println!("(sessions that registered but never subscribed are hidden; --all shows them)");
+                } else {
+                    // The version column only means something next to the build it is compared with.
+                    println!();
+                    println!("this client: {}", agent_msg_bus::VERSION);
+                    if let Some(v) = c.broker_version() {
+                        println!("broker     : {v}");
+                    }
+                    let behind: Vec<&str> = p
+                        .known
+                        .iter()
+                        .filter(|k| !k.version.is_empty() && k.version != agent_msg_bus::VERSION)
+                        .map(|k| k.addr.as_str())
+                        .collect();
+                    if !behind.is_empty() {
+                        println!("on a different build: {}", behind.join(", "));
+                    }
                 }
             })
             .map_err(Into::into),
@@ -603,7 +705,7 @@ fn run_client(cli: &Cli) {
             Ok(())
         }
         Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami
-        | Cmd::Watch { .. } => unreachable!("handled in main"),
+        | Cmd::Watch { .. } | Cmd::Update { .. } => unreachable!("handled in main"),
     };
     if let Err(e) = result {
         eprintln!("agent-msg-bus: {e}");

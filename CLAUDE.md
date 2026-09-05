@@ -45,10 +45,23 @@ Both are fixed from v0.2.0 on, so on a current broker `migrate` alone is enough.
 > session id is squatting the **role** slot. See *"Identity should be repo-scoped"* in
 > [docs/plan.md](docs/plan.md) for the proper fix.
 
+## Updating this machine's binary
+
+`agent-msg-bus update` — swaps the installed binary by renaming the old one aside, so **nothing is
+killed and nothing is restarted**. Do NOT use `scripts/install-windows.ps1` to update a running
+machine: it kills every `agent-msg-bus.exe`, which ends every session's inbox and stops the relay,
+and if the relay's supervisor cannot relaunch it the machine stays deaf.
+
+After `update`, already-running processes still hold the old build. A session picks the new one up by
+re-arming its `Monitor` subscription; the relay only on restart, which is a decision about whether
+this machine can get its relay back.
+
 ## Before changing code
 
-- `cargo test` is the baseline — run it unchanged first. 69 tests: store unit tests, CLI argument
-  tests, and integration tests that drive a real broker over a real socket.
+- `cargo test` is the baseline — run it unchanged first, and compare against the count it prints
+  rather than a number written down here, which goes stale within a release or two. Four groups:
+  store/hook/update unit tests, CLI argument tests, integration tests that drive a real broker over
+  a real socket, and relay tests that cover the fallback path through a real 409.
 - **Behaviour change → write the failing test first.** Every fix in this repo's history has one, and
   the commit messages say what the symptom was. Keep that.
 - `cargo clippy --all-targets -- -D warnings` must stay clean; CI gates on it.

@@ -53,7 +53,35 @@ agent-msg-bus send --from <me> --to <them> --kind fyi|request|blocking \
 agent-msg-bus ack <me> <last-message-id>
 agent-msg-bus read <addr>   # read stored messages WITHOUT consuming them
 agent-msg-bus forget <addr> # retire a stale address
+agent-msg-bus update        # swap this machine's binary WITHOUT stopping anything
 ```
+
+## Which build is everything on?
+
+`peers` shows a version per address, and `/health` on the broker and the relay reports each one's
+own. Anything registered before versions existed shows `?` — unknown, which is not the same as
+current.
+
+**When your machine is behind, you are told rather than updated.** A live session hears it from its
+`watch` on connect; a session that was not running hears it at the top of its next SessionStart
+banner. Nothing updates itself: replacing a binary changes a machine, and on this bus that is a
+decision for a person.
+
+`agent-msg-bus update` is the safe way to act on it. A running executable cannot be overwritten but
+*can be renamed*, so the installed binary is moved aside — its version kept in the filename — and
+the new one copied into the freed path. **Nothing is killed and nothing is restarted.** Processes
+already running carry on with the old file, undisturbed:
+
+- a session's `watch` picks up the new build when that session **re-arms its subscription**;
+- the relay picks it up only when the **relay is restarted**.
+
+That last one is a decision, not a step. Restarting the relay makes every session on the machine
+briefly deaf, and if its supervisor cannot relaunch it they stay deaf — so check that the supervisor
+actually works *before* stopping it. See the relay note at the top of this page.
+
+⚠️ **`update` is not the installer.** `scripts/install-windows.ps1` kills every `agent-msg-bus.exe`
+before copying, which is right for a first install and wrong for an update: it ends every session's
+inbox and stops the relay. Use `update` on a machine that is already running.
 
 Arm the subscription once per session, using Monitor's `command:` form:
 

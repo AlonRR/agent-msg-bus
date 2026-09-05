@@ -39,6 +39,8 @@ pub struct PeersOut {
 #[derive(Debug, Deserialize)]
 pub struct KnownPeer {
     pub addr: String,
+    #[serde(default)]
+    pub version: String,
     pub machine: String,
     pub repo: String,
     pub cwd: String,
@@ -79,6 +81,25 @@ impl Client {
         }
     }
 
+    /// The broker's build, or `None` if it cannot be reached or is too old to report one.
+    ///
+    /// `None` is a real answer and not an error: every broker built before versions were on the
+    /// wire returns a `/health` without the field, and that is exactly the case a version check
+    /// most wants to name.
+    pub fn broker_version(&self) -> Option<String> {
+        self.broker_health()?.get("version")?.as_str().map(|s| s.to_string())
+    }
+
+    /// The broker's raw `/health`, or `None` if it could not be reached.
+    ///
+    /// Kept separate from `broker_version` because the two `None`s mean very different things and
+    /// collapsing them loses the more interesting one: a broker that ANSWERS but reports no version
+    /// is a pre-0.2.0 broker, which is a fact worth telling someone, while a broker that cannot be
+    /// reached is not evidence about its build at all.
+    pub fn broker_health(&self) -> Option<serde_json::Value> {
+        self.get("/health").ok()
+    }
+
     pub fn register(
         &self,
         addr: &str,
@@ -88,11 +109,14 @@ impl Client {
         cwd: &str,
         pid: i64,
     ) -> Result<(), ClientError> {
+        // `version` is attached HERE rather than taken as a parameter, deliberately. It is the build
+        // of the binary actually making the request, so no caller can pass a stale or wrong one, and
+        // there is no code path that forgets to send it.
         self.post(
             "/register",
             serde_json::json!({
                 "addr": addr, "session_id": session_id, "machine": machine,
-                "repo": repo, "cwd": cwd, "pid": pid
+                "repo": repo, "cwd": cwd, "pid": pid, "version": crate::VERSION
             }),
         )?;
         Ok(())

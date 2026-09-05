@@ -22,6 +22,47 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-05
+
+Nothing on the wire carried a version, so "is the fix deployed over there?" could only be answered by
+hashing files on each machine. This release answers it, and adds a way to act on the answer that
+cannot take a machine off the bus.
+
+### Added
+
+- **Versions on the wire.** A client sends its build with every `register` — attached by `Client`
+  itself, never by a caller, so it cannot disagree with the binary that made the request. `peers`
+  shows a version column and names any address on a different build; `/health` on both the broker
+  and the relay reports its own. A registration made before this existed reads as `?`, which is
+  deliberately distinguishable from a real version rather than rendered as if it were current.
+
+- **`agent-msg-bus update` — replaces the binary without stopping anything.** A running executable
+  cannot be overwritten but *can be renamed*, so the installed binary is moved aside (its version
+  kept in the filename, so rollback needs no guesswork) and the new one copied into the freed path.
+  Processes already running keep executing the renamed file, undisturbed.
+
+  This matters more than it sounds. The installer kills every `agent-msg-bus.exe` before copying —
+  correct for a first install, and a bad way to ship an update, because it ends every session's
+  `watch` and stops the relay. On a machine whose relay supervisor cannot relaunch it, that is the
+  difference between an update and a bus outage with no automatic way back. `update` cannot cause
+  that, because it never kills or restarts anything.
+
+  The cost is that long-lived processes stay on the old build until something restarts them, so the
+  command **reports exactly which ones** instead of pretending to be finished. It also refuses a
+  source binary that cannot report its own version, rather than installing a file it never checked.
+
+- **Sessions are told when their machine is behind, on both paths.** A live session learns from its
+  `watch`, which emits a `version_skew` line on its first connect — that is the only channel into an
+  already-running session's transcript. A session that was *not* running has no socket to be told on,
+  so the SessionStart hook leads its banner with the mismatch instead. Neither ever updates anything
+  on its own: replacing a binary is a change to a machine, and this project's own rule is that those
+  go to the human.
+
+  A component that answers `/health` without a version is reported as **pre-0.2.0**, not as unknown —
+  `--version` is what 0.2.0 added, so silence dates it. One that cannot be reached at all is reported
+  as nothing, because it is not evidence about a build and guessing would cry wolf on every session
+  started during an outage.
+
 ## [0.3.1] — 2026-09-05
 
 ### Fixed

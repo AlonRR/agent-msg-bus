@@ -74,8 +74,14 @@ async fn health(State(st): State<RelayState>) -> Response {
         v.sort();
         v
     };
-    Json(serde_json::json!({"ok": true, "role": "relay", "broker": *st.broker, "subscribed": held}))
-        .into_response()
+    Json(serde_json::json!({
+        "ok": true,
+        "role": "relay",
+        "version": crate::VERSION,
+        "broker": *st.broker,
+        "subscribed": held,
+    }))
+    .into_response()
 }
 
 async fn sub(

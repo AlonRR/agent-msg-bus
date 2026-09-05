@@ -121,6 +121,7 @@ mod tests {
             live: false,
             pending: 0,
             aliases: vec![],
+            version: String::new(),
         }
     }
     fn peers(addrs: &[&str]) -> Result<PeersOut, String> {

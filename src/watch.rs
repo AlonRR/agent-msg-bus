@@ -28,6 +28,33 @@ use std::time::Duration;
 
 const MAX_BACKOFF: u64 = 30;
 
+/// Is the relay on a different build from this watcher? Returns the sentence to say, if so.
+///
+/// Asked of the RELAY rather than the broker, deliberately: the relay is this machine's, so a skew
+/// against it is something the person reading this transcript can act on, while a skew against the
+/// broker may be another machine's business entirely. It also cannot lie by omission — a relay too
+/// old to report a version predates 0.2.0, which is itself the answer.
+fn version_skew(relay: &str) -> Option<String> {
+    let health: serde_json::Value = ureq::get(&format!("http://{relay}/health"))
+        .timeout(Duration::from_secs(2))
+        .call()
+        .ok()?
+        .into_json()
+        .ok()?;
+    let theirs = health.get("version").and_then(|v| v.as_str());
+    let mine = crate::VERSION;
+    let theirs = match theirs {
+        Some(v) if v == mine => return None,
+        Some(v) => format!("the relay on this machine is {v}"),
+        None => "the relay is too old to report a version, so it predates 0.2.0".to_string(),
+    };
+    Some(format!(
+        "this watcher is {mine}; {theirs}. Messages still flow either way - the relay only proxies. \
+         Run `agent-msg-bus update` to swap the binary without stopping anything, then re-arm this \
+         subscription to pick the new build up."
+    ))
+}
+
 /// Give the fallback name real metadata, best-effort.
 ///
 /// `/sub` already guarantees a row and a cursor exist, so this is not what keeps the session
@@ -113,6 +140,7 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
     let mut backoff: u64 = 1;
     let mut announced_down = false;
     let mut connected_once = false;
+    let mut announced_version = false;
     // The bound name is STICKY. Fallback is a first-connect decision only: after that, a 409 on
     // reconnect is almost always this watcher's own socket not yet released by the relay, and
     // falling back again would change the session's identity mid-life — so every peer's `peers`
@@ -150,6 +178,16 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                 bound = name;
                 if announced_down || !connected_once {
                     status("connected", &format!("subscribed as {bound} via {relay}"));
+                }
+                // THIS IS HOW A LIVE SESSION LEARNS IT IS BEHIND. A session that was offline is told
+                // by the SessionStart hook; one that is already running has no such moment, and its
+                // only channel to its own transcript is this stream. Said once per process, on the
+                // first successful connect, so a reconnect loop cannot turn it into a drip.
+                if !announced_version {
+                    announced_version = true;
+                    if let Some(note) = version_skew(relay) {
+                        status("version_skew", &note);
+                    }
                 }
                 announced_down = false;
                 connected_once = true;

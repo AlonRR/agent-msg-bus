@@ -74,13 +74,22 @@ fn unauthorized() -> Response {
 
 // ---- HTTP ------------------------------------------------------------------
 
+/// Reports the broker's own build.
+///
+/// Nothing on the wire used to carry a version, so "is the fix deployed over there?" could only be
+/// answered by hashing files on each machine. This is the one endpoint every client can already
+/// reach without a token, which makes it the right place to answer it.
 async fn health() -> impl IntoResponse {
-    Json(serde_json::json!({"ok": true}))
+    Json(serde_json::json!({"ok": true, "role": "broker", "version": crate::VERSION}))
 }
 
 #[derive(Deserialize)]
 pub struct RegisterBody {
     pub addr: String,
+    /// The client build registering. Sent automatically by `Client`, never by a caller, so it
+    /// cannot disagree with the binary that actually made the request.
+    #[serde(default)]
+    pub version: String,
     #[serde(default)]
     pub session_id: String,
     #[serde(default)]
@@ -104,6 +113,7 @@ async fn register(
     }
     let reg = Registration {
         addr: b.addr.clone(),
+        version: b.version,
         session_id: b.session_id,
         machine: b.machine,
         repo: b.repo,
@@ -602,6 +612,9 @@ struct PeersOut {
 #[derive(Serialize)]
 struct KnownPeer {
     addr: String,
+    /// The client build this address last registered with; empty means it registered before
+    /// versions were on the wire.
+    version: String,
     machine: String,
     repo: String,
     cwd: String,
@@ -660,6 +673,8 @@ async fn peers(
                 machine: addr.split('/').next().unwrap_or_default().to_string(),
                 addr,
                 session_id: String::new(),
+                // A socket alone says nothing about which build is behind it.
+                version: String::new(),
                 repo: String::new(),
                 cwd: String::new(),
                 pid: 0,
@@ -671,6 +686,7 @@ async fn peers(
     let known = regs
         .into_iter()
         .map(|r| KnownPeer {
+            version: r.version,
             live: st.hub.is_live(&r.addr),
             pending: store.pending_for(&r.addr).map(|v| v.len()).unwrap_or(0),
             aliases: store.aliases_of(&r.addr).unwrap_or_default(),

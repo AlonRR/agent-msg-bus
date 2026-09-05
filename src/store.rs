@@ -48,6 +48,10 @@ pub struct Registration {
     pub repo: String,
     pub cwd: String,
     pub pid: i64,
+    /// The client build that registered this address. Empty means "registered before versions were
+    /// on the wire", which is deliberately distinguishable from any real version string.
+    #[serde(default)]
+    pub version: String,
 }
 
 /// Does `addr` receive a message addressed to `pattern`?
@@ -162,10 +166,20 @@ impl Store {
                 "ALTER TABLE registry ADD COLUMN provisional INTEGER NOT NULL DEFAULT 1;",
             )?;
         }
+
+        // The client build each address last registered with. Same ALTER-in-place pattern, and the
+        // default matters: an existing row means an address that registered before versions were on
+        // the wire, which is not the same as one that reported an empty string. '' reads as
+        // "unknown" everywhere it is displayed, and that is the honest answer for those rows.
+        let has_version: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('registry') WHERE name = 'version'")?
+            .exists([])?;
+        if !has_version {
+            conn.execute_batch("ALTER TABLE registry ADD COLUMN version TEXT NOT NULL DEFAULT '';")?;
+        }
         Ok(Store { conn })
     }
 
-    /// Mark an address as having genuinely joined the bus. Called when a subscription is accepted.
     /// Make sure an address exists in the registry, without disturbing it if it already does.
     ///
     /// **Subscribing is the strongest claim there is to an address**, and until now the subscribe
@@ -201,6 +215,7 @@ impl Store {
         Ok(())
     }
 
+    /// Mark an address as having genuinely joined the bus. Called when a subscription is accepted.
     pub fn promote(&self, addr: &str) -> Result<()> {
         self.conn
             .execute("UPDATE registry SET provisional = 0 WHERE addr = ?1", params![addr])?;
@@ -216,11 +231,21 @@ impl Store {
         // re-registers it. Otherwise a routine re-register would hide a live address from `peers`.
         self.conn.execute(
             "INSERT INTO registry
-               (addr, session_id, machine, repo, cwd, pid, registered_at, provisional)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
+               (addr, session_id, machine, repo, cwd, pid, registered_at, provisional, version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)
              ON CONFLICT(addr) DO UPDATE SET
-               session_id = ?2, machine = ?3, repo = ?4, cwd = ?5, pid = ?6, registered_at = ?7",
-            params![reg.addr, reg.session_id, reg.machine, reg.repo, reg.cwd, reg.pid, ts],
+               session_id = ?2, machine = ?3, repo = ?4, cwd = ?5, pid = ?6, registered_at = ?7,
+               version = ?8",
+            params![
+                reg.addr,
+                reg.session_id,
+                reg.machine,
+                reg.repo,
+                reg.cwd,
+                reg.pid,
+                ts,
+                reg.version
+            ],
         )?;
         let head: String = self
             .conn
@@ -382,6 +407,9 @@ impl Store {
             self.register(&Registration {
                 addr: to.to_string(),
                 session_id: String::new(),
+                // Unknown, and honestly so: migrate creates this row on the successor's behalf and
+                // has no idea which build that session runs.
+                version: String::new(),
                 machine: to.split('/').next().unwrap_or_default().to_string(),
                 repo: String::new(),
                 cwd: String::new(),
@@ -653,6 +681,9 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![cutoff_ts], |r| {
             Ok(Registration {
+                // Not selected: this query only feeds sweep candidacy, which has nothing to do with
+                // which build an address last registered with.
+                version: String::new(),
                 addr: r.get(0)?,
                 session_id: r.get(1)?,
                 machine: r.get(2)?,
@@ -761,15 +792,16 @@ impl Store {
         // shows up as a session of its own, permanently offline, carrying a `pending` count nothing
         // drains; that row is exactly what a peer reads to decide whether the session is reachable.
         let sql = if include_provisional {
-            "SELECT addr, session_id, machine, repo, cwd, pid FROM registry
+            "SELECT addr, session_id, machine, repo, cwd, pid, version FROM registry
               WHERE addr NOT IN (SELECT alias FROM aliases) ORDER BY addr"
         } else {
-            "SELECT addr, session_id, machine, repo, cwd, pid FROM registry
+            "SELECT addr, session_id, machine, repo, cwd, pid, version FROM registry
               WHERE provisional = 0 AND addr NOT IN (SELECT alias FROM aliases) ORDER BY addr"
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |r| {
             Ok(Registration {
+                version: r.get(6)?,
                 addr: r.get(0)?,
                 session_id: r.get(1)?,
                 machine: r.get(2)?,
@@ -798,6 +830,7 @@ mod tests {
             repo: "homelab".into(),
             cwd: "C:/x".into(),
             pid: 1,
+            version: "9.9.9-test".into(),
         }
     }
 

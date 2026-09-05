@@ -622,3 +622,45 @@ async fn subscribing_an_unregistered_address_does_not_replay_the_whole_history()
     let got = next_text(&mut sock, Duration::from_secs(5)).await.expect("no frame after subscribe");
     assert_eq!(got["subject"], "new");
 }
+
+/// A version has to survive the whole round trip, or "which build is that session on?" stays
+/// unanswerable without hashing files on each machine — which is what it cost before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_registered_address_reports_the_build_it_registered_with() {
+    let h = start().await;
+    let c = h.client();
+    blocking(move || c.register("machine-a/a", "s1", "machine-a", "r", "/x", 1).unwrap()).await;
+
+    let c2 = h.client();
+    let p = blocking(move || c2.peers(true).unwrap()).await;
+    let me = p.known.iter().find(|k| k.addr == "machine-a/a").expect("no row");
+    assert_eq!(
+        me.version,
+        agent_msg_bus::VERSION,
+        "the client's own build did not reach the registry"
+    );
+}
+
+/// The broker answers with its build on the one endpoint every client can already reach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_broker_reports_its_version_on_health() {
+    let h = start().await;
+    let c = h.client();
+    let v = blocking(move || c.broker_version()).await;
+    assert_eq!(v.as_deref(), Some(agent_msg_bus::VERSION), "broker /health carries no version");
+}
+
+/// An address registered before versions existed must be distinguishable from one reporting a real
+/// version — not silently rendered as though it were current.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_address_that_never_reported_a_version_reads_as_unknown() {
+    let h = start().await;
+    {
+        let store = h.state.store.lock().unwrap();
+        store.ensure_registered("machine-a/ancient", "machine-a").unwrap();
+    }
+    let c = h.client();
+    let p = blocking(move || c.peers(true).unwrap()).await;
+    let old = p.known.iter().find(|k| k.addr == "machine-a/ancient").expect("no row");
+    assert!(old.version.is_empty(), "an unknown version was invented rather than left blank");
+}
