@@ -13,12 +13,62 @@ the binary can lie about which build it is, is a tag that does not match. Releas
 3. `cargo test` — the version test is part of it.
 4. Commit, then `git tag -a vX.Y.Z -m "vX.Y.Z"`, then push the branch **and** the tag.
 
-While the major version is 0: a breaking change to the **wire contract** — the `/sub`, `/send`,
-`/register` and `/ack` shapes clients bind to — bumps the **minor**, because that is the one change
-every deployed client has to be updated for. Everything else bumps the patch. The storage behind
-that contract is explicitly not part of it and can change in a patch.
+While the major version is 0, the **minor** bumps for a change every deployed client has to be
+updated for. That is two things, not one: a breaking change to the **wire contract** (the `/sub`,
+`/send`, `/register` and `/ack` shapes clients bind to), **or a change to how addresses are
+derived** — because a session whose name changes is as unreachable to its peers as one whose
+protocol changed. Everything else bumps the patch. The storage behind the wire contract is
+explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
+
+## [0.3.0] — 2026-09-05
+
+The release where the README's oldest promise — *"an address outlives its session"* — becomes true.
+
+**Deployable as a client-only change.** Two sessions in one repo are on one machine and therefore one
+relay, and the relay answers 409 from its own local state before opening anything upstream. So the
+identity change works against an unmodified broker; reinstalling clients is enough.
+
+### Changed
+
+- **An address is now the repo's, not the session's**: `<machine>/<repo>`, with no session id in it.
+  It used to be `<machine>/<repo>.<session-id>` — a session id sitting in the slot the address format
+  reserves for a *role*, which keyed identity to a process lifetime instead of a working context. So
+  every restart minted a fresh empty mailbox and the previous one's mail was stranded under a name
+  nothing would answer to again. Measured before the change: **27 unread messages across 14 dead
+  addresses**, one repo holding five of them.
+
+  The suffix existed to stop two sessions in one repo sharing a mailbox. That is still prevented —
+  by the one-socket-per-address rule, which decides on socket state rather than inferring from a
+  process id. A second live session in a repo is refused with a 409 at claim time and binds
+  `<machine>/<repo>.<session-prefix>` instead, announcing that it did so.
+
+- **The SessionStart banner now hands out `Monitor({command: "… watch …"})`, not `Monitor({ws: …})`.**
+  It had been recommending `ws:` while `watch`'s own docstring said not to — a `ws:` watch ends when
+  its socket closes and does not retry, so a relay restart left the session silently deaf. The banner
+  was simply never updated when `watch` landed. `ws:` still works and is now the deprecated path; it
+  cannot fall back, because it cannot react to a 409.
+
+### Added
+
+- `watch --fallback <addr>`: bind this name if the primary is already held. The decision is
+  first-connect only and **sticky** — a 409 on reconnect is almost always this watcher's own socket
+  not yet released, and falling back twice would change a session's identity mid-life. A **pinned**
+  address is deliberately offered no fallback: a pin is an explicit claim, so a collision on one is
+  an error to surface, not a cue to answer to a different name.
+- `whoami` now reports the **bound** address, read from the relay rather than re-derived, alongside
+  the primary and the fallback. Deriving it twice only reproduces the same guess, so a session that
+  had fallen back was previously told, confidently, an address nothing was listening on.
+
+### Fixed
+
+- **Subscribing an unregistered address replayed the entire history to it.** `/sub` called only
+  `promote`, an UPDATE that does nothing without a row, so such an address had no registry row and no
+  cursor — and a missing cursor reads as the empty string, which sorts before every id. Harmless
+  while every address came from the hook; the common path as soon as a client can bind a fallback
+  name nobody registered. `/sub` now ensures a row and a cursor at the head, without overwriting the
+  metadata of an address that already has them.
 
 ## [0.2.0] — 2026-09-03
 

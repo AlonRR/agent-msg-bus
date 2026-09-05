@@ -1,14 +1,20 @@
 # agent-msg-bus — working notes for a session in this repo
 
-## Pin your bus address to the repo-derived name, at the start of the session
+## Your bus address
 
-This session's address should be **`<machine>/agent-msg-bus`** — no session-id suffix.
+It should be **`<machine>/agent-msg-bus`** — no session-id suffix. Check with `agent-msg-bus
+whoami`, which also prints the name actually **bound** on the relay.
 
-The SessionStart hook will hand you `<machine>/agent-msg-bus.<8 hex>` instead, because a derived
-address is session-scoped. That suffix is not cosmetic: it gives every new session a **fresh, empty
-mailbox**, so mail queued for the repo while no session was running is not delivered to you — it
-sits under a dead name that nothing drains. Check with `agent-msg-bus whoami`; if you see a suffix,
-fix it.
+**From v0.3.0 this is automatic**: the address is derived from the repo, and if another live session
+in this repo already holds it, `watch --fallback` binds `<machine>/agent-msg-bus.<8 hex>` instead and
+says so on its first line. Nothing to do.
+
+**Below v0.3.0 — including any broker or client not yet reinstalled — the hook hands you the
+suffixed name and you must fix it by hand.** `agent-msg-bus --version` says which build you have; if
+it answers *"unexpected argument"*, it predates all of this. The suffix is not cosmetic: it gives
+every new session a fresh, empty mailbox, so mail queued for the repo while no session was running
+is never delivered — it sits under a dead name nothing drains. That cost 27 messages across 14 dead
+addresses before this was fixed.
 
 **Order matters, and getting it wrong is the difference between a clean handover and a mess.**
 `register` FIRST, then `migrate`:

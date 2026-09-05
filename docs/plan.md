@@ -634,8 +634,21 @@ success path, and disable the guard to confirm the tests notice.
 
 ## Identity should be repo-scoped — the session id is squatting the role slot
 
-**Status: designed, not built.** Written up 5 Sep 2026 after a third session had to hand-migrate its
-own mailbox to get a stable name.
+**Status: BUILT in v0.3.0** (increments 1 and 3). Written up 5 Sep 2026 after a third session had to
+hand-migrate its own mailbox to get a stable name, and built the same day.
+
+> **Correction to this section's first draft, which claimed increment 2 was required.** It is not.
+> The draft argued that the hook picks a name minutes before the socket opens, so two simultaneous
+> starts would both be told the repo address is free and the loser would be left deaf. That is wrong
+> whenever the subscriber is `watch`: the fallback is *reactive to the 409*, and the 409 comes from
+> the claim itself, atomically. There is no window to lose. The argument only holds for the `ws:`
+> form, which cannot retry — so the fix was to stop the hook recommending `ws:`, not to change the
+> wire. **Increment 2 is deferred, and may never be needed.**
+>
+> A second thing the draft got wrong by omission: collisions are always **machine-local**, because
+> two sessions in one repo are on one machine and therefore one relay — and the relay answers 409
+> from its own `busy` set before opening anything upstream. So this ships as a client change and
+> works against an unmodified broker. No CT deploy is required for the identity fix itself.
 
 ### The error, in one sentence
 
@@ -693,26 +706,30 @@ decision where liveness is a fact rather than a guess: at the socket.
 
 Three increments, each independently useful, each leaving the tree coherent.
 
-**1. Fallback in `watch` — no wire change, ships alone.**
-`watch` subscribes to `{machine}/{repo}`; on a 409 it falls back to `{machine}/{repo}.{session8}` and
-logs which name it bound and why. Covers the recommended subscribe path with a client-side change
-only.
-*Honest limitation:* the `ws:`/`Monitor` form cannot do this, because it has no retry — which is
-precisely why `watch` exists. Increment 1 leaves that path unchanged.
+**1. Fallback in `watch` — no wire change. ✅ BUILT.**
+`watch` subscribes to `{machine}/{repo}`; on a 409 it binds `{machine}/{repo}.{session8}` instead and
+announces on its first line which name it bound and that mail to the repo address will not reach it.
+Two properties that are easy to get wrong:
+- **Sticky.** Fallback is a first-connect decision only. A 409 on *reconnect* is almost always this
+  watcher's own socket not yet released, and falling back again would change a session's identity
+  mid-life — so every peer's roster entry and every reply in flight would name something it had
+  stopped answering to.
+- **Never for a pin.** A pin is an explicit claim of identity, so a collision on one is an error the
+  session should see, not a cue to invent `X.review.abc123`. The hook offers `--fallback` only for a
+  name it derived.
 
-**2. `/sub` negotiates the name — additive, minor bump.**
-`/sub?addr=<preferred>&fallback=<disambiguated>`. The broker claims `preferred`, or `fallback` if the
-first is held by a live socket, and the **first frame names the address actually bound**.
-This is the increment that makes it correct rather than merely better, because it closes a window
-increment 1 cannot: the hook picks a name at session start, and the socket opens seconds or minutes
-later. Two sessions starting together would both be told the repo name is free, and the loser would
-be left deaf with no fallback — worse than today. Deciding at claim time makes that unrepresentable.
-Old clients ignore the new parameter, so this is a **minor** bump under the rule in `CHANGELOG.md`.
+**2. `/sub` negotiates the name — DEFERRED, and probably unnecessary.**
+`/sub?addr=<preferred>&fallback=<disambiguated>`, with the broker choosing and naming the bound
+address in the first frame. This would only add something for the `ws:` form, which cannot react to
+a 409. Since increment 3 stops the hook recommending `ws:` at all, there is no longer a path that
+needs it. Left written down rather than built, in case `ws:` ever has to be supported again.
 
-**3. The hook stops guessing.**
-SessionStart emits the preferred name and the fallback rather than an answer, and `whoami` reports
-the **bound** name from the relay's `/health` instead of re-deriving it. Derivation becomes a
-proposal; the socket remains the authority.
+**3. The hook stops guessing. ✅ BUILT.**
+SessionStart emits `Monitor({command: "… watch <addr> --fallback <addr>.<session8>"})` instead of a
+`ws:` URL, and `whoami` reports the **bound** name read from the relay's `/health` rather than
+re-deriving it — because deriving it twice only ever reproduces the same guess, and a session that
+fell back would otherwise be told, confidently, an address nothing is listening on. Derivation
+becomes a proposal; the socket is the authority.
 
 ### What the freed role slot is then for
 

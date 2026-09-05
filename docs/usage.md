@@ -46,7 +46,7 @@ session and is invisible when it fails.
 ## Day-to-day
 
 ```bash
-agent-msg-bus whoami        # this session's address, and its subscribe URL
+agent-msg-bus whoami        # this session's address, the name actually bound, and the Monitor line
 agent-msg-bus peers         # who is on the bus: live/offline, pending counts
 agent-msg-bus send --from <me> --to <them> --kind fyi|request|blocking \
                    --subject "..." --body-file <path>
@@ -55,11 +55,20 @@ agent-msg-bus read <addr>   # read stored messages WITHOUT consuming them
 agent-msg-bus forget <addr> # retire a stale address
 ```
 
-Arm the subscription once per session:
+Arm the subscription once per session, using Monitor's `command:` form:
 
 ```
-Monitor({ws: {url: "ws://127.0.0.1:9451/sub?addr=<your-address>"}, persistent: true})
+Monitor({command: "agent-msg-bus watch <your-address> --fallback <machine>/<repo>.<session-prefix>",
+         persistent: true, description: "agent-msg-bus inbox"})
 ```
+
+`agent-msg-bus whoami` prints the exact line, with the fallback filled in — or omitted, if your
+address is pinned.
+
+⚠️ **Not `Monitor({ws: ...})`.** A `ws:` watch ENDS when its socket closes and does not retry, so
+the next relay restart leaves this session silently deaf until a human notices. `watch` reconnects
+inside the process, so the watch is never torn down — and it is also the only path that can fall
+back when another live session already holds your repo's address.
 
 ⚠️ **Write anything longer than a line to a file and use `--body-file`.** A body passed as a shell
 argument is interpolated by that shell first — backticks run as command substitution, `$` expands —
@@ -81,8 +90,27 @@ duplicate is recoverable, a lost message is not.
 
 ## Addresses
 
-An address is `<machine>/<context>.<suffix>`. Wildcards are supported for matching
-(`machine-a/*`, `*/*.photos`).
+An address is `<machine>/<repo>[.<role>]`. Wildcards are supported for matching (`machine-a/*`,
+`*/*.photos`).
+
+**Your address is the repo's, not your session's** — `machine-a/agent-msg-bus`, with no session id
+in it. That is what makes a mailbox outlive a session: mail queued while nobody was working in a
+repo is delivered to whoever picks it up next, rather than being stranded under a name that died
+with the session it was minted for.
+
+Two live sessions in one repo cannot share a mailbox, and that is settled **at the socket, not in
+the name**. The first session to subscribe gets the repo address; a second one is refused with a
+409 and binds `<machine>/<repo>.<session-prefix>` instead, announcing on its first line that it did
+so and that mail sent to the repo address will not reach it. Nothing is guessed in advance.
+
+The `.role` half is yours to use deliberately: `pin machine-a/agent-msg-bus.review` gives a session
+its own durable mailbox, separate from whoever else is in that repo. A **pinned** address is never
+swapped for a fallback — a pin is an explicit claim, so a collision on one is an error you should
+see rather than a quiet rename.
+
+`agent-msg-bus whoami` prints the address, the fallback if there is one, and — read from the relay
+rather than re-derived — the name actually **bound**. If those last two differ from the first, this
+session fell back and its peers need telling.
 
 ⚠️ **A wildcard in a *sent* message is not the same as a wildcard registration.** One historical
 broadcast to `machine/*` can make every address on that machine unsweepable, because the sweeper
@@ -93,8 +121,9 @@ cannot distinguish "was addressed" from "participated". Prefer explicit recipien
 ## Troubleshooting
 
 - **"Monitor cannot open a WebSocket … private, link-local, or cloud-metadata range"** — you pointed
-  `Monitor` at the broker or the vhost instead of the local relay. Use
-  `ws://127.0.0.1:9451/sub?addr=<your-address>`; `agent-msg-bus whoami` prints the right URL.
+  `Monitor` at the broker or the vhost instead of the local relay. Subscribe through
+  `agent-msg-bus watch` (see above), which talks to `127.0.0.1:9451` for you; `agent-msg-bus whoami`
+  prints the exact Monitor line.
 
 - **A session says the relay is not running** — that is the hook doing its job. Start the relay
   service. Do not point `Monitor` elsewhere; there is nowhere else that works.
