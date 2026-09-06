@@ -255,7 +255,15 @@ async fn ack(
     if let Some(why) = crate::store::cursor_refusal(&b.addr, &b.up_to_id) {
         return bad_request(&why);
     }
-    match st.store.lock().unwrap().ack(&b.addr, &b.up_to_id) {
+    let store = st.store.lock().unwrap();
+    // Separate status from the malformed-cursor case: a client can tell "I sent nonsense" from
+    // "that mailbox does not exist", and the second is the one that means a typo'd address.
+    match store.unknown_mailbox_refusal(&b.addr) {
+        Ok(Some(why)) => return not_found(&why),
+        Err(e) => return server_error(e),
+        Ok(None) => {}
+    }
+    match store.ack(&b.addr, &b.up_to_id) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => server_error(e),
     }
@@ -708,6 +716,12 @@ async fn peers(
 /// mistaken for the broker having broken.
 fn bad_request(m: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response()
+}
+
+/// Addressed to a mailbox that does not exist. Distinct from `bad_request` so a caller can tell a
+/// malformed request from a well-formed one aimed at the wrong name.
+fn not_found(m: &str) -> Response {
+    (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": m}))).into_response()
 }
 
 fn server_error(e: rusqlite::Error) -> Response {

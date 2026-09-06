@@ -22,6 +22,38 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.7] — 2026-09-06
+
+### Fixed
+
+- **`ack` on an address nothing answers to reported success instead of refusing.** It resolved
+  aliases, then wrote a cursor unconditionally — so a name with no registration behind it got a
+  cursor row of its own and the caller got `{"ok": true}`. Now HTTP **404**, with the address named.
+
+  The stray row was never the problem. The confirmation was. The realistic way to reach this is a
+  typo: a session acks `machine-a/tool` instead of `machine-a/tools`, is told it worked, and stops looking —
+  while its real mailbox keeps every message unacked and replays the whole backlog on every
+  reconnect. Every indicator the session can see says healthy, and the one command that would have
+  revealed the problem is the one it believes it already ran.
+
+  That is the same shape as the two bugs already fixed in 0.4.2 and 0.4.3, and it is the shape worth
+  naming: **an operation that cannot fail is indistinguishable from one that did nothing.** The bus
+  is a place where "it worked" is often the only evidence anyone gets, so an acknowledgement that
+  acknowledges nothing is worse than an error.
+
+  Aliases still ack normally — a migrated-away name is a legitimate target, which is the entire
+  point of the alias, so the check resolves through `mailbox_of` before deciding. A test covers that
+  case specifically, because the naive version of this fix breaks migration.
+
+  Found by noticing that `forget` said *"was not registered"* about an address `ack` had just
+  reported success for. Two commands disagreeing about whether something exists.
+
+### Changed
+
+- `/ack` now distinguishes its two client errors by status: **400** for a malformed cursor,
+  **404** for a well-formed ack aimed at a mailbox that does not exist. A caller can tell "I sent
+  nonsense" from "I sent it to the wrong name" without parsing the message.
+
 ## [0.4.6] — 2026-09-06
 
 ### Fixed

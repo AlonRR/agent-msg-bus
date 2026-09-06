@@ -340,6 +340,29 @@ impl Store {
     ///
     /// A cycle — `migrate a -> b` then `migrate b -> a`, which is operator error — stops at the
     /// first repeat rather than hanging the broker.
+    /// Why `addr` cannot be acked at all, or `None` if some mailbox really answers to it.
+    ///
+    /// Aliases are resolved first, because acking a migrated-away name is legitimate — that is what
+    /// the alias exists for. What this refuses is a name no registration answers to. Writing that
+    /// cursor would succeed at the SQL level and report success to the caller while meaning
+    /// nothing, so a mistyped address looks handled while the real mailbox keeps every message
+    /// unacked and replays the lot on each reconnect.
+    pub fn unknown_mailbox_refusal(&self, addr: &str) -> Result<Option<String>> {
+        let owner = self.mailbox_of(addr)?;
+        let known: bool = self
+            .conn
+            .query_row("SELECT 1 FROM registry WHERE addr = ?1", params![owner], |_| Ok(true))
+            .unwrap_or(false);
+        if known {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "no registration answers to '{addr}'. Refusing to ack: the cursor would be written for \
+             a mailbox that does not exist, and the ack would report success — so a mistyped \
+             address reads as handled while the real mailbox replays every message forever."
+        )))
+    }
+
     pub fn mailbox_of(&self, addr: &str) -> Result<String> {
         let mut cur = addr.to_string();
         let mut seen = vec![cur.clone()];
@@ -553,6 +576,9 @@ impl Store {
         // An error is recoverable; a silenced inbox is not, and nothing in `peers` or `pending`
         // would ever hint at the cause.
         if let Some(why) = cursor_refusal(addr, up_to) {
+            return Err(rusqlite::Error::InvalidParameterName(why));
+        }
+        if let Some(why) = self.unknown_mailbox_refusal(addr)? {
             return Err(rusqlite::Error::InvalidParameterName(why));
         }
         let owner = self.mailbox_of(addr)?;
@@ -1758,5 +1784,42 @@ mod tests {
         assert!(!is_message_id("20260906T093128443_000000365"), "wrong dash accepted");
         assert!(!is_message_id(" 20260906T093128443-000000365"), "leading space accepted");
         assert!(!is_message_id("2026090aT093128443-000000365"), "non-digit accepted");
+    }
+
+    /// Acking a name nothing answers to used to report success and create a cursor for a mailbox
+    /// that does not exist. The damage is not the stray row — it is the confirmation. A session
+    /// that mistypes its own address is told the ack worked, so it stops looking, while its real
+    /// mailbox keeps every message unacked and replays the lot on every reconnect.
+    #[test]
+    fn acking_an_address_nothing_answers_to_is_refused_rather_than_confirmed() {
+        let s = store();
+        s.register(&reg("machine-a/tools")).unwrap();
+
+        let err = s.ack("machine-a/tool", "20260906T093128443-000000365").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("machine-a/tool"),
+            "the refusal did not name the address that does not exist: {msg}"
+        );
+        assert!(
+            s.ack("machine-a/tools", "20260906T093128443-000000365").is_ok(),
+            "the real address was refused too"
+        );
+    }
+
+    /// The check must resolve aliases, not just look for a registry row under the name given. A
+    /// migrated-away address is exactly the case where acking the OLD name is legitimate — that is
+    /// what the alias is for — so a naive existence check would break migration.
+    #[test]
+    fn acking_a_migrated_addresss_old_name_still_works() {
+        let s = store();
+        s.register(&reg("machine-a/old")).unwrap();
+        s.register(&reg("machine-a/new")).unwrap();
+        s.migrate("machine-a/old", "machine-a/new").unwrap();
+
+        assert!(
+            s.ack("machine-a/old", "20260906T093128443-000000365").is_ok(),
+            "acking an alias of a live mailbox was refused"
+        );
     }
 }

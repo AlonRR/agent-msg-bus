@@ -697,3 +697,46 @@ async fn a_refused_ack_is_a_client_error_not_a_server_fault() {
     );
     assert!(msg.contains("is not a message id"), "the refusal did not explain itself: {msg}");
 }
+
+/// Two different client mistakes, two different answers. A malformed cursor is 400; a well-formed
+/// ack aimed at a name nothing answers to is 404 — and that second one is the typo case, which used
+/// to return 200 with `{"ok":true}` after writing a cursor for a mailbox that did not exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn acking_an_unknown_mailbox_is_404_not_a_cheerful_ok() {
+    let h = start().await;
+    let c = h.client();
+    blocking(move || c.register("machine-a/tools", "s1", "machine-a", "r", "/x", 1).unwrap()).await;
+
+    let base = h.base.clone();
+    let (status, body): (u16, serde_json::Value) = blocking(move || {
+        match ureq::post(&format!("{base}/ack"))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(serde_json::json!({
+                "addr": "machine-a/tool", "up_to_id": "20260906T093128443-000000365"
+            })) {
+            Ok(r) => (r.status(), r.into_json().unwrap()),
+            Err(ureq::Error::Status(code, r)) => (code, r.into_json().unwrap()),
+            Err(e) => panic!("transport error, not an HTTP status: {e}"),
+        }
+    })
+    .await;
+
+    assert_eq!(status, 404, "a typo'd address was accepted as a real mailbox");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("machine-a/tool"),
+        "the refusal did not name the address: {body:?}"
+    );
+
+    // The correctly-spelled address is unaffected.
+    let base = h.base.clone();
+    let ok = blocking(move || {
+        ureq::post(&format!("{base}/ack"))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(serde_json::json!({
+                "addr": "machine-a/tools", "up_to_id": "20260906T093128443-000000365"
+            }))
+            .is_ok()
+    })
+    .await;
+    assert!(ok, "the real address was refused alongside the typo");
+}
