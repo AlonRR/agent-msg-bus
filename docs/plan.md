@@ -546,6 +546,7 @@ recognising the shape is worth more than any individual fix.
 | `agent-msg-bus --help \| head -20` showing no `whoami` | `head` cut two lines above it. The **check could not fail**: a truncated pipe exits 0 and says nothing, which is indistinguishable from the thing being absent. Reported as a missing command; it had been there all along |
 | `${SENDER:-machine-a/tools.7b7dddac}` guarding a fragile id extraction | The extraction returned empty and **the default fired**, turning "I could not find out" into a confident wrong recipient. A guard that cannot tell failure from a legitimate value will substitute one for the other, silently |
 | `ack <addr> "$ID"` reporting `acked … up to …` | `$ID` was a sentence from a message body. Cursors compare lexicographically, so prose sorts above every id that can ever be minted — the mailbox matched nothing again, **permanently**, with no error anywhere |
+| A send confirmation printing the correct recipient on all seven sends | The **body** was written for one of them. `--to` was right every time, so the control designed to catch a wrong address had nothing to report — right header, wrong body is a different defect, and no confirmation can see it |
 | A relay's supervisor reporting `State=Running` | It was reporting the process it launched **13 days earlier**; its most recent relaunch that day was refused with `0x800710E0`. Both readings true at once |
 
 **The instrument is part of the system.** The `head -20` row above is the one worth dwelling on,

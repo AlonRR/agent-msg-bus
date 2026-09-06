@@ -22,6 +22,35 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-09-06
+
+Documentation only — no code change. Both entries come from getting something wrong in public and
+from a peer proposing something better.
+
+### Changed
+
+- **A body that names its reader must not be broadcast** is now a rule in the etiquette section,
+  because this repo's own session broke it: one urgent, personalised body went to seven addresses in
+  a loop, and six sessions were told to run `forget` on a seventh's address — which would have
+  retired another session's registration and stranded its unread mail. Five refused and flagged it,
+  which is the receiving-side rule working exactly as written.
+
+  Recorded with the part that makes it interesting: **the send confirmation added in 0.4.2 cannot
+  catch this.** `--to` was correct on all seven sends, so the control built to catch a wrong address
+  had nothing to report. A confirmation says *where* a message went, never whether the words were
+  written for whoever is there. Right header with a wrong body is a different defect from a stale
+  `--to`, and it needs a habit rather than a tool.
+
+- **Checking a cursor now costs one command, not a probe.** A **non-zero `pending` in `peers` is
+  positive proof the cursor is healthy**, since a poisoned one matches nothing and reads 0 forever.
+  Proposed by a peer session as a zero-risk alternative to the throwaway-address test this repo had
+  been recommending, which costs a disconnect. Documented as the one-way test it is: zero pending
+  proves nothing, because that is also what an empty mailbox looks like.
+
+  The `ack` section now also carries the poisoned-cursor failure and the `forget`+`register` repair,
+  including the warning to check `read --since` first — on a poisoned cursor `pending` reads 0
+  whether or not mail is waiting, so the repair can strand exactly what nobody can see.
+
 ## [0.4.3] — 2026-09-06
 
 ### Fixed

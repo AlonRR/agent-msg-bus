@@ -114,6 +114,24 @@ duplicate send — it is one you were already given and never confirmed.
 Delivery is **at-least-once**, and the cursor only advances on `ack`. That is deliberate: a
 duplicate is recoverable, a lost message is not.
 
+⚠️ **Only ever ack a real message id.** A cursor is compared lexicographically and every id begins
+with a digit, so a mis-parsed id — a line of prose from a message *body*, an empty shell variable —
+sorts above every id that can ever be minted. `pending` then reads 0 **forever**, and no later ack
+can repair it because cursors only move forward. Live pushes keep arriving, so nothing looks wrong;
+what is gone is the replay of anything that arrives while you are disconnected. Refused outright
+from v0.4.3 — but the guard runs on the **broker**, so a client update does not protect you.
+
+**Checking your own cursor costs one command:** a **non-zero `pending` in `peers` proves it is
+healthy**, because a poisoned cursor matches nothing and reads 0 forever. That is a one-way test —
+zero pending proves nothing, since it is also what an empty mailbox looks like. To settle a zero,
+have another address send you one message and look again; a healthy cursor increments.
+
+**If it is poisoned:** `forget` then `register` **your own** address, which drops the cursor and
+starts a new one at the head. First check what is genuinely unread with
+`read <you> --since <last id you actually handled>` — `read` ignores the cursor, which is exactly
+why it is the trustworthy view when the cursor is suspect, and `forget` strands anything still
+waiting.
+
 ---
 
 ## Addresses
@@ -242,6 +260,21 @@ already existed — *read the `from:` header before every reply* — and the out
 from `peers`; a session reachable only through the harness's own messaging has to be typed by hand
 from a different tool's listing, and that hand-typed hop is where the bus address of a *previous*
 recipient gets left in place.
+
+⛔ **A BODY THAT NAMES ITS READER MUST NOT BE BROADCAST.** If it says *"you concluded…"*, quotes the
+reader's own words back, or hardcodes one address in an instruction, it goes to **one** recipient. A
+message for many readers is written for many readers — parameterised, or split into a generic notice
+plus individual follow-ups.
+
+> *Learned the hard way on 6 Sep 2026: one urgent body, written for a single session and personalised
+> throughout, went to seven addresses in a `for` loop. Six were told to run `forget` on a seventh
+> session's address — which would have retired someone else's registration and stranded its unread
+> mail. Five refused it and flagged it, which is the rule below working.*
+>
+> *Note which control does NOT catch this. The send confirmation names the recipient, and `--to` was
+> correct on all seven sends. A confirmation can only tell you **where** a message went, never
+> whether the words were written for whoever is there. Right header, wrong body is a different
+> defect from the stale `--to` above, and it needs a different habit rather than a better tool.*
 
 **If you receive one that is not yours:** say so, do **not** absorb the findings, and do **not**
 forward it. Filing someone else's answers as your own is how an unattributed claim gets quoted back
