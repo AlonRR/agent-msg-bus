@@ -22,6 +22,28 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-09-06
+
+### Added
+
+- **`whoami` now names old addresses that will silently strand mail sent to them.** Moving to a
+  repo-scoped address does not remove the session-suffixed registration it replaced. Anyone still
+  holding the old name sends there, the message queues where nothing is listening, and neither end
+  sees a fault — the sender is told "queued for a known address", which is true and useless.
+
+  This is the gap the 0.3.0 rollout opened and nothing reported. Measured on the live bus the day
+  after every session moved: **12 such addresses holding 23 unread messages**, and the only aliased
+  one belonged to the session that had done it by hand. Two sessions found it independently, each by
+  probing their own old name, which is the expensive way to learn something a command could have
+  told them.
+
+  `whoami` lists them worst-first with their unread counts and prints the `migrate` command for
+  each. Silent when there is nothing to say, and silent for an address that has already been
+  migrated — a warning that fires when everything is fine trains people to ignore it.
+
+  Matched on an exact `<address>.<suffix>` prefix, so `machine-a/tools-extra.abc` is never claimed as a
+  sibling of `machine-a/tools`, and neither is another machine's copy of the same repo name.
+
 ## [0.4.4] — 2026-09-06
 
 Documentation only — no code change. Both entries come from getting something wrong in public and

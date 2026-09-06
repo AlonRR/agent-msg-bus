@@ -98,6 +98,36 @@ pub fn recommend(status: &RegStatus) -> Recommend {
     }
 }
 
+/// Old session-suffixed names for *this* address that nothing has aliased to it — i.e. addresses
+/// that still exist and will silently strand anything sent to them. Worst first.
+///
+/// **The gap the repo-scoped rollout opened.** When a session moves from `machine-a/x.<session>` to
+/// `machine-a/x`, its old registration does not go anywhere. Anyone still holding the old name sends
+/// there, the mail queues where nobody is listening, and neither end sees an error — the sender is
+/// told "queued for a known address", which is true and useless. Migrating fixes it in one command;
+/// the difficulty was never the fix, it was that nothing told anyone the trap existed.
+///
+/// Measured on the live bus the day after the rollout: **12 such addresses holding 23 unread
+/// messages**, and the only aliased one was the address whose session had done it by hand.
+///
+/// Matched on an exact `<me>.<suffix>` prefix, so `machine-a/tools-extra.abc` is never claimed as a
+/// sibling of `machine-a/tools`, and neither is another machine's copy of the same repo name.
+pub fn stranding_siblings(me: &str, peers: &PeersOut) -> Vec<(String, usize)> {
+    let mine: Option<&KnownPeer> = peers.known.iter().find(|k| k.addr == me);
+    let aliased: &[String] = mine.map(|k| k.aliases.as_slice()).unwrap_or(&[]);
+    let prefix = format!("{me}.");
+    let mut out: Vec<(String, usize)> = peers
+        .known
+        .iter()
+        .filter(|k| k.addr.starts_with(&prefix))
+        .filter(|k| !aliased.iter().any(|a| a == &k.addr))
+        .map(|k| (k.addr.clone(), k.pending))
+        .collect();
+    // Worst first: the one holding unread mail is the one worth acting on today.
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
 /// The lines `whoami` prints under the address. Returned rather than printed so it can be tested.
 pub fn advisory(addr: &str, status: &RegStatus) -> Vec<String> {
     match status {
@@ -310,5 +340,82 @@ mod recommend_tests {
             recommend(&RegStatus::Unverified("x".into())),
             Recommend::Unknown
         ));
+    }
+}
+
+#[cfg(test)]
+mod sibling_tests {
+    use super::*;
+
+    fn p(addr: &str, pending: usize, aliases: &[&str]) -> KnownPeer {
+        KnownPeer {
+            addr: addr.into(),
+            machine: "machine-a".into(),
+            repo: "r".into(),
+            cwd: "c".into(),
+            live: false,
+            pending,
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            version: String::new(),
+        }
+    }
+    fn out(v: Vec<KnownPeer>) -> PeersOut {
+        PeersOut { live: vec![], known: v }
+    }
+
+    /// The gap the repo-scoped rollout opened: a session moves from `machine-a/x.<session>` to
+    /// `machine-a/x`, and its old name keeps existing as a separate registration. Anyone still holding
+    /// it sends there and the mail queues where nobody is listening, with no error at either end.
+    /// Measured on the live bus the day after the rollout: 12 such addresses holding 23 unread.
+    #[test]
+    fn an_unaliased_session_suffixed_sibling_is_reported_as_a_trap() {
+        let peers = out(vec![p("machine-a/tools", 0, &[]), p("machine-a/tools.7b7dddac", 9, &[])]);
+        let found = stranding_siblings("machine-a/tools", &peers);
+        assert_eq!(found.len(), 1, "the old name was not reported: {found:?}");
+        assert_eq!(found[0].0, "machine-a/tools.7b7dddac");
+        assert_eq!(found[0].1, 9, "unread count not carried through");
+    }
+
+    /// Once migrated it is not a trap — mail to it resolves. Reporting it anyway would train people
+    /// to ignore the warning, which is how a real one gets missed.
+    #[test]
+    fn an_aliased_sibling_is_not_reported() {
+        let peers = out(vec![
+            p("machine-a/tools", 0, &["machine-a/tools.7b7dddac"]),
+            p("machine-a/tools.7b7dddac", 9, &[]),
+        ]);
+        assert!(stranding_siblings("machine-a/tools", &peers).is_empty());
+    }
+
+    /// Another repo's addresses are none of my business, and a prefix match would claim them:
+    /// `machine-a/tools-extra.abc` must not look like a sibling of `machine-a/tools`.
+    #[test]
+    fn a_different_repo_is_never_claimed_as_a_sibling() {
+        let peers = out(vec![
+            p("machine-a/tools", 0, &[]),
+            p("machine-a/tools-extra.7b7dddac", 4, &[]),
+            p("machine-a/toolsmith", 3, &[]),
+            p("machine-b/tools.7b7dddac", 5, &[]),
+        ]);
+        assert!(
+            stranding_siblings("machine-a/tools", &peers).is_empty(),
+            "claimed an address belonging to another repo or machine"
+        );
+    }
+
+    /// A session on a session-suffixed address of its own has no siblings to worry about — the
+    /// check is for a repo-scoped address looking back at what it replaced.
+    #[test]
+    fn several_siblings_are_all_reported_worst_first() {
+        let peers = out(vec![
+            p("machine-a/homelab", 0, &[]),
+            p("machine-a/homelab.3da118c4", 0, &[]),
+            p("machine-a/homelab.814c3d22", 7, &[]),
+            p("machine-a/homelab.8e13fdc7", 2, &[]),
+        ]);
+        let found = stranding_siblings("machine-a/homelab", &peers);
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0].1, 7, "not ordered by unread count, so the worst is not first");
+        assert_eq!(found[2].1, 0);
     }
 }

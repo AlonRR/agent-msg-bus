@@ -432,6 +432,30 @@ fn whoami(cli: &Cli) {
     for line in agent_msg_bus::identity::advisory(&addr, &status) {
         eprintln!("{line}");
     }
+
+    // Old names that still exist and are not aliased to this one. Nothing else on the bus reports
+    // this: the sender is told "queued for a known address", which is true, and the mail sits where
+    // nobody listens. Only worth printing when there is something to say.
+    if let Ok(p) = &peers {
+        let siblings = agent_msg_bus::identity::stranding_siblings(&addr, p);
+        if !siblings.is_empty() {
+            let unread: usize = siblings.iter().map(|(_, n)| n).sum();
+            eprintln!();
+            eprintln!("WARNING : {} older name(s) for this address still exist and are NOT aliased", siblings.len());
+            eprintln!("          to it. Anything sent there queues where nothing is listening, and the");
+            eprintln!("          sender is told it was accepted.");
+            for (a, n) in &siblings {
+                eprintln!("            {a:<34} {n} unread");
+            }
+            if unread > 0 {
+                eprintln!("          {unread} message(s) are sitting on them right now.");
+            }
+            eprintln!("          Point them at this address — one command each, mail included:");
+            for (a, _) in &siblings {
+                eprintln!("            agent-msg-bus migrate {a} {addr}");
+            }
+        }
+    }
 }
 
 #[tokio::main]
