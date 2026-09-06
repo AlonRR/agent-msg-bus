@@ -319,6 +319,20 @@ fn update(from: Option<&str>, to: Option<&str>, dry_run: bool) {
     }
 }
 
+/// The line a sender reads back to check they addressed the message they think they did.
+///
+/// Exists because `docs/usage.md` promised it and the code did not provide it: senders were told the
+/// output "names the recipient — the only signal that would catch a wrong address", while `send`
+/// printed the id and nothing else. The misaddressed send it was meant to catch has now happened
+/// three times in a week, and it survives review every time because the body and subject are freshly
+/// written and correct — only the header is stale.
+///
+/// Direction is explicit rather than positional: naming both addresses without saying which is which
+/// would still let a glance land on the wrong one.
+fn send_confirmation(id: &str, from: &str, to: &str) -> String {
+    format!("sent {id}\n  {from}  ->  {to}")
+}
+
 fn whoami(cli: &Cli) {
     let Some(cfg) = agent_msg_bus::hook::load_config() else {
         eprintln!(
@@ -571,7 +585,17 @@ fn run_client(cli: &Cli) {
                 eprintln!("{line}");
             }
             c.send(from, to, kind, subject, &resolved, reply_to)
-                .map(|id| println!("{id}"))
+                .map(|id| {
+                    // The id alone goes to stdout, so `ID=$(... send ...)` keeps working.
+                    println!("{id}");
+                    // The confirmation goes to STDERR, which is what makes it a real safeguard
+                    // rather than a documented one. docs/usage.md already told senders the output
+                    // "names the recipient — the only signal that would catch a wrong address";
+                    // it did not, because only the id was ever printed. Putting it on stderr means
+                    // the overwhelmingly common idiom for capturing the id — redirecting stdout —
+                    // cannot hide it, which is precisely when a stale `--to` used to slip through.
+                    eprintln!("{}", send_confirmation(&id, from, to));
+                })
                 .map_err(Into::into)
         }
         Cmd::Ack { addr, up_to_id } => {
@@ -742,8 +766,41 @@ fn run_client(cli: &Cli) {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{send_confirmation, Cli};
     use clap::CommandFactory;
+
+    /// docs/usage.md tells senders that the send's output "names the recipient - the only signal
+    /// that would catch a wrong address". It did not: `send` printed the message id and nothing
+    /// else. A safeguard that is documented and absent is worse than one that is merely absent,
+    /// because people stop looking for the thing it was supposed to catch — and the misaddressed
+    /// send it was meant to catch has now happened three times in a week, twice between the same
+    /// two sessions, each time surviving review because everything except the header was correct.
+    #[test]
+    fn the_send_confirmation_names_the_recipient() {
+        let c = send_confirmation("20260906T1-1", "machine-a/a", "machine-a/b");
+        assert!(c.contains("machine-a/b"), "confirmation does not name the recipient: {c}");
+    }
+
+    /// The sender too, because the other half of this failure is a stale `--from`: four messages
+    /// once went out with an unroutable return address and every reply to them bounced.
+    #[test]
+    fn the_send_confirmation_names_the_sender_and_the_id() {
+        let c = send_confirmation("20260906T1-1", "machine-a/a", "machine-a/b");
+        assert!(c.contains("machine-a/a"), "no sender: {c}");
+        assert!(c.contains("20260906T1-1"), "no id: {c}");
+    }
+
+    /// Direction must be unambiguous. "machine-a/a machine-a/b" would name both and still let a reader who
+    /// glances at it mistake which is which, which is the exact mistake being guarded against.
+    #[test]
+    fn the_send_confirmation_shows_the_direction() {
+        let c = send_confirmation("id", "SENDER", "RECIPIENT");
+        let arrow = c.find("->").expect("no direction marker");
+        assert!(
+            c.find("SENDER").unwrap() < arrow && c.find("RECIPIENT").unwrap() > arrow,
+            "sender and recipient are not on the expected sides of the arrow: {c}"
+        );
+    }
 
     /// A binary that cannot say which build it is turns every "is the fix actually deployed over
     /// there?" question into a file-hash comparison. Several machines run their own copy of this

@@ -210,9 +210,21 @@ already existed — *read the `from:` header before every reply* — and the out
 
 - **Re-read `--to` as a separate act**, not as part of scanning the command. It is the one field
   that survives an edit unchanged and therefore the one that goes stale.
-- **Never suppress the send's output.** `>/dev/null` on a send removes the confirmation line, which
-  names the recipient — the only signal that would catch a wrong address. Same shape as a checker
-  that reports no denominator.
+- **Read the confirmation back.** A send prints the message id on stdout and, on **stderr**:
+
+  ```
+  sent 20260906T092535621-000000357
+    machine-a/sender  ->  machine-a/recipient
+  ```
+
+  Stderr on purpose, so that capturing the id — `ID=$(agent-msg-bus send …)`, the usual idiom —
+  cannot hide it. `2>/dev/null` is what suppresses it, and doing that on a send throws away the one
+  signal that catches a wrong address.
+
+  > *Until v0.4.2 this section described that confirmation as though it existed; `send` printed the
+  > id and nothing else. The misaddressed send it was supposed to catch happened three times in the
+  > week the advice was in place — a documented safeguard that is absent is worse than a missing
+  > one, because people stop looking for what it was meant to catch.*
 - **A placeholder subject is a stop sign.** Sending a real body under `placeholder` means the header
   was never finished, which is exactly when the recipient is most likely to be stale too.
 

@@ -22,6 +22,26 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-09-06
+
+### Fixed
+
+- **`send` now names the recipient it actually used.** `docs/usage.md` has told senders since 3 Sep
+  that the send's output "names the recipient — the only signal that would catch a wrong address".
+  It did not. `send` printed the message id and nothing else, so the safeguard the documentation
+  pointed at did not exist.
+
+  In the week that advice was in place, the misaddressed send it describes happened **three times**,
+  twice between the same pair of sessions. It survives review every time for the same reason: a send
+  is built by editing a previous command, the body and subject are rewritten and correct, and only
+  `--to` — the one field an edit leaves alone — is stale. A documented safeguard that is absent is
+  worse than a missing one, because people stop looking for what it was meant to catch.
+
+  The confirmation goes to **stderr**, not stdout, so `ID=$(agent-msg-bus send …)` — the usual way
+  to capture the id for a later `ack` — cannot hide it. Direction is explicit (`from  ->  to`)
+  rather than positional, because naming both addresses without saying which is which still lets a
+  glance land on the wrong one.
+
 ## [0.4.1] — 2026-09-05
 
 ### Fixed
