@@ -22,6 +22,38 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-06
+
+### Fixed
+
+- **`ack` accepted a string that was not an id, reported success, and silenced the mailbox
+  permanently.** Reported by a session whose id extraction (`grep "^id"`) matched a line of prose
+  inside a message *body*, so `ack` was handed an English sentence — and took it.
+
+  The reporter checked afterwards and believed the outcome was right by luck, because nothing unread
+  was in range. It was worse than that, and a test now proves it: cursors are compared
+  lexicographically, every real id begins with a digit, and almost any prose sorts above a digit. The
+  cursor lands beyond every id that can **ever** be minted, and `pending_for`'s `id > cursor` never
+  matches again. Not "a few skipped" — every future message, silently, with nothing in `peers` or
+  `pending` to show why.
+
+  `ack` now refuses anything that is not `YYYYMMDDThhmmssmmm-nnnnnnnnn`, with an error saying what it
+  refused and why. An error is recoverable; a silenced inbox is not. The guard is in the store, so
+  every caller is covered, and the tests were verified to fail without it.
+
+- **The send confirmation is now one self-contained line.** `2>&1 | tail -1` is common in exactly the
+  scripted sends most at risk, and it split the two-line form — potentially keeping the half without
+  the recipient.
+
+### Changed
+
+- **`docs/usage.md` corrects its own account of the 0.4.2 gap.** It implied no warning existed. The
+  **orphan** warning always existed and works — it fires when no registration answers to the
+  recipient. But a misaddressed message usually goes to a real, registered address, just the wrong
+  one, so nothing is orphaned and that check correctly stays silent. A control scoped to unresolvable
+  addresses cannot catch a valid wrong one, and calling them both "the confirmation line" hid the
+  difference. Credit to the session that drew the distinction.
+
 ## [0.4.2] — 2026-09-06
 
 ### Fixed

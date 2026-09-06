@@ -69,6 +69,27 @@ pub fn addr_matches(pattern: &str, addr: &str) -> bool {
     walk(pattern.as_bytes(), addr.as_bytes())
 }
 
+/// Does this string have the exact shape `mint_id` produces — `YYYYMMDDThhmmssmmm-nnnnnnnnn`?
+///
+/// **A cursor is compared lexicographically, so an unchecked one is not a small error.** Every real
+/// id starts with a digit; almost any prose sorts above a digit, so a cursor set from a stray
+/// sentence lands beyond every id that can ever be minted and `pending_for`'s `id > cursor` never
+/// matches again. The mailbox is not "skipped" — it is silenced permanently, with no error and
+/// nothing in any listing to show why.
+///
+/// Reported by a session whose id extraction matched a line of prose inside a message BODY. The
+/// documented way to get an id is to parse `read` output, and bodies contain arbitrary text, so
+/// every parsing mistake arrives here. Refusing costs a recoverable error; accepting costs a
+/// mailbox.
+pub fn is_message_id(s: &str) -> bool {
+    let b = s.as_bytes();
+    // 8 digits, 'T', 9 digits, '-', 9 digits.
+    if b.len() != 28 || b[8] != b'T' || b[18] != b'-' {
+        return false;
+    }
+    b.iter().enumerate().all(|(i, c)| i == 8 || i == 18 || c.is_ascii_digit())
+}
+
 /// `<compact utc>-<counter>`, so ids sort lexicographically **and** chronologically, and cursors can
 /// be plain string comparisons. The counter breaks ties inside one millisecond; it is process-wide,
 /// which is sound because the broker is the only writer. The PRIMARY KEY is the backstop: a
@@ -508,6 +529,18 @@ impl Store {
     /// has. A session acking under its predecessor's name would otherwise write to a cursor nothing
     /// consults, and be shown the same mail on every reconnect.
     pub fn ack(&self, addr: &str, up_to: &str) -> Result<()> {
+        // REFUSE ANYTHING THAT IS NOT AN ID. The cursor is compared lexicographically, so a stray
+        // string is not a slightly-wrong cursor — prose sorts above every id that can ever be
+        // minted, and this mailbox would then match nothing for the rest of its life. Silently.
+        // An error is recoverable; a silenced inbox is not, and nothing in `peers` or `pending`
+        // would ever hint at the cause.
+        if !is_message_id(up_to) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "'{up_to}' is not a message id (expected YYYYMMDDThhmmssmmm-nnnnnnnnn). Refusing to \
+                 move {addr}'s cursor: a cursor set from a non-id sorts above every real id and \
+                 would silence this mailbox permanently."
+            )));
+        }
         let owner = self.mailbox_of(addr)?;
         self.conn.execute(
             "INSERT INTO cursors(addr, up_to) VALUES (?1, ?2)
@@ -1636,5 +1669,80 @@ mod tests {
             1,
             "subscribing moved a returning address's cursor and ate its unread mail"
         );
+    }
+
+    // ---- ack must not accept something that is not an id -------------------
+
+    /// A malformed ack does not "skip a few messages" — IT KILLS THE MAILBOX PERMANENTLY.
+    ///
+    /// Reported from a live session whose id extraction (`grep "^id"`) matched a line of prose in a
+    /// message BODY, so `ack` was handed an English sentence. Every real id begins with a digit, and
+    /// almost any prose sorts above a digit, so the cursor lands beyond every id that can ever be
+    /// minted — and `pending_for` compares `id > cursor`. Nothing matches again. Ever.
+    ///
+    /// The reporter checked and believed they had got away with it because nothing unread was in
+    /// range at the time. This test exists because that was luck about the past, not about the
+    /// future: the damage is to every message the address has not yet been sent.
+    #[test]
+    fn an_ack_with_prose_instead_of_an_id_does_not_silence_the_mailbox_forever() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/victim")).unwrap();
+
+        // Exactly the shape the reporter hit: a sentence lifted out of a message body.
+        let junk = "id the usual way and seeing the confirmation still reach me.";
+        let _ = s.ack("machine-a/victim", junk);
+
+        // Mail sent AFTER the bad ack must still be delivered. This is the assertion that matters:
+        // it is about the future of the mailbox, not about what happened to be unread at the time.
+        s.send(&msg("machine-a/sender", "machine-a/victim", "sent after the bad ack")).unwrap();
+        let pending = s.pending_for("machine-a/victim").unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "a malformed ack silenced the mailbox for every future message, not just past ones"
+        );
+    }
+
+    /// And it must say so rather than reporting success, because a silent no-op is how the reporter
+    /// came to believe the ack had worked.
+    #[test]
+    fn a_malformed_ack_is_refused_loudly() {
+        let s = store();
+        s.register(&reg("machine-a/victim")).unwrap();
+        assert!(
+            s.ack("machine-a/victim", "not-an-id").is_err(),
+            "a malformed ack reported success"
+        );
+    }
+
+    /// A real id must still be accepted — the guard is worthless if it also rejects the valid case.
+    #[test]
+    fn a_real_id_is_still_accepted() {
+        let s = store();
+        s.register(&reg("machine-a/sender")).unwrap();
+        s.register(&reg("machine-a/victim")).unwrap();
+        let id = s.send(&msg("machine-a/sender", "machine-a/victim", "one")).unwrap();
+        s.ack("machine-a/victim", &id).unwrap();
+        assert_eq!(s.pending_for("machine-a/victim").unwrap().len(), 0);
+    }
+
+    /// The empty string is the other way a lookup failure arrives — an unset shell variable. It must
+    /// not be mistaken for "ack nothing", which is what it looks like, nor accepted as a cursor.
+    #[test]
+    fn an_empty_ack_is_refused_rather_than_treated_as_a_cursor() {
+        let s = store();
+        s.register(&reg("machine-a/victim")).unwrap();
+        assert!(s.ack("machine-a/victim", "").is_err(), "an empty id was accepted");
+    }
+
+    #[test]
+    fn the_id_shape_check_accepts_real_ids_and_rejects_near_misses() {
+        assert!(is_message_id("20260906T093128443-000000365"));
+        assert!(!is_message_id("20260906T093128443-00000036"), "wrong counter width accepted");
+        assert!(!is_message_id("20260906X093128443-000000365"), "wrong separator accepted");
+        assert!(!is_message_id("20260906T093128443_000000365"), "wrong dash accepted");
+        assert!(!is_message_id(" 20260906T093128443-000000365"), "leading space accepted");
+        assert!(!is_message_id("2026090aT093128443-000000365"), "non-digit accepted");
     }
 }

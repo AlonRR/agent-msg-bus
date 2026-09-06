@@ -219,12 +219,22 @@ already existed — *read the `from:` header before every reply* — and the out
 
   Stderr on purpose, so that capturing the id — `ID=$(agent-msg-bus send …)`, the usual idiom —
   cannot hide it. `2>/dev/null` is what suppresses it, and doing that on a send throws away the one
-  signal that catches a wrong address.
+  signal that catches a wrong address. ⚠️ **`2>&1 | tail -1` also loses it**: the signal survives
+  *redirecting* stdout, not *conflating* the two streams. It is one self-contained line so that a
+  truncation cannot split the recipient away from it, but a filter that keeps only the id still
+  discards it.
 
   > *Until v0.4.2 this section described that confirmation as though it existed; `send` printed the
   > id and nothing else. The misaddressed send it was supposed to catch happened three times in the
   > week the advice was in place — a documented safeguard that is absent is worse than a missing
   > one, because people stop looking for what it was meant to catch.*
+  >
+  > *The precise gap is narrower than "no warning existed", and worth knowing: the **orphan** warning
+  > always existed and works — it fires when no registration answers to the recipient. But a
+  > misaddressed message usually goes to a **real, registered** address, just the wrong one, so
+  > nothing is orphaned and that check correctly stays silent. A control scoped to unresolvable
+  > addresses cannot catch a valid wrong one, and describing them as a single "confirmation line"
+  > hid the difference.*
 - **A placeholder subject is a stop sign.** Sending a real body under `placeholder` means the header
   was never finished, which is exactly when the recipient is most likely to be stale too.
 

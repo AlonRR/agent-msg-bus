@@ -330,7 +330,10 @@ fn update(from: Option<&str>, to: Option<&str>, dry_run: bool) {
 /// Direction is explicit rather than positional: naming both addresses without saying which is which
 /// would still let a glance land on the wrong one.
 fn send_confirmation(id: &str, from: &str, to: &str) -> String {
-    format!("sent {id}\n  {from}  ->  {to}")
+    // ONE line, not two. `2>&1 | tail -1` is a common idiom in exactly the scripted sends most at
+    // risk, and it splits a two-line confirmation — leaving whichever half it lands on, possibly the
+    // one without the recipient. A self-contained line survives truncation to a single line.
+    format!("sent {id}  {from}  ->  {to}")
 }
 
 fn whoami(cli: &Cli) {
