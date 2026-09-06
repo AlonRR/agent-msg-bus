@@ -81,6 +81,24 @@ pub fn addr_matches(pattern: &str, addr: &str) -> bool {
 /// documented way to get an id is to parse `read` output, and bodies contain arbitrary text, so
 /// every parsing mistake arrives here. Refusing costs a recoverable error; accepting costs a
 /// mailbox.
+/// Why `up_to` cannot be used as a cursor for `addr`, or `None` if it is a well-formed message id.
+///
+/// The check lives here, but the HTTP layer calls it *before* `ack` so a bad cursor is answered as
+/// the client error it is. Reaching it only as a store error meant reporting a deliberate refusal
+/// as HTTP 500 with rusqlite's "Invalid parameter name:" in front of it — which reads as a broker
+/// fault, and invites a retry rather than a corrected call. One function so the two paths cannot
+/// drift into telling the caller two different things.
+pub fn cursor_refusal(addr: &str, up_to: &str) -> Option<String> {
+    if is_message_id(up_to) {
+        return None;
+    }
+    Some(format!(
+        "'{up_to}' is not a message id (expected YYYYMMDDThhmmssmmm-nnnnnnnnn). Refusing to \
+         move {addr}'s cursor: a cursor set from a non-id sorts above every real id and \
+         would silence this mailbox permanently."
+    ))
+}
+
 pub fn is_message_id(s: &str) -> bool {
     let b = s.as_bytes();
     // 8 digits, 'T', 9 digits, '-', 9 digits.
@@ -534,12 +552,8 @@ impl Store {
         // minted, and this mailbox would then match nothing for the rest of its life. Silently.
         // An error is recoverable; a silenced inbox is not, and nothing in `peers` or `pending`
         // would ever hint at the cause.
-        if !is_message_id(up_to) {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "'{up_to}' is not a message id (expected YYYYMMDDThhmmssmmm-nnnnnnnnn). Refusing to \
-                 move {addr}'s cursor: a cursor set from a non-id sorts above every real id and \
-                 would silence this mailbox permanently."
-            )));
+        if let Some(why) = cursor_refusal(addr, up_to) {
+            return Err(rusqlite::Error::InvalidParameterName(why));
         }
         let owner = self.mailbox_of(addr)?;
         self.conn.execute(

@@ -250,6 +250,11 @@ async fn ack(
     if !st.auth.check(token_from(&headers, &q).as_deref()) {
         return unauthorized();
     }
+    // Answered before the store sees it: a malformed cursor is a bad request, and saying so with
+    // 400 is what tells the caller to fix the call rather than retry it.
+    if let Some(why) = crate::store::cursor_refusal(&b.addr, &b.up_to_id) {
+        return bad_request(&why);
+    }
     match st.store.lock().unwrap().ack(&b.addr, &b.up_to_id) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => server_error(e),
@@ -697,6 +702,12 @@ async fn peers(
         })
         .collect();
     Json(PeersOut { live: st.hub.live(), known }).into_response()
+}
+
+/// A refusal the caller can fix. Distinct from `server_error` so a deliberate "no" is never
+/// mistaken for the broker having broken.
+fn bad_request(m: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response()
 }
 
 fn server_error(e: rusqlite::Error) -> Response {

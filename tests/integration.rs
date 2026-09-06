@@ -664,3 +664,36 @@ async fn an_address_that_never_reported_a_version_reads_as_unknown() {
     let old = p.known.iter().find(|k| k.addr == "machine-a/ancient").expect("no row");
     assert!(old.version.is_empty(), "an unknown version was invented rather than left blank");
 }
+
+/// The cursor guard is a deliberate refusal, not a crash. It was surfaced as HTTP 500 with
+/// rusqlite's "Invalid parameter name:" glued to the front — so the one caller who most needs to
+/// understand it (whoever just passed prose to `ack`) is told the broker broke, and may retry or
+/// escalate instead of fixing the call. A refused ack is the correct answer to a bad request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_ack_is_a_client_error_not_a_server_fault() {
+    let h = start().await;
+    let c = h.client();
+    blocking(move || c.register("machine-a/guarded", "s1", "machine-a", "r", "/x", 1).unwrap()).await;
+
+    let base = h.base.clone();
+    let (status, body): (u16, serde_json::Value) = blocking(move || {
+        match ureq::post(&format!("{base}/ack"))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(serde_json::json!({
+                "addr": "machine-a/guarded", "up_to_id": "yes I have read it"
+            })) {
+            Ok(r) => (r.status(), r.into_json().unwrap()),
+            Err(ureq::Error::Status(code, r)) => (code, r.into_json().unwrap()),
+            Err(e) => panic!("transport error, not an HTTP status: {e}"),
+        }
+    })
+    .await;
+
+    assert_eq!(status, 400, "a refused ack must be a client error, not a server fault");
+    let msg = body["error"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("Invalid parameter name"),
+        "the refusal leaked a rusqlite variant name and reads like an internal fault: {msg}"
+    );
+    assert!(msg.contains("is not a message id"), "the refusal did not explain itself: {msg}");
+}

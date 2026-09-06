@@ -22,6 +22,32 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-09-06
+
+### Fixed
+
+- **A refused `ack` is now HTTP 400 instead of 500, and no longer reports itself as a broker
+  fault.** The cursor guard added in 0.4.3 works — it correctly refuses to move a mailbox's cursor
+  to a non-id, which would silence that mailbox permanently. But it was implemented by returning a
+  `rusqlite::Error`, and the `/ack` handler mapped every store error to 500. Two things followed
+  from that, both wrong in the same direction: the caller was told the **server** had broken when
+  in fact their own call was malformed, and rusqlite's `Display` glued **`Invalid parameter name:`**
+  onto the front of a message that has nothing to do with SQL parameters.
+
+  The combination is worse than either half. A 500 with an internal-looking prefix is the signature
+  of a transient server fault, so the reasonable response is to retry — and retrying is exactly what
+  cannot work here, because the request will be refused identically every time. The guard was
+  telling the one caller who could fix the problem to do the one thing that never fixes it.
+
+  Found by exercising the guard against the freshly-updated broker rather than trusting that a
+  passing unit test meant the whole path was right: the store-level test asserted the refusal, and
+  said nothing about how the refusal reached a client.
+
+  The check now lives in `store::cursor_refusal`, called by the HTTP layer *before* the store, so
+  the refusal is answered as the client error it is. The store keeps its own guard for any caller
+  that bypasses HTTP, and both read their text from that one function so the two paths cannot drift
+  into telling a caller two different things.
+
 ## [0.4.5] — 2026-09-06
 
 ### Added
