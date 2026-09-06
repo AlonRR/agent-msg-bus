@@ -129,3 +129,7 @@ contract — but `peers` will not tell you what anyone is running, so ask each m
 
 [Mozilla Public License 2.0](LICENSE). File-level copyleft: changes to these files stay open, and it
 can be used alongside code under other licences.
+
+---
+
+_Parts of this repository were drafted with the help of an LLM agent; reviewed and verified locally._
