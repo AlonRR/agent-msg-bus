@@ -22,6 +22,35 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.8] — 2026-09-08
+
+### Fixed
+
+- **A long outage announced itself once and then went silent, which is indistinguishable from a
+  broker that is never coming back.** The relay retries forever with a backoff capped at 30s, so it
+  always knew it was still working — it just stopped saying so. `announced_down` was a latch: set
+  when the backoff first crossed the threshold, never cleared while the outage continued. A
+  forty-minute outage therefore emitted exactly one `upstream_unreachable` frame at around the
+  thirty-second mark and nothing for the remaining thirty-nine and a half minutes.
+
+  From inside a session those two situations produce identical evidence: one frame, then nothing.
+  The relay is the only component that can tell them apart, and it was choosing not to.
+
+  It now re-announces every five minutes while the outage continues, carrying the four things
+  silence cannot: how long it has been down, how many attempts it has made, when the next one is,
+  and **the current error**. That last field is the diagnostic one. On Windows a tunnelled path
+  reports `10065` (WSAEHOSTUNREACH — no route) when the route is gone and `10060` (WSAETIMEDOUT —
+  route exists, nothing answered) when it is back but the far end is not yet responding, so a code
+  that changes mid-outage says the path is moving rather than dead. Watching that sequence is how
+  an intermediate hop coming back is distinguished from a broker that is simply down.
+
+  Five minutes, not every retry: at a 30s cadence the latter would be chatter, and an event stream
+  people learn to ignore is the same failure wearing a different hat.
+
+  Reported from a machine that hit it — an away laptop reaching the bus through a tunnel, which is
+  precisely the topology where "still trying" and "dead" most need telling apart, and where the
+  operator had to run route lookups by hand to find out which.
+
 ## [0.4.7] — 2026-09-06
 
 ### Fixed

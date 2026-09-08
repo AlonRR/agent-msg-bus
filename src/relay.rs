@@ -133,6 +133,11 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
     let (mut ltx, mut lrx) = local.split();
     let mut backoff: u64 = 1;
     let mut announced_down = false;
+    // Outage bookkeeping. `outage_since` doubles as "is an outage in progress", and both it and
+    // `last_announce` are cleared on reconnect so the next outage starts from silence again.
+    let mut outage_since: Option<std::time::Instant> = None;
+    let mut last_announce: Option<std::time::Instant> = None;
+    let mut attempts: u32 = 0;
 
     loop {
         match tokio_tungstenite::connect_async(upstream.as_str()).await {
@@ -147,6 +152,9 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                         .await;
                     announced_down = false;
                 }
+                outage_since = None;
+                last_announce = None;
+                attempts = 0;
                 backoff = 1;
                 let (_utx, mut urx) = upstream.split();
 
@@ -182,18 +190,23 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                 }
             }
             Err(e) => {
-                if !announced_down && backoff >= ANNOUNCE_AFTER_BACKOFF {
+                let now = std::time::Instant::now();
+                let since = *outage_since.get_or_insert(now);
+                attempts += 1;
+                // The next sleep is this backoff; the doubling happens after it.
+                if due_to_announce(backoff, last_announce.map(|t| now.duration_since(t))) {
+                    let detail = if announced_down {
+                        outage_detail(now.duration_since(since), attempts, backoff, &e.to_string())
+                    } else {
+                        format!("cannot reach the broker: {e}")
+                    };
                     let _ = ltx
                         .send(Ws::Text(
-                            status_frame(
-                                &addr,
-                                "upstream_unreachable",
-                                &format!("cannot reach the broker: {e}"),
-                            )
-                            .into(),
+                            status_frame(&addr, "upstream_unreachable", &detail).into(),
                         ))
                         .await;
                     announced_down = true;
+                    last_announce = Some(now);
                 }
                 log_event(&addr, &format!("upstream connect FAILED ({e}); retrying in {backoff}s"));
             }
@@ -227,4 +240,67 @@ pub fn upstream_url(broker_base: &str, addr: &str, token: &str) -> String {
         crate::client::urlencode(addr),
         crate::client::urlencode(token)
     )
+}
+
+/// How often a still-unreachable upstream repeats itself. Long enough not to be chatter at a 30s
+/// retry cadence, short enough that a session is never left wondering for long.
+const RE_ANNOUNCE_EVERY: Duration = Duration::from_secs(300);
+
+/// Whether a continuing outage should be announced now. `since_last` is `None` while nothing has
+/// been said about this outage yet.
+fn due_to_announce(backoff: u64, since_last: Option<Duration>) -> bool {
+    match since_last {
+        None => backoff >= ANNOUNCE_AFTER_BACKOFF,
+        Some(d) => d >= RE_ANNOUNCE_EVERY,
+    }
+}
+
+/// What a repeat announcement says. The point of each field is to be the thing silence could not
+/// tell you: that time is passing, that the relay is still working, when it will try next, and
+/// which failure it is seeing now — a code that changes mid-outage says the path is moving, which
+/// is how an exit node coming back is distinguished from a broker that is simply gone.
+fn outage_detail(elapsed: Duration, attempts: u32, next_in: u64, err: &str) -> String {
+    let secs = elapsed.as_secs();
+    let for_how_long =
+        if secs < 60 { format!("{secs}s") } else { format!("{}m{:02}s", secs / 60, secs % 60) };
+    format!(
+        "still cannot reach the broker: unreachable for {for_how_long}, {attempts} attempts, \
+         next in {next_in}s. Current error: {err}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The defect: a long outage said one thing and then went quiet, which from inside a session is
+    /// byte-identical to a broker that is never coming back. The relay knows the difference — it is
+    /// still retrying every 30s — so silence is a choice it should not be making.
+    #[test]
+    fn a_continuing_outage_keeps_saying_so() {
+        assert!(!due_to_announce(8, None), "announced before the threshold");
+        assert!(due_to_announce(ANNOUNCE_AFTER_BACKOFF, None), "first announcement never fired");
+        assert!(
+            !due_to_announce(30, Some(Duration::from_secs(60))),
+            "re-announced too soon; at a 30s retry this would be chatter"
+        );
+        assert!(
+            due_to_announce(30, Some(RE_ANNOUNCE_EVERY)),
+            "an outage still going after the interval said nothing"
+        );
+    }
+
+    /// A repeat that said only "still down" would be no better than silence for diagnosis. Each
+    /// field here is one the reader cannot get any other way without running commands by hand.
+    #[test]
+    fn the_repeat_carries_what_silence_could_not_tell_you() {
+        let d = outage_detail(Duration::from_secs(752), 27, 30, "os error 10065");
+        assert!(d.contains("12m32s"), "elapsed time missing or unreadable: {d}");
+        assert!(d.contains("27 attempts"), "attempt count missing: {d}");
+        assert!(d.contains("next in 30s"), "next retry missing: {d}");
+        assert!(d.contains("10065"), "the current error was dropped: {d}");
+
+        // Under a minute reads as seconds rather than "0m07s".
+        assert!(outage_detail(Duration::from_secs(7), 3, 4, "x").contains("for 7s"));
+    }
 }
