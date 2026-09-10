@@ -22,6 +22,56 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.9] — 2026-09-10
+
+### Fixed
+
+- **On a laptop, the 0.4.8 outage repeat reported `787m12s, 9 attempts` — which reads as a wedged
+  retry loop.** One attempt per 87 minutes is impossible against a 30s cap, so an operator seeing it
+  goes debugging the relay. It was not a counter bug: `elapsed` is wall clock and keeps advancing
+  while the process is suspended, while `attempts` counts only attempts that actually ran. On a
+  machine that sleeps, the two fields describe different universes.
+
+  0.4.8 exists so that "still trying" cannot be mistaken for "dead". Left alone it reintroduced the
+  same misreading in a narrower case — and suspension is the ordinary case on any laptop, not an
+  edge case.
+
+  The relay now also accumulates **retry time**: measured connect attempts plus the backoff it
+  intended to sleep. That advances only while the process runs, so wall clock minus retry time is
+  time the process cannot account for. When the gap dwarfs the retry work, the frame says so:
+
+  ```
+  unreachable for 787m12s, 9 attempts, next in 30s (only 8m00s of that was spent retrying -
+  this process was suspended or descheduled for the other 779m12s, so the attempt count is
+  low for honest reasons). Current error: ...
+  ```
+
+  The tolerance is deliberately generous — a gap counts only when it exceeds the retry work itself —
+  so an uninterrupted outage carries no qualifier at all. A warning that fires when nothing is wrong
+  is the same trained-to-ignore failure as chatter, which is why 0.4.8 chose five minutes over
+  thirty seconds in the first place.
+
+  Found by a field test on the machine that actually loses its link, not by reasoning: the tunnel
+  was toggled by hand, the frames captured verbatim, and the divergence appeared only afterwards
+  when the laptop was put to sleep. Confirmed against `Power-Troubleshooter` events — the two
+  reported elapsed figures land exactly on the sleep and wake boundaries.
+
+### Verified
+
+- **The 0.4.8 repeat behaved as designed under a real outage**, measured rather than asserted:
+  repeat intervals of 306s and 307s against a nominal 300s, `+6` attempts each time, `next in`
+  reading 30 on every frame, and recovery 29s after the path returned — inside the 30s the backoff
+  cap implies. The reset is clean: a second, short outage produced one frame in the original wording
+  with no elapsed, no attempt count and no repeat.
+
+- **Three predictions were wrong, and the measurements are worth keeping.** Attempts accrue at
+  ~1.18/min, not ~2/min, because a `WSAETIMEDOUT` connect blocks ~21s before returning, making each
+  cycle ~51s rather than 30s. The first frame therefore lands at 83–117s, not the ~30s the backoff
+  schedule alone suggests. And `elapsed` runs from **detection**, not from the socket drop — on a
+  timeout-shaped outage it under-reports by roughly one connect timeout (34s, measured). That last
+  one is a known limitation, not fixed here: the relay sets its outage clock on the first failed
+  connect rather than when the upstream closed.
+
 ## [0.4.8] — 2026-09-08
 
 ### Fixed

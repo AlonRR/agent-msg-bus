@@ -138,8 +138,13 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
     let mut outage_since: Option<std::time::Instant> = None;
     let mut last_announce: Option<std::time::Instant> = None;
     let mut attempts: u32 = 0;
+    // Time this process actually spent working on the outage: measured connect attempts plus the
+    // backoff it intended to sleep. Unlike wall clock it does not advance while suspended, so the
+    // difference between the two is what a sleeping laptop hides.
+    let mut retrying = Duration::ZERO;
 
     loop {
+        let attempt_started = std::time::Instant::now();
         match tokio_tungstenite::connect_async(upstream.as_str()).await {
             Ok((upstream, _)) => {
                 log_event(&addr, "upstream connected");
@@ -155,6 +160,7 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                 outage_since = None;
                 last_announce = None;
                 attempts = 0;
+                retrying = Duration::ZERO;
                 backoff = 1;
                 let (_utx, mut urx) = upstream.split();
 
@@ -193,10 +199,17 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                 let now = std::time::Instant::now();
                 let since = *outage_since.get_or_insert(now);
                 attempts += 1;
+                retrying += attempt_started.elapsed();
                 // The next sleep is this backoff; the doubling happens after it.
                 if due_to_announce(backoff, last_announce.map(|t| now.duration_since(t))) {
                     let detail = if announced_down {
-                        outage_detail(now.duration_since(since), attempts, backoff, &e.to_string())
+                        outage_detail(
+                            now.duration_since(since),
+                            attempts,
+                            backoff,
+                            retrying,
+                            &e.to_string(),
+                        )
                     } else {
                         format!("cannot reach the broker: {e}")
                     };
@@ -223,6 +236,7 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                 }
             }
         }
+        retrying += Duration::from_secs(backoff);
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
@@ -259,14 +273,55 @@ fn due_to_announce(backoff: u64, since_last: Option<Duration>) -> bool {
 /// tell you: that time is passing, that the relay is still working, when it will try next, and
 /// which failure it is seeing now — a code that changes mid-outage says the path is moving, which
 /// is how an exit node coming back is distinguished from a broker that is simply gone.
-fn outage_detail(elapsed: Duration, attempts: u32, next_in: u64, err: &str) -> String {
-    let secs = elapsed.as_secs();
-    let for_how_long =
-        if secs < 60 { format!("{secs}s") } else { format!("{}m{:02}s", secs / 60, secs % 60) };
-    format!(
-        "still cannot reach the broker: unreachable for {for_how_long}, {attempts} attempts, \
-         next in {next_in}s. Current error: {err}"
-    )
+fn outage_detail(
+    elapsed: Duration,
+    attempts: u32,
+    next_in: u64,
+    retrying: Duration,
+    err: &str,
+) -> String {
+    let mut s = format!(
+        "still cannot reach the broker: unreachable for {}, {attempts} attempts, next in {next_in}s",
+        human(elapsed)
+    );
+    if let Some(gap) = unexplained_gap(elapsed, retrying) {
+        s.push_str(&format!(
+            " (only {} of that was spent retrying - this process was suspended or descheduled for \
+             the other {}, so the attempt count is low for honest reasons)",
+            human(retrying),
+            human(gap)
+        ));
+    }
+    s.push_str(&format!(". Current error: {err}"));
+    s
+}
+
+/// Wall clock the process cannot account for as retry work.
+///
+/// `elapsed` is wall clock and keeps running while a laptop is asleep; `retrying` only accumulates
+/// while this process is executing. Measured in the field, a suspended machine produced 787m12s
+/// against 9 attempts — one attempt per 87 minutes, which the 30s cap makes impossible, and which
+/// reads as a wedged retry loop to anyone who does not know the machine slept.
+///
+/// The tolerance is deliberately generous: a gap only counts when it dwarfs the retry work itself,
+/// so ordinary scheduling slop stays silent. A qualifier that fires when nothing is wrong is the
+/// same trained-to-ignore failure as chatter.
+fn unexplained_gap(elapsed: Duration, retrying: Duration) -> Option<Duration> {
+    let gap = elapsed.checked_sub(retrying)?;
+    if gap > retrying.max(Duration::from_secs(60)) {
+        Some(gap)
+    } else {
+        None
+    }
+}
+
+fn human(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
 }
 
 #[cfg(test)]
@@ -294,13 +349,54 @@ mod tests {
     /// field here is one the reader cannot get any other way without running commands by hand.
     #[test]
     fn the_repeat_carries_what_silence_could_not_tell_you() {
-        let d = outage_detail(Duration::from_secs(752), 27, 30, "os error 10065");
+        let d = outage_detail(Duration::from_secs(752), 27, 30, Duration::from_secs(750), "os error 10065");
         assert!(d.contains("12m32s"), "elapsed time missing or unreadable: {d}");
         assert!(d.contains("27 attempts"), "attempt count missing: {d}");
         assert!(d.contains("next in 30s"), "next retry missing: {d}");
         assert!(d.contains("10065"), "the current error was dropped: {d}");
 
         // Under a minute reads as seconds rather than "0m07s".
-        assert!(outage_detail(Duration::from_secs(7), 3, 4, "x").contains("for 7s"));
+        assert!(outage_detail(Duration::from_secs(7), 3, 4, Duration::from_secs(7), "x")
+            .contains("for 7s"));
+    }
+    /// Measured in the field on a laptop that suspended mid-outage: 787m12s of wall clock against
+    /// 9 attempts — one attempt per 87 minutes, which a 30s cap makes impossible. It is not a
+    /// counter bug: `elapsed` is wall clock and keeps running while the process is suspended, while
+    /// `attempts` counts only attempts that actually executed. Left alone, the frame reads as a
+    /// wedged retry loop, which sends an operator debugging — reintroducing, in a narrower case,
+    /// exactly the misreading this whole announcement exists to prevent.
+    #[test]
+    fn a_frame_from_a_suspended_process_does_not_read_as_a_wedged_retry_loop() {
+        let d = outage_detail(
+            Duration::from_secs(787 * 60 + 12),
+            9,
+            30,
+            Duration::from_secs(8 * 60),
+            "os error 10060",
+        );
+        assert!(d.contains("787m12s"), "the wall-clock outage was dropped: {d}");
+        assert!(
+            d.contains("8m00s"),
+            "the frame never says how little of that was spent retrying: {d}"
+        );
+        assert!(
+            d.contains("suspended"),
+            "nothing tells the reader the gap is suspension rather than a stuck loop: {d}"
+        );
+    }
+
+    /// ...and the ordinary case must stay quiet. A qualifier that fires when nothing is wrong is
+    /// the same trained-to-ignore failure as chatter.
+    #[test]
+    fn an_uninterrupted_outage_carries_no_suspension_qualifier() {
+        let d = outage_detail(
+            Duration::from_secs(726),
+            17,
+            30,
+            Duration::from_secs(720),
+            "os error 10060",
+        );
+        assert!(d.contains("12m06s"), "elapsed missing: {d}");
+        assert!(!d.contains("suspended"), "cried suspension on a healthy retry loop: {d}");
     }
 }
