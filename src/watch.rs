@@ -61,6 +61,51 @@ fn version_skew(relay: &str) -> Option<String> {
 /// visible — it is what stops the fallback appearing on the roster as a bare name with no repo,
 /// indistinguishable from a stray. Never fatal: a watcher that cannot register is still a watcher
 /// that is receiving, and refusing to run would trade a cosmetic gap for a deaf session.
+/// How often `watch` asks the broker whether this subscription still exists.
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(300);
+
+/// What the broker thinks of a subscription, or `None` if it could not be asked.
+///
+/// The broker's hub is socket state rather than an inference, which made it the only indicator
+/// that was TRUE when a watcher went silently deaf: the process was alive, the relay's own
+/// `/health` reported the address subscribed, and `peers` alone said offline.
+fn broker_thinks_live(addr: &str) -> Option<bool> {
+    let cfg = crate::hook::load_config()?;
+    let client = crate::client::Client::new(&cfg.url, &cfg.token);
+    let out = client.peers(true).ok()?;
+    Some(out.known.iter().any(|k| k.addr == addr && k.live))
+}
+
+/// What to say about a heartbeat, or `None` to say nothing.
+///
+/// **Silence is the healthy state.** A line every interval would be twelve notifications an hour
+/// per session, and an event stream people learn to ignore fails exactly the way silence does —
+/// the reason the relay's outage repeat is five minutes rather than thirty seconds. So this speaks
+/// only when the broker affirmatively disagrees that the subscription exists.
+///
+/// A broker that cannot be reached says nothing either: the relay already announces upstream
+/// outages, and two components narrating one network failure is noise, not redundancy.
+fn heartbeat_alarm(live: Option<bool>, addr: &str, silent_for: Duration) -> Option<String> {
+    match live {
+        Some(true) | None => None,
+        Some(false) => Some(format!(
+            "THIS SUBSCRIPTION IS DEAD. The broker does not list {addr} as live, so mail addressed              to it is queueing and nothing here will receive it - though this process is running              and its socket looks open. Nothing has arrived for {}. Re-arm the Monitor              subscription to recover; queued mail replays on reconnect.",
+            crate::watch::human_gap(silent_for)
+        )),
+    }
+}
+
+fn human_gap(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
 fn register_bound(addr: &str) {
     let Some(cfg) = crate::hook::load_config() else { return };
     let cwd = std::env::current_dir().unwrap_or_default().to_string_lossy().to_string();
@@ -194,15 +239,49 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                 backoff = 1;
 
                 let (_tx, mut rx) = sock.split();
-                while let Some(msg) = rx.next().await {
-                    match msg {
-                        Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => {
-                            // Verbatim, one line per frame. Never merged: Monitor turns each line
-                            // into one notification, so combining two messages would hide one.
-                            println!("{}", t.to_string().replace('\n', "\\n"));
+                // Checked on a timer, reported only when the answer is wrong. A watcher can sit
+                // here for hours with an open socket and a subscription the broker has already
+                // forgotten; nothing at this end can tell, which is why the check asks the broker.
+                let mut heartbeat = tokio::time::interval(HEARTBEAT_EVERY);
+                heartbeat.tick().await; // the first tick completes immediately
+                let mut last_frame = std::time::Instant::now();
+                let mut announced_dead = false;
+                loop {
+                    tokio::select! {
+                        msg = rx.next() => match msg {
+                            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
+                                last_frame = std::time::Instant::now();
+                                // Verbatim, one line per frame. Never merged: Monitor turns each
+                                // line into one notification, so combining two would hide one.
+                                println!("{}", t.to_string().replace('\n', "\\n"));
+                            }
+                            Some(Ok(_)) => last_frame = std::time::Instant::now(),
+                            Some(Err(_)) | None => break,
+                        },
+                        _ = heartbeat.tick() => {
+                            let alarm = heartbeat_alarm(
+                                broker_thinks_live(&bound),
+                                &bound,
+                                last_frame.elapsed(),
+                            );
+                            match alarm {
+                                // Said once per outage, like the relay's: a dead subscription
+                                // repeating every five minutes is the chatter this avoids.
+                                Some(note) if !announced_dead => {
+                                    announced_dead = true;
+                                    status("subscription_dead", &note);
+                                }
+                                Some(_) => {}
+                                None if announced_dead => {
+                                    announced_dead = false;
+                                    status(
+                                        "subscription_recovered",
+                                        "the broker lists this subscription as live again",
+                                    );
+                                }
+                                None => {}
+                            }
                         }
-                        Ok(_) => {} // pings/pongs: transport noise
-                        Err(_) => break,
                     }
                 }
                 // Reaching here means the socket closed — almost always the relay restarting.
@@ -243,5 +322,51 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
         }
         tokio::time::sleep(Duration::from_secs(backoff)).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
+
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    /// The failure this exists for, reported from the machine it happened to: the watch process was
+    /// alive, its socket looked open, the relay's `/health` confidently listed the address as
+    /// subscribed — and the broker had no socket for it at all. Every local indicator was wrong in
+    /// a reassuring direction, so the alarm must come from the broker's view, not this process's.
+    #[test]
+    fn a_subscription_the_broker_does_not_know_about_raises_the_alarm() {
+        let a = heartbeat_alarm(Some(false), "machine-b/agent-msg-bus", Duration::from_secs(4200))
+            .expect("a dead subscription said nothing");
+        assert!(a.contains("machine-b/agent-msg-bus"), "the alarm did not name the address: {a}");
+        assert!(a.contains("1h10m"), "the alarm did not say how long it had been silent: {a}");
+        assert!(a.to_lowercase().contains("re-arm"), "the alarm gave no way out: {a}");
+    }
+
+    /// Silence IS the healthy state. A line every five minutes is twelve notifications an hour per
+    /// session, and a stream people learn to ignore fails the same way silence does.
+    #[test]
+    fn a_healthy_subscription_says_nothing_at_all() {
+        assert!(heartbeat_alarm(Some(true), "machine-a/agent-msg-bus", Duration::from_secs(6 * 3600))
+            .is_none(),
+            "a healthy subscription spoke, and on a quiet bus it would speak forever");
+    }
+
+    /// A quiet bus is not a broken one. Hours without a frame is normal — the relay forwards only
+    /// real messages, not the broker's keepalive pings — so elapsed silence must never be the
+    /// trigger on its own.
+    #[test]
+    fn long_silence_alone_is_never_the_trigger() {
+        assert!(heartbeat_alarm(Some(true), "x/y", Duration::from_secs(48 * 3600)).is_none());
+    }
+
+    /// An unreachable broker is the relay's story to tell. Two components narrating one network
+    /// failure is noise, not redundancy.
+    #[test]
+    fn an_unreachable_broker_is_left_to_the_relay_to_report() {
+        assert!(
+            heartbeat_alarm(None, "x/y", Duration::from_secs(600)).is_none(),
+            "watch duplicated the relay's upstream_unreachable announcement"
+        );
     }
 }

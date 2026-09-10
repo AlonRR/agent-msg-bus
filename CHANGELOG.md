@@ -22,6 +22,44 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.10] — 2026-09-10
+
+### Added
+
+- **`watch` now notices when its own subscription has died.** It was the last layer with no
+  self-report, and the only one whose silence *is* the session going deaf. The relay announces its
+  upstream outages; the broker knows who is connected; `watch` said nothing after its connect frame,
+  forever.
+
+  Reported by a session it happened to. The local indicators were not merely silent — they were
+  wrong in a reassuring direction:
+
+  | Indicator | Said | True? |
+  |---|---|---|
+  | `watch` process | alive, socket open | yes, and irrelevant |
+  | relay `/health` | `subscribed: [that address]` | **no** |
+  | `peers` | `offline` | **yes** |
+
+  So the check cannot be derived from anything at this end. A heartbeat reporting "still subscribed"
+  would have printed happily throughout, because `watch` believed it was subscribed — a third
+  confidently-wrong indicator next to the other two, which is worse than none. `watch` now asks the
+  **broker** whether it lists this address as live, because the broker's view is socket state rather
+  than an inference, and it was the only indicator that was true.
+
+  **Silence is the healthy state.** The check runs every five minutes; it speaks only when the
+  broker affirmatively disagrees that the subscription exists, and once more when it recovers. A
+  line every interval would be twelve notifications an hour per session, and a stream people learn
+  to ignore fails exactly the way silence does — the same reasoning that made 0.4.8's outage repeat
+  five minutes rather than thirty seconds.
+
+  Elapsed silence is deliberately **not** a trigger on its own. The relay forwards real messages and
+  not the broker's keepalive pings, so a quiet bus legitimately delivers nothing for hours; a
+  duration alone cannot distinguish quiet from dead. It appears in the alarm as context, never as
+  the cause.
+
+  An unreachable broker stays silent too — the relay already announces upstream outages, and two
+  components narrating one network failure is noise rather than redundancy.
+
 ## [0.4.9] — 2026-09-10
 
 ### Fixed
