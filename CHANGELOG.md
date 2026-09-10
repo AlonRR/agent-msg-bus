@@ -22,6 +22,33 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.11] — 2026-09-10
+
+### Fixed
+
+- **A half-open upstream left a relay blocked for five hours, and it could not close itself.** The
+  relay read from its upstream socket with no timeout and no liveness tracking. After a suspend, or
+  a VPN client rewriting the route out from under an established connection, that read blocks on a
+  socket the broker has already forgotten — and TCP does not notice until keepalive, which defaults
+  to two hours.
+
+  The broker pings every 30s precisely so an idle connection is distinguishable from a dead one, and
+  the relay *received* those pings. It discarded them as transport noise without recording that they
+  had arrived, so it never noticed when they stopped. Their arrival was the signal; throwing it away
+  was the bug.
+
+  The relay now treats an upstream that has delivered nothing — message, ping or pong — for three
+  ping intervals as dead, and reconnects. Two lost pings are tolerated, because reconnecting on a
+  single dropped packet would churn the subscription for every hiccup.
+
+  This turns a five-hour outage into a ninety-second one. Measured in the field on the machine it
+  happened to: the relay was never restarted, its own `/health` insisted the address was subscribed,
+  and the broker listed it offline the entire time.
+
+  0.4.10 made that failure *visible*; this makes it *recoverable*. The heartbeat is still worth
+  having — it reports the case this cannot fix — but a fault the system repairs itself beats one it
+  merely announces.
+
 ## [0.4.10] — 2026-09-10
 
 ### Added

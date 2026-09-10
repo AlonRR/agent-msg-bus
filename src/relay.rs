@@ -39,6 +39,28 @@ const MAX_BACKOFF: u64 = 30;
 /// outage, not on every retry.
 const ANNOUNCE_AFTER_BACKOFF: u64 = 16;
 
+/// How long an upstream socket may deliver nothing at all before it is presumed dead.
+///
+/// The broker pings every 30s precisely so an idle connection is distinguishable from a dead one,
+/// and this relay receives those pings — it just used to discard them without noticing they had
+/// stopped. Three intervals tolerates two lost pings before acting.
+const UPSTREAM_SILENCE_LIMIT: Duration = Duration::from_secs(90);
+
+/// Whether an upstream that has delivered nothing for this long should be treated as dead.
+///
+/// **A half-open socket does not close itself.** After a laptop suspends, or a VPN client rewrites
+/// the route out from under an established connection, the relay's read can block forever on a
+/// socket the far end has already forgotten: TCP will not notice until keepalive, which defaults to
+/// two hours. Meanwhile the relay's own `busy` set still lists the address, so its `/health`
+/// reports the subscription as healthy while the broker has long since dropped it.
+///
+/// Measured in the field: a session deaf for five hours, with the relay never restarted, its
+/// `/health` insisting the address was subscribed, and the broker listing it offline the whole
+/// time. Reconnecting on silence turns that from a five-hour outage into a 90-second one.
+fn upstream_is_stale(since_last_frame: Duration) -> bool {
+    since_last_frame > UPSTREAM_SILENCE_LIMIT
+}
+
 /// **One relay per machine, multiplexing every session on it.**
 ///
 /// The first cut was one relay per address, which forced a port per session and tied a process
@@ -164,10 +186,26 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                 backoff = 1;
                 let (_utx, mut urx) = upstream.split();
 
+                // A half-open upstream never returns from a read, so silence has to be watched for
+                // actively. The broker's ping is the heartbeat being counted here.
+                let mut last_upstream = std::time::Instant::now();
+                let mut watchdog = tokio::time::interval(Duration::from_secs(15));
+                watchdog.tick().await; // the first tick completes immediately
                 loop {
                     tokio::select! {
+                        _ = watchdog.tick() => {
+                            if upstream_is_stale(last_upstream.elapsed()) {
+                                log_event(
+                                    &addr,
+                                    "upstream delivered nothing past the ping interval; \
+                                     presuming it dead and reconnecting",
+                                );
+                                break;
+                            }
+                        },
                         up = urx.next() => match up {
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
+                                last_upstream = std::time::Instant::now();
                                 // Forwarded verbatim, one frame in -> one frame out. Monitor turns
                                 // each frame into one notification; merging here would collapse
                                 // separate messages into a single event.
@@ -176,7 +214,10 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                                     return;
                                 }
                             }
-                            Some(Ok(_)) => {}          // pings/pongs/binary: transport noise
+                            // Pings and pongs carry no payload worth forwarding, but their ARRIVAL
+                            // is the liveness signal. Discarding them silently is what let a dead
+                            // socket look healthy for five hours.
+                            Some(Ok(_)) => last_upstream = std::time::Instant::now(),
                             _ => {
                                 log_event(&addr, "upstream closed; reconnecting");
                                 break;
@@ -398,5 +439,26 @@ mod tests {
         );
         assert!(d.contains("12m06s"), "elapsed missing: {d}");
         assert!(!d.contains("suspended"), "cried suspension on a healthy retry loop: {d}");
+    }
+    /// The failure this exists to prevent, measured in the field: a relay blocked on a half-open
+    /// upstream for five hours. It was never restarted, its own `/health` insisted the address was
+    /// subscribed, and the broker listed it offline the entire time. TCP would not have noticed
+    /// until keepalive, which defaults to two hours.
+    #[test]
+    fn an_upstream_silent_past_the_ping_interval_is_presumed_dead() {
+        assert!(
+            upstream_is_stale(Duration::from_secs(5 * 3600)),
+            "a five-hour silence was still treated as a live upstream"
+        );
+        assert!(upstream_is_stale(Duration::from_secs(95)), "three missed pings was tolerated");
+    }
+
+    /// The broker pings every 30s. One lost ping is a lost packet, not a dead socket, and
+    /// reconnecting on it would churn the subscription for every hiccup.
+    #[test]
+    fn a_single_missed_ping_is_not_a_dead_socket() {
+        assert!(!upstream_is_stale(Duration::from_secs(35)), "reconnected after one missed ping");
+        assert!(!upstream_is_stale(Duration::from_secs(65)), "reconnected after two missed pings");
+        assert!(!upstream_is_stale(UPSTREAM_SILENCE_LIMIT), "fired exactly at the limit");
     }
 }
