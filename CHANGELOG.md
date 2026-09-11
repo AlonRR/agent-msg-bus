@@ -22,6 +22,45 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.12] — 2026-09-11
+
+### Fixed
+
+- **`subscription_dead` fired on every resume, and a resume is not a death.** While a laptop is
+  suspended the socket dies unannounced and the broker drops the address — and the relay's own 90s
+  staleness check cannot run, because the CPU is stopped. So on waking there is a real window, up to
+  that same 90s, where the broker truthfully answers *not live* and nothing is wrong that is not
+  already repairing itself. The alarm fired inside it.
+
+  That is the failure this feature exists to prevent, turned on itself: an alarm that cries on a
+  healthy resume trains people to dismiss the one that matters. It is the same reasoning that set
+  0.4.8's outage repeat to five minutes rather than thirty seconds.
+
+  The alarm now requires the broker to answer *not live* on **two consecutive checks**. A genuine
+  death is reported one interval later; measured against the five-hour outage that prompted the
+  feature, that is nothing. A broker that cannot be reached resets the count rather than counting
+  against the subscription — being unable to ask is not evidence, and the relay is already narrating
+  that outage.
+
+  A useful side effect: because a resume transient cannot survive two checks five minutes apart, any
+  future firing is by construction a real death rather than a resume artefact — which settles the
+  question the field capture could not.
+
+  Reported from the machine that suspends, which correctly diagnosed it as the feature working
+  rather than a new bug, and proposed the confirmation requirement.
+
+- Restored a doc comment on `register_bound` that a previous edit had silently detached and left
+  attached to an unrelated constant.
+
+### Verified
+
+- **Suspend/resume, listed as untested since Phase 7, is now exercised** — four sleep/resume cycles
+  in one night, taken from the machine's own power log rather than inferred, with DHCP churn and a
+  VPN client up throughout. The relay held a single pid for 604 minutes across all four, `watch`
+  reconnected unaided every time, mail flowed afterwards and nothing was lost. `docs/plan.md` is
+  updated in three places, including the one question this did **not** settle: whether the
+  subscription is dead for the whole sleep or only across the resume boundary.
+
 ## [0.4.11] — 2026-09-10
 
 ### Fixed

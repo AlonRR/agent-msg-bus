@@ -96,7 +96,7 @@ would muddy a negative result.
 | Does a **second** frame on the same socket wake it again? | ✅ **YES.** Frame 2 at 15:18:21 (+180 s), same connection. The subscription is not one-shot |
 | Does `persistent: true` outlive the old 1 h cap? | ✅ **YES.** Connected 15:15:21, still live at 16:20:51 — **65 min 30 s**, including **60 minutes of total silence** (15:20:51 → 16:20:51, no frames, no pings). It ended only because the probe's own `sleep(3600)` expired |
 | Is a dropped subscription visible or silent? | ✅ **Visible.** Monitor surfaced `[WebSocket closed: 1006 Connection ended]` as an event — the session is *told* it went deaf |
-| Does the socket survive the machine sleeping? | ⚠️ **Not tested.** Do not assume either way |
+| Does the socket survive the machine sleeping? | ⚠️ **No — but the system recovers unaided.** Measured 10–11 Sep 2026 on a laptop across **four** sleep/resume cycles in one night: the socket dies without a clean close, and both the relay process and the `watch` process survive and reconnect. Nothing was lost; the mailbox ended at 0 pending. What is **not** settled is whether the subscription is dead for the whole sleep or only across the resume boundary — see Known limitations |
 
 **The premise holds.** A WebSocket frame from an external process starts a turn in a session sitting
 idle at the prompt — exactly what no hook can do, and exactly what the old bus needed.
@@ -357,8 +357,9 @@ Two were sent rather than one deliberately: one message cannot distinguish "the 
 stopping the relay process, not by suspending the machine. From the broker's side that is a true
 offline window (socket closed, address `offline`, mail queued), which is what the durable queue
 claims to handle. It is **not** a suspend/resume test: the laptop never slept and the NIC never went
-down. Suspend/resume therefore remains untested — see Known limitations, which is unchanged on that
-point.
+down. Suspend/resume was therefore **not** tested here — it was tested later, on 10–11 Sep 2026,
+across four real sleep cycles; see Known limitations for what that settled and the one question it
+left open.
 
 #### ⚠️ `Stop-ScheduledTask` did NOT stop the relay before `d1dc268` — it produced a false pass
 
@@ -808,11 +809,25 @@ pinning a role deliberately, not by making every session's identity accidental.
   `systemctl restart agent-msg-bus`. Revocation is therefore not instant unless you restart.
 - **Monitor's WS client sends no headers**, so the token rides in the query string and will appear in
   proxy logs. Fine for LAN-only; revisit before any WAN exposure.
-- **Suspend/resume across a laptop sleeping is still untested** for both the relay and Monitor.
-  Phase 7 did *not* close this: its offline window was made by stopping the relay process, which is a
-  genuine broker-side offline window but leaves the NIC up and the machine awake. What a real suspend
-  adds — a socket that dies without a clean close, a clock jump, and DHCP/ARP churn on resume — is
-  exactly what is still unproven. machine-b remains the machine that could prove it.
+- **Suspend/resume is now exercised — and recovers unaided — but one question inside it is still
+  open.** Phase 7 did not close this; a real suspend did, on 10–11 Sep 2026. Four sleep/resume cycles
+  in one night, from the machine's own power log rather than inferred, with DHCP churn (the Wi-Fi
+  address changed mid-night) and a VPN client up throughout. Both long-lived processes survived: the
+  relay held one pid for 604 minutes across all four, and `watch` reconnected on its own each time.
+  Mail flowed afterwards, nothing was lost, and the mailbox ended at 0 pending.
+
+  Three things a real suspend adds, and what each turned out to do:
+  - **A socket that dies without a clean close** — confirmed, and it is the root cause fixed in
+    0.4.11: the relay blocked on a half-open upstream for five hours because it was discarding the
+    broker's pings instead of noticing they had stopped.
+  - **A clock jump** — confirmed, and it is why 0.4.9 reports retry time alongside wall clock: a
+    suspended process produced `787m12s, 9 attempts`, which reads as a wedged loop.
+  - **DHCP/ARP churn on resume** — observed, with no failure attributable to it.
+
+  **Still unproven:** whether the subscription is dead for the duration of the sleep or only across
+  the resume boundary. The capture that would settle it has to sample the broker's view every ~30s
+  *through* the sleep/resume boundary, and no such sample exists — by the time the alarm was read,
+  recovery had already happened. Do not cite either story as established.
 - **Killing the relay ends the session's Monitor subscription** and nothing re-arms it automatically.
   The close is visible (`1006`), not silent, so it is actionable — but until the skill acts on it,
   recovery is a human step. The relay absorbs upstream outages; it cannot absorb its own restart.

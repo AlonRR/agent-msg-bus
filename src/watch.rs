@@ -55,14 +55,21 @@ fn version_skew(relay: &str) -> Option<String> {
     ))
 }
 
-/// Give the fallback name real metadata, best-effort.
-///
-/// `/sub` already guarantees a row and a cursor exist, so this is not what keeps the session
-/// visible — it is what stops the fallback appearing on the roster as a bare name with no repo,
-/// indistinguishable from a stray. Never fatal: a watcher that cannot register is still a watcher
-/// that is receiving, and refusing to run would trade a cosmetic gap for a deaf session.
 /// How often `watch` asks the broker whether this subscription still exists.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(300);
+
+/// How many consecutive not-live answers before the alarm is raised.
+///
+/// **A resume is briefly indistinguishable from a death, and it is not one.** While a laptop is
+/// suspended the socket dies unannounced and the broker drops the address; the relay's own
+/// staleness check cannot run, because the CPU is stopped. So on waking there is a real window —
+/// up to the relay's 90s detection limit — where the broker says not-live and nothing is wrong that
+/// is not already fixing itself.
+///
+/// Firing there would train people to dismiss the one alarm that matters, which is the failure this
+/// whole feature exists to avoid. Requiring a second confirmation delays a genuine death by one
+/// interval; measured against the five-hour outage that prompted the feature, that is nothing.
+const CONFIRM_NOT_LIVE: u32 = 2;
 
 /// What the broker thinks of a subscription, or `None` if it could not be asked.
 ///
@@ -85,12 +92,22 @@ fn broker_thinks_live(addr: &str) -> Option<bool> {
 ///
 /// A broker that cannot be reached says nothing either: the relay already announces upstream
 /// outages, and two components narrating one network failure is noise, not redundancy.
-fn heartbeat_alarm(live: Option<bool>, addr: &str, silent_for: Duration) -> Option<String> {
+fn heartbeat_alarm(
+    live: Option<bool>,
+    addr: &str,
+    silent_for: Duration,
+    strikes: u32,
+) -> Option<String> {
     match live {
         Some(true) | None => None,
+        Some(false) if strikes < CONFIRM_NOT_LIVE => None,
         Some(false) => Some(format!(
-            "THIS SUBSCRIPTION IS DEAD. The broker does not list {addr} as live, so mail addressed              to it is queueing and nothing here will receive it - though this process is running              and its socket looks open. Nothing has arrived for {}. Re-arm the Monitor              subscription to recover; queued mail replays on reconnect.",
-            crate::watch::human_gap(silent_for)
+            "THIS SUBSCRIPTION IS DEAD. The broker has not listed {addr} as live for {strikes} \
+             consecutive checks, so mail addressed to it is queueing and nothing here will \
+             receive it - though this process is running and its socket looks open. Nothing has \
+             arrived for {}. Re-arm the Monitor subscription to recover; queued mail replays on \
+             reconnect.",
+            human_gap(silent_for)
         )),
     }
 }
@@ -106,6 +123,12 @@ fn human_gap(d: Duration) -> String {
     }
 }
 
+/// Give the fallback name real metadata, best-effort.
+///
+/// `/sub` already guarantees a row and a cursor exist, so this is not what keeps the session
+/// visible — it is what stops the fallback appearing on the roster as a bare name with no repo,
+/// indistinguishable from a stray. Never fatal: a watcher that cannot register is still a watcher
+/// that is receiving, and refusing to run would trade a cosmetic gap for a deaf session.
 fn register_bound(addr: &str) {
     let Some(cfg) = crate::hook::load_config() else { return };
     let cwd = std::env::current_dir().unwrap_or_default().to_string_lossy().to_string();
@@ -246,6 +269,7 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                 heartbeat.tick().await; // the first tick completes immediately
                 let mut last_frame = std::time::Instant::now();
                 let mut announced_dead = false;
+                let mut not_live_strikes: u32 = 0;
                 loop {
                     tokio::select! {
                         msg = rx.next() => match msg {
@@ -259,10 +283,19 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                             Some(Err(_)) | None => break,
                         },
                         _ = heartbeat.tick() => {
+                            let live = broker_thinks_live(&bound);
+                            // A broker that cannot be asked resets the count rather than counting
+                            // against the subscription: an unreachable broker is not evidence that
+                            // this socket is dead, and the relay is already narrating that outage.
+                            match live {
+                                Some(false) => not_live_strikes += 1,
+                                _ => not_live_strikes = 0,
+                            }
                             let alarm = heartbeat_alarm(
-                                broker_thinks_live(&bound),
+                                live,
                                 &bound,
                                 last_frame.elapsed(),
+                                not_live_strikes,
                             );
                             match alarm {
                                 // Said once per outage, like the relay's: a dead subscription
@@ -336,7 +369,7 @@ mod heartbeat_tests {
     /// a reassuring direction, so the alarm must come from the broker's view, not this process's.
     #[test]
     fn a_subscription_the_broker_does_not_know_about_raises_the_alarm() {
-        let a = heartbeat_alarm(Some(false), "machine-b/agent-msg-bus", Duration::from_secs(4200))
+        let a = heartbeat_alarm(Some(false), "machine-b/agent-msg-bus", Duration::from_secs(4200), CONFIRM_NOT_LIVE)
             .expect("a dead subscription said nothing");
         assert!(a.contains("machine-b/agent-msg-bus"), "the alarm did not name the address: {a}");
         assert!(a.contains("1h10m"), "the alarm did not say how long it had been silent: {a}");
@@ -347,7 +380,7 @@ mod heartbeat_tests {
     /// session, and a stream people learn to ignore fails the same way silence does.
     #[test]
     fn a_healthy_subscription_says_nothing_at_all() {
-        assert!(heartbeat_alarm(Some(true), "machine-a/agent-msg-bus", Duration::from_secs(6 * 3600))
+        assert!(heartbeat_alarm(Some(true), "machine-a/agent-msg-bus", Duration::from_secs(6 * 3600), 0)
             .is_none(),
             "a healthy subscription spoke, and on a quiet bus it would speak forever");
     }
@@ -357,7 +390,7 @@ mod heartbeat_tests {
     /// trigger on its own.
     #[test]
     fn long_silence_alone_is_never_the_trigger() {
-        assert!(heartbeat_alarm(Some(true), "x/y", Duration::from_secs(48 * 3600)).is_none());
+        assert!(heartbeat_alarm(Some(true), "x/y", Duration::from_secs(48 * 3600), 0).is_none());
     }
 
     /// An unreachable broker is the relay's story to tell. Two components narrating one network
@@ -365,8 +398,32 @@ mod heartbeat_tests {
     #[test]
     fn an_unreachable_broker_is_left_to_the_relay_to_report() {
         assert!(
-            heartbeat_alarm(None, "x/y", Duration::from_secs(600)).is_none(),
+            heartbeat_alarm(None, "x/y", Duration::from_secs(600), 0).is_none(),
             "watch duplicated the relay's upstream_unreachable announcement"
         );
+    }
+    /// A resume is briefly indistinguishable from a death. Measured on a laptop that suspended four
+    /// times in one night: the socket dies unannounced while suspended, the broker drops the
+    /// address, and the relay's own staleness check cannot run because the CPU is stopped — so on
+    /// waking the broker legitimately answers not-live for up to the relay's 90s detection window,
+    /// while nothing is wrong that is not already repairing itself.
+    ///
+    /// Firing there would train people to dismiss the one alarm that matters.
+    #[test]
+    fn a_single_not_live_answer_is_not_enough_because_a_resume_looks_like_a_death() {
+        assert!(
+            heartbeat_alarm(Some(false), "machine-b/agent-msg-bus", Duration::from_secs(36000), 1)
+                .is_none(),
+            "alarmed on the first not-live answer, which fires on every resume"
+        );
+    }
+
+    /// But a death that persists across two checks five minutes apart is real, and the delay costs
+    /// nothing against the five-hour outage this feature was built for.
+    #[test]
+    fn a_confirmed_death_still_alarms_and_says_it_was_confirmed() {
+        let a = heartbeat_alarm(Some(false), "machine-b/agent-msg-bus", Duration::from_secs(36000), 2)
+            .expect("a confirmed death stayed silent");
+        assert!(a.contains("2 consecutive"), "the alarm did not say it had been confirmed: {a}");
     }
 }
