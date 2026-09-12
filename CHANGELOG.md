@@ -22,6 +22,45 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.13] — 2026-09-12
+
+### Fixed
+
+- **`subscription_recovered` was announced when the broker could not be reached at all.** The
+  recovery branch fired whenever the tick produced no alarm — and "no alarm" includes the case
+  where `broker_thinks_live` returned `None` because the broker was unreachable. So the session was
+  told *"the broker lists this subscription as live again"*, a specific claim about a broker that
+  was never contacted.
+
+  The realistic sequence is not exotic: a subscription dies, the alarm fires correctly, and then the
+  machine loses connectivity — which has been measured repeatedly on a tunnelled laptop, four
+  sleep cycles in one night and two flaps inside half an hour. The next tick cannot reach the
+  broker, and the session is told it has recovered while it is still deaf.
+
+  That is this feature's own failure mode emitted by the feature itself: a component reporting a
+  reality it did not verify. Recovery now requires the broker to **affirm** liveness — `Some(true)`,
+  not merely the absence of an alarm.
+
+### Added
+
+- **The heartbeat's across-tick decisions are now tested.** Only the per-tick message formatting had
+  coverage; the logic that accumulates strikes, resets them, latches the alarm and announces
+  recovery lived inline in the reconnect loop with no tests at all — and that is the half that can
+  over-suppress a real death or invent a recovery, as it turned out to be doing.
+
+  Extracted into a `HeartbeatWatch` state machine and covered by seven sequence tests: one answer
+  never fires, two consecutive fire exactly once and do not repeat, an intervening live answer
+  resets the count, an unreachable broker resets the count, an unreachable broker is not evidence of
+  recovery, a genuine recovery is announced once, and a second death after a recovery fires again.
+
+  The extraction was made first as a faithful port **including the bug**, so the new test failed
+  against it — which proved both that the defect was real and that the port had not quietly changed
+  behaviour, before anything was fixed.
+
+  Found by opening the source after asserting its behaviour from memory to a peer and getting it
+  backwards. The claim was that a 12-minute outage should raise the alarm; the code says the
+  opposite, deliberately, and the grep that settled it was one command away.
+
 ## [0.4.12] — 2026-09-11
 
 ### Fixed

@@ -112,6 +112,60 @@ fn heartbeat_alarm(
     }
 }
 
+/// What a heartbeat tick decided to say.
+#[derive(Debug, PartialEq)]
+enum Beat {
+    /// Announce the subscription dead. Carries the text.
+    Dead(String),
+    /// Announce that it is live again.
+    Recovered,
+    /// Say nothing, which is the overwhelmingly common case.
+    Quiet,
+}
+
+/// The heartbeat's state across ticks: how many consecutive not-live answers, and whether the
+/// alarm has already been raised for this outage.
+///
+/// Extracted from the reconnect loop because it was previously inline and therefore untestable —
+/// only the per-tick formatting had tests, while the accumulate/reset/latch decisions, which are
+/// the part that can over- or under-suppress, had none at all.
+struct HeartbeatWatch {
+    strikes: u32,
+    announced_dead: bool,
+}
+
+impl HeartbeatWatch {
+    fn new() -> Self {
+        Self { strikes: 0, announced_dead: false }
+    }
+
+    fn observe(&mut self, live: Option<bool>, addr: &str, silent_for: Duration) -> Beat {
+        // An unreachable broker resets the count rather than counting against the subscription:
+        // being unable to ask is not evidence that this socket is dead.
+        match live {
+            Some(false) => self.strikes += 1,
+            _ => self.strikes = 0,
+        }
+        match heartbeat_alarm(live, addr, silent_for, self.strikes) {
+            // Said once per outage, like the relay's: repeating every five minutes is chatter.
+            Some(note) if !self.announced_dead => {
+                self.announced_dead = true;
+                Beat::Dead(note)
+            }
+            Some(_) => Beat::Quiet,
+            // Recovery requires the broker to AFFIRM that the subscription is live. A `None` here
+            // means the broker could not be reached at all, which is not evidence of anything —
+            // and announcing "the broker lists this subscription as live again" on the strength of
+            // a broker that was never reached tells a deaf session it is fine.
+            None if self.announced_dead && live == Some(true) => {
+                self.announced_dead = false;
+                Beat::Recovered
+            }
+            None => Beat::Quiet,
+        }
+    }
+}
+
 fn human_gap(d: Duration) -> String {
     let s = d.as_secs();
     if s < 60 {
@@ -268,8 +322,7 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                 let mut heartbeat = tokio::time::interval(HEARTBEAT_EVERY);
                 heartbeat.tick().await; // the first tick completes immediately
                 let mut last_frame = std::time::Instant::now();
-                let mut announced_dead = false;
-                let mut not_live_strikes: u32 = 0;
+                let mut heartbeat_state = HeartbeatWatch::new();
                 loop {
                     tokio::select! {
                         msg = rx.next() => match msg {
@@ -283,36 +336,17 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                             Some(Err(_)) | None => break,
                         },
                         _ = heartbeat.tick() => {
-                            let live = broker_thinks_live(&bound);
-                            // A broker that cannot be asked resets the count rather than counting
-                            // against the subscription: an unreachable broker is not evidence that
-                            // this socket is dead, and the relay is already narrating that outage.
-                            match live {
-                                Some(false) => not_live_strikes += 1,
-                                _ => not_live_strikes = 0,
-                            }
-                            let alarm = heartbeat_alarm(
-                                live,
+                            match heartbeat_state.observe(
+                                broker_thinks_live(&bound),
                                 &bound,
                                 last_frame.elapsed(),
-                                not_live_strikes,
-                            );
-                            match alarm {
-                                // Said once per outage, like the relay's: a dead subscription
-                                // repeating every five minutes is the chatter this avoids.
-                                Some(note) if !announced_dead => {
-                                    announced_dead = true;
-                                    status("subscription_dead", &note);
-                                }
-                                Some(_) => {}
-                                None if announced_dead => {
-                                    announced_dead = false;
-                                    status(
-                                        "subscription_recovered",
-                                        "the broker lists this subscription as live again",
-                                    );
-                                }
-                                None => {}
+                            ) {
+                                Beat::Dead(note) => status("subscription_dead", &note),
+                                Beat::Recovered => status(
+                                    "subscription_recovered",
+                                    "the broker lists this subscription as live again",
+                                ),
+                                Beat::Quiet => {}
                             }
                         }
                     }
@@ -402,6 +436,84 @@ mod heartbeat_tests {
             "watch duplicated the relay's upstream_unreachable announcement"
         );
     }
+    // ---- the decisions ACROSS ticks -------------------------------------------------------
+    // Everything above tests one tick's formatting. These test the accumulate / reset / latch
+    // logic, which lived inline in the reconnect loop and had no coverage at all — and which is
+    // the half that can over-suppress a real death or invent a recovery.
+
+    fn beat(h: &mut HeartbeatWatch, live: Option<bool>) -> Beat {
+        h.observe(live, "machine-a/repo", Duration::from_secs(600))
+    }
+
+    #[test]
+    fn one_not_live_answer_never_fires_because_a_resume_produces_exactly_one() {
+        let mut h = HeartbeatWatch::new();
+        assert_eq!(beat(&mut h, Some(false)), Beat::Quiet);
+    }
+
+    #[test]
+    fn two_consecutive_not_live_answers_fire_exactly_once() {
+        let mut h = HeartbeatWatch::new();
+        assert_eq!(beat(&mut h, Some(false)), Beat::Quiet, "fired on the first answer");
+        assert!(matches!(beat(&mut h, Some(false)), Beat::Dead(_)), "never fired on the second");
+        assert_eq!(beat(&mut h, Some(false)), Beat::Quiet, "repeated itself — that is chatter");
+    }
+
+    #[test]
+    fn an_intervening_live_answer_resets_the_count() {
+        let mut h = HeartbeatWatch::new();
+        beat(&mut h, Some(false));
+        assert_eq!(beat(&mut h, Some(true)), Beat::Quiet);
+        assert_eq!(beat(&mut h, Some(false)), Beat::Quiet, "the count survived a live answer");
+    }
+
+    #[test]
+    fn an_unreachable_broker_resets_the_count() {
+        let mut h = HeartbeatWatch::new();
+        beat(&mut h, Some(false));
+        assert_eq!(beat(&mut h, None), Beat::Quiet);
+        assert_eq!(beat(&mut h, Some(false)), Beat::Quiet, "an unanswerable broker counted as a strike");
+    }
+
+    /// **Being unable to ask is not evidence of recovery.** The realistic sequence is a
+    /// subscription dying, then the machine losing connectivity — which has been measured
+    /// repeatedly on a tunnelled laptop. Announcing "the broker lists this subscription as live
+    /// again" on the strength of a broker that was never reached tells a deaf session it is fine,
+    /// which is the exact failure this feature exists to prevent, emitted by the feature itself.
+    #[test]
+    fn an_unreachable_broker_is_not_evidence_of_recovery() {
+        let mut h = HeartbeatWatch::new();
+        beat(&mut h, Some(false));
+        assert!(matches!(beat(&mut h, Some(false)), Beat::Dead(_)), "precondition: alarm raised");
+        assert_eq!(
+            beat(&mut h, None),
+            Beat::Quiet,
+            "claimed recovery from a broker it could not reach"
+        );
+    }
+
+    #[test]
+    fn a_genuine_recovery_is_announced_once_and_then_is_quiet() {
+        let mut h = HeartbeatWatch::new();
+        beat(&mut h, Some(false));
+        assert!(matches!(beat(&mut h, Some(false)), Beat::Dead(_)));
+        assert_eq!(beat(&mut h, Some(true)), Beat::Recovered);
+        assert_eq!(beat(&mut h, Some(true)), Beat::Quiet, "repeated the recovery");
+    }
+
+    #[test]
+    fn a_second_death_after_a_recovery_fires_again() {
+        let mut h = HeartbeatWatch::new();
+        beat(&mut h, Some(false));
+        beat(&mut h, Some(false));
+        beat(&mut h, Some(true));
+        beat(&mut h, Some(false));
+        assert!(
+            matches!(beat(&mut h, Some(false)), Beat::Dead(_)),
+            "the latch stayed set and a second real death was swallowed"
+        );
+    }
+
     /// A resume is briefly indistinguishable from a death. Measured on a laptop that suspended four
     /// times in one night: the socket dies unannounced while suspended, the broker drops the
     /// address, and the relay's own staleness check cannot run because the CPU is stopped — so on
