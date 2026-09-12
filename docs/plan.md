@@ -824,10 +824,29 @@ pinning a role deliberately, not by making every session's identity accidental.
     suspended process produced `787m12s, 9 attempts`, which reads as a wedged loop.
   - **DHCP/ARP churn on resume** — observed, with no failure attributable to it.
 
-  **Still unproven:** whether the subscription is dead for the duration of the sleep or only across
-  the resume boundary. The capture that would settle it has to sample the broker's view every ~30s
-  *through* the sleep/resume boundary, and no such sample exists — by the time the alarm was read,
-  recovery had already happened. Do not cite either story as established.
+  **Half settled, 12 Sep 2026 — the capture now exists.** The question was whether the subscription
+  is dead for the duration of the sleep or only across the resume boundary.
+
+  **Measured**, sampling the broker's view of the sleeping machine's address every 30s from a
+  machine that does *not* sleep:
+
+  ```text
+  2026-09-11 21:53:29Z   -> OFFLINE
+  2026-09-12 06:58:07Z   -> live
+  continuously offline 9h 04m 38s, ONE unbroken stretch, no intermediate transitions
+  ```
+
+  So from the broker's side the absence is continuous and total across the window — it does not
+  flap, and it is not a brief artefact at the resume boundary. **Still open:** whether that window
+  maps to the machine's actual sleep, which needs its own power log to correlate; if it does, the
+  "dead only at the boundary" story is dead.
+
+  **The method is the transferable part.** A poller on the suspending machine cannot sample its own
+  sleep — it samples up to the suspend, again after the resume, and never once in the interval being
+  measured, yielding a confident log with a hole exactly where the answer is. The sampling has to
+  come from outside the thing being measured. That is the same error, one layer out, as `watch`
+  being unable to report its own deafness and the relay being unable to notice its own half-open
+  socket.
 - **Killing the relay ends the session's Monitor subscription** and nothing re-arms it automatically.
   The close is visible (`1006`), not silent, so it is actionable — but until the skill acts on it,
   recovery is a human step. The relay absorbs upstream outages; it cannot absorb its own restart.
