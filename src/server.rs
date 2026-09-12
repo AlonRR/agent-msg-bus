@@ -29,6 +29,72 @@ const CLOSE_GOING_AWAY: CloseCode = 1001;
 /// failure. Do not let this comment drift into claiming otherwise.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How long a subscriber may send nothing at all — not even a pong — before its socket is presumed
+/// dead and its address released.
+///
+/// **Deliberately more generous than the relay's 90s equivalent**, and the asymmetry is the point.
+/// The relay counts frames the broker is *guaranteed* to send, so three intervals is safe there.
+/// Here the broker counts pongs a client is only *expected* to send: every standard WebSocket
+/// client answers a ping automatically, but a client that did not would be disconnected every
+/// cycle, which is a worse failure than the one being fixed. Five intervals keeps that margin while
+/// still cutting the observed blind window from ~17 minutes to under three.
+const CLIENT_SILENCE_LIMIT: Duration = Duration::from_secs(150);
+
+/// Whether a subscriber that has sent nothing for this long should be treated as gone.
+///
+/// **A half-open socket does not close itself, and writing to one does not fail.** The bytes go
+/// into the OS send buffer and sit there until TCP retransmission is exhausted — roughly 15 minutes
+/// on Windows — so `tx.send()` returning an error is far too slow to be the only liveness signal.
+///
+/// Measured on a tunnelled laptop entering Modern Standby, from the broker's own `peers` output:
+/// the address read `live` for **16m13s** after one sleep and **17m39s** after another. Worse than
+/// a stale column, the phantom socket also made `/sub` answer 409 to the legitimate owner's
+/// reconnect for 15m31s across 35 attempts — so failing to notice a dead client locked the address
+/// against its real holder's return.
+fn client_is_stale(since_last_frame: Duration) -> bool {
+    since_last_frame > CLIENT_SILENCE_LIMIT
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    /// The failure this exists to prevent, measured twice: a sleeping machine reported as `live`
+    /// for over a quarter of an hour, because the broker pinged, received the pong, and threw it
+    /// away — leaving a write-side error as its only notion of death.
+    #[test]
+    fn a_subscriber_silent_past_the_ping_interval_is_presumed_gone() {
+        assert!(
+            client_is_stale(Duration::from_secs(16 * 60 + 13)),
+            "the 16m13s blind window measured in the field was still treated as live"
+        );
+        assert!(client_is_stale(Duration::from_secs(200)));
+    }
+
+    /// But a client is only *expected* to pong, not guaranteed to. Disconnecting one that is merely
+    /// slow would be a worse failure than the seventeen-minute window, so the margin is wide.
+    #[test]
+    fn a_few_missed_pongs_are_tolerated_rather_than_disconnecting_a_slow_client() {
+        assert!(!client_is_stale(Duration::from_secs(35)), "dropped on one missed pong");
+        assert!(!client_is_stale(Duration::from_secs(95)), "dropped on three missed pongs");
+        assert!(!client_is_stale(CLIENT_SILENCE_LIMIT), "fired exactly at the limit");
+    }
+
+    /// The whole point is that this is far tighter than TCP's own timeout, which is what the broker
+    /// was effectively relying on.
+    #[test]
+    fn the_limit_is_well_inside_the_tcp_retransmission_window_it_replaces() {
+        assert!(
+            CLIENT_SILENCE_LIMIT < Duration::from_secs(15 * 60),
+            "no better than the ~15 minute TCP behaviour it exists to pre-empt"
+        );
+        assert!(
+            CLIENT_SILENCE_LIMIT > PING_INTERVAL * 3,
+            "tighter than the relay's margin, which risks dropping a slow-ponging client"
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Mutex<Store>>,
@@ -820,9 +886,22 @@ async fn drive(
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.tick().await; // the first tick completes immediately
+    // A half-open socket accepts writes into the OS buffer until TCP retransmission is exhausted —
+    // roughly 15 minutes on Windows — so `tx.send()` failing is far too slow to be the only
+    // liveness signal. Watch for silence instead. See `client_is_stale`.
+    let mut watchdog = tokio::time::interval(Duration::from_secs(15));
+    watchdog.tick().await;
+    let mut last_seen = std::time::Instant::now();
 
     loop {
         tokio::select! {
+            _ = watchdog.tick() => {
+                if client_is_stale(last_seen.elapsed()) {
+                    eprintln!("agent-msg-bus: {addr} silent past the ping interval; presuming the \
+                               socket dead and releasing the address");
+                    break;
+                }
+            },
             msg = rx.recv() => match msg {
                 Some(m) => {
                     if send_msg(&mut tx, &m, false).await.is_err() { break; }
@@ -835,7 +914,10 @@ async fn drive(
             frame = incoming.next() => match frame {
                 Some(Ok(Ws::Close(_))) | None => break,
                 Some(Err(_)) => break,
-                Some(Ok(_)) => {} // clients are receive-only here; pongs and stray frames are ignored
+                // Clients are receive-only, so a pong's CONTENT is worthless — but its ARRIVAL is
+                // the only evidence the far end still exists. Discarding it silently is what let a
+                // sleeping laptop read as `live` for seventeen minutes.
+                Some(Ok(_)) => last_seen = std::time::Instant::now(),
             },
         }
     }

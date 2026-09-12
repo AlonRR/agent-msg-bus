@@ -836,10 +836,40 @@ pinning a role deliberately, not by making every session's identity accidental.
   continuously offline 9h 04m 38s, ONE unbroken stretch, no intermediate transitions
   ```
 
-  So from the broker's side the absence is continuous and total across the window — it does not
-  flap, and it is not a brief artefact at the resume boundary. **Still open:** whether that window
-  maps to the machine's actual sleep, which needs its own power log to correlate; if it does, the
-  "dead only at the boundary" story is dead.
+  So from the broker's side the absence is continuous and total across the window. It does not
+  flap, and it is not a brief artefact at the resume boundary.
+
+  **ANSWERED, and the figures above are biased — by a defect in the broker.** The sleeping
+  machine's own power log (Modern Standby `506`/`507`, not the `42`/`107` legacy pair) correlates
+  as:
+
+  | event | machine's power log | broker's `peers` | lag |
+  |---|---|---|---|
+  | entered standby | 21:37:16Z | `OFFLINE` at 21:53:29Z | **16m 13s** |
+  | entered standby | 06:58:06Z | still `live` at 06:58:07Z, `OFFLINE` at 07:15:45Z | **17m 39s** |
+  | exited standby | 07:27:18Z | `live` at 07:27:50Z | 32s |
+
+  The subscription is therefore dead for the **whole** sleep, not merely at the boundary — the
+  "boundary artefact" story is dead. But the broker reports it live for up to **17 minutes** after
+  the client has gone, so the 9h figure understates the true absence at its leading edge by that
+  much.
+
+  **The cause is the same defect as the relay's, one layer up.** The broker pinged every 30s
+  expressly to tell idle from dead, received the pong, and discarded it
+  (`Some(Ok(_)) => {}`), with no last-seen timestamp anywhere — leaving a *write-side* error as its
+  only notion of death. Writes to a half-open socket do not fail; they sit in the OS buffer until
+  TCP retransmission is exhausted, ~15 minutes on Windows, which is what those two measurements
+  are. Fixed in 0.4.14.
+
+  ⚠️ **This retires a claim made elsewhere in this document.** "Liveness is socket state, not an
+  inference" was true of the *mechanism* and misleading as a guarantee: it was socket state of a
+  socket the broker could not tell was dead. Anything that treated `peers` as ground truth within
+  ~17 minutes of a client disappearing was trusting a phantom — including `watch`'s own heartbeat,
+  whose 0.4.13 fix made recovery depend on an affirmative `live` answer.
+
+  And it was worse than a stale column: the phantom socket made `/sub` answer **409** to the
+  legitimate owner's reconnect for **15m31s across 35 attempts**. Failing to notice a dead client
+  locked the address against its real holder's return.
 
   **The method is the transferable part.** A poller on the suspending machine cannot sample its own
   sleep — it samples up to the suspend, again after the resume, and never once in the interval being

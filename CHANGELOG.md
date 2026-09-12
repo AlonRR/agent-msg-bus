@@ -22,6 +22,55 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.14] — 2026-09-12
+
+### Fixed
+
+- **The broker pinged to tell idle from dead, received the pong, and threw it away — so a sleeping
+  client read as `live` for up to seventeen minutes.** This is the 0.4.11 relay defect one layer up,
+  in `drive()`:
+
+  ```rust
+  Some(Ok(_)) => {} // clients are receive-only here; pongs and stray frames are ignored
+  ```
+
+  There was no last-seen timestamp anywhere in that loop, leaving a **write-side** error as the
+  broker's only notion of death. Writes to a half-open socket do not fail; they sit in the OS send
+  buffer until TCP retransmission is exhausted — roughly 15 minutes on Windows.
+
+  Measured on a tunnelled laptop entering Modern Standby, correlated against its own power log:
+  the address read `live` for **16m13s** after one sleep and **17m39s** after another.
+
+  Two consequences, both worse than a stale column:
+
+  - **`peers` was the confidently-wrong indicator.** This project has repeatedly asserted that
+    broker liveness is trustworthy *because* it is socket state rather than inference. It was socket
+    state — of a socket the broker could not tell was dead.
+  - **The phantom socket blocked recovery.** `/sub` answered **409** to the legitimate owner's
+    reconnect for **15m31s across 35 attempts**, because `Hub::claim` saw an address "already held
+    by a live socket". Failing to notice a dead client locked the address against its real holder.
+
+  The broker now tracks the arrival of any incoming frame — pong included — and presumes the socket
+  dead after **150s**, releasing the address. Deliberately more generous than the relay's 90s: the
+  relay counts frames the broker is *guaranteed* to send, whereas the broker counts pongs a client
+  is only *expected* to send, and disconnecting a slow-ponging client every cycle would be a worse
+  failure than the one being fixed.
+
+- **This also repairs the premise under 0.4.13.** That fix made `watch` require an affirmative
+  `live` answer before announcing recovery, on the assumption that an affirmative answer is ground
+  truth. Inside the stale window it was not: the broker said `live` while the session was deaf and
+  being 409'd away, so a 0.4.13 watch would have reset its strikes and announced recovery on a
+  socket that existed only in the broker's memory. Same door, different key — and only fixable in
+  the broker.
+
+  `docs/plan.md` is corrected accordingly, including retiring the "liveness is socket state, not an
+  inference" claim as true-of-the-mechanism but misleading as a guarantee.
+
+  Reported by the session it happened to, which measured the window twice independently, labelled
+  the ~15-minute TCP mechanism as inferred rather than proven, and corrected its own power-event
+  query first — it had filtered Kernel-Power id `566` as "sleep" when that is a session transition,
+  missing the real `506` Modern Standby entry, and said so rather than quietly sending the fixed log.
+
 ## [0.4.13] — 2026-09-12
 
 ### Fixed

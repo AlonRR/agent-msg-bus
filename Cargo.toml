@@ -3,7 +3,7 @@ name = "agent-msg-bus"
 # THE SINGLE SOURCE OF TRUTH FOR THE VERSION. `--version` reads it via clap's `version` attribute,
 # and the release tag is `v` + this string. A test asserts the first of those two, so the only way
 # they can drift is a tag that does not match — see CHANGELOG.md for the release steps.
-version = "0.4.13"
+version = "0.4.14"
 edition = "2021"
 description = "Push-delivery message bus that lets separately-started Claude Code sessions message each other, and have the message acted on when it arrives."
 readme = "README.md"
