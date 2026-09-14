@@ -896,8 +896,10 @@ pinning a role deliberately, not by making every session's identity accidental.
 
   **The restore blocked — and that is measured too.** When the path returned, the relay's two
   addresses parted ways. One reconnected and went on receiving pushed mail normally. The other's
-  subscribe was refused with **409** for at least **5 minutes 30 seconds** after the network itself
-  had recovered. Throughout that period the broker kept reporting the refused address as **`live`** —
+  subscribe was still being refused with **409** nearly **4 minutes** after the network itself had
+  recovered — **5 minutes 30 seconds** after the path first dropped, and that is only the last
+  observation, not the end of the lockout. Throughout that period the broker kept reporting the
+  refused address as **`live`** —
   the phantom and the lockout it causes, at the same moment, observed independently from both
   machines — while the relay machine's network was demonstrably up and its ordinary HTTP sends to the
   same broker **succeeded**. So the refusal is specific to the subscribe path, for an address the
