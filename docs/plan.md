@@ -902,15 +902,20 @@ pinning a role deliberately, not by making every session's identity accidental.
   its release. Nobody intervened and the relay process ran unchanged throughout, so the lockout ended
   only when the broker finally discovered the dead socket by itself. The length reproduces the earlier
   field incident almost exactly: that one recovered after 15m31s and 35 attempts, and this run's last
-  refusal report read 15m30s and 35 attempts. That fits the broker's own kernel giving up on
-  retransmitting to a peer that is gone — the only point at which a 0.4.7 broker learns of a death —
-  but it is inference: the broker host's retransmission setting was not read.
+  refusal report read 15m30s and 35 attempts. That is the broker's own kernel giving up on
+  retransmitting to a peer that is gone — the only point at which a 0.4.7 broker learns of a death.
+  The broker host's `net.ipv4.tcp_retries2` was read afterwards and is **15**, the Linux default,
+  which the kernel documents as about 924.6 seconds (~15.4 minutes) of retransmission. Add up to one
+  30-second ping interval before the first unanswered ping is sent, and it lands on the ~16 minutes
+  measured twice. The setting is measured; the 924.6 s is the kernel's documented figure for it, not
+  a timing taken here.
 
   Meanwhile the relay machine's network was demonstrably up, and its ordinary HTTP sends to the same
   broker **succeeded**. So the refusal is specific to the subscribe path, for an address the broker
   believes is already held; the broker itself was healthy throughout. This is the case 0.4.14's
   silence limit exists for, which should release such a socket after 150 seconds rather than about
-  16 minutes — not yet deployed, so not yet measured.
+  16 minutes. The broker was updated to 0.4.15 the same day; the silence limit has not yet been
+  observed releasing a real half-open socket, so that figure is still the design, not a measurement.
 
   **Nothing was delivered for the whole lockout, and nothing was lost.** The locked-out session's own
   record shows no message body arriving between the drop and the release; the mail queued in that
