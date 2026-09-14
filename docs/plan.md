@@ -954,6 +954,36 @@ pinning a role deliberately, not by making every session's identity accidental.
   come from outside the thing being measured. That is the same error, one layer out, as `watch`
   being unable to report its own deafness and the relay being unable to notice its own half-open
   socket.
+- **After the broker gained the 150-second silence limit: two field outages, one laptop, one day.**
+  Recorded with the broker's own log still unread, so how each address was released is open, and
+  every mechanism below is labelled.
+  - **One refused, briefly.** After a 2-second standby, the relay reconnected into a **409** and was
+    readmitted about a minute later, against about 16 minutes for the same condition before the
+    change. The timings fit the designed gap between the relay's 90-second silence limit and the
+    broker's 150-second one (inferred); that the broker's limit is what released it is not
+    established. The standby does not account for it either: the broker-clock bound below puts the
+    readmission a minute or more later than a socket orphaned at the standby would allow.
+  - **One not refused at all.** After a 3-second standby, the relay failed with "network
+    unreachable", got **no 409**, and both addresses were back within about 50 seconds, too soon for
+    a limit that cannot act before 150. A prediction registered beforehand, that the silence limit
+    would release them 150–165 seconds after their last frame, was **refuted**: an outside capture
+    every ~2 seconds showed no offline edge. Leading explanation, inferred and untested: on resume
+    the laptop no longer knows the old connection, so the broker's next ping draws a reset and the
+    broker releases at once.
+  - So a stale socket is not a property of sleeping. What decides it is whether anything tells the
+    broker that the connection is gone.
+  - **A broker-clock timer for readmission, from the replay flag.** On connect the broker first sends
+    everything unacked, marked `replay`; a message to an address already connected is pushed live,
+    unmarked. A probe sent into an outage therefore dates the readmission on the broker's own clock:
+    marked means the connection that delivered it started after the probe, unmarked means before.
+    Every other time in these investigations was when some session *noticed* a notification, which
+    trails the event by an unmeasured amount and is only ever an upper bound.
+  - **Neither end records why a connection ended.** The relay's lifecycle lines ("upstream silent",
+    "upstream closed") carry no timestamp, and both Windows install scripts launch it through a
+    hidden shim that discards its output, so on every installed machine they have never been kept.
+    The broker writes a line only when its silence limit releases an address; a reset, a close, a
+    failed ping or a forced takeover releases silently. Its log is therefore one-sided: a silence line
+    is strong evidence, and the absence of one proves nothing.
 - **Killing the relay ends the session's Monitor subscription** and nothing re-arms it automatically.
   The close is visible (`1006`), not silent, so it is actionable — but until the skill acts on it,
   recovery is a human step. The relay absorbs upstream outages; it cannot absorb its own restart.
