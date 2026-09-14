@@ -894,14 +894,26 @@ pinning a role deliberately, not by making every session's identity accidental.
   about a second. So the broker releases correctly when a FIN arrives, and believes indefinitely when
   one cannot.
 
-  **Still open: the restore.** When the path returned, no 409 surfaced as a relay frame and the
-  broker's view showed no offline gap. That does not establish that no 409 occurred: the relay only
-  announces once its backoff has grown past 16 seconds, so a 409 on an early retry never becomes a
-  frame. The relay's per-attempt log is the record that can show one. A sleep may also differ from a
-  disconnect in exactly this phase — a disconnect aborts the local socket, so the broker's next packet
-  after restore can be answered with a reset that clears the phantom, whereas a sleeping machine's
-  socket is frozen rather than aborted. That would explain why every long 409 on record followed a
-  sleep. It is inference, not measurement.
+  **The restore blocked — and that is measured too.** When the path returned, the relay's two
+  addresses parted ways. One reconnected and went on receiving pushed mail normally. The other's
+  subscribe was refused with **409** for at least **5 minutes 30 seconds** after the network itself
+  had recovered. Throughout that period the broker kept reporting the refused address as **`live`** —
+  the phantom and the lockout it causes, at the same moment, observed independently from both
+  machines — while the relay machine's network was demonstrably up and its ordinary HTTP sends to the
+  same broker **succeeded**. So the refusal is specific to the subscribe path, for an address the
+  broker believes is already held; the broker itself was healthy throughout.
+
+  It went unseen at first, for two reasons that generalise. Each address's relay frames reach only
+  that address's own session, so the session that ran the test watched its own address reconnect
+  cleanly and never saw the other's 409. And the relay's `/health` lists its local subscriptions
+  regardless of whether the broker accepted them — so it reported both addresses subscribed while one
+  was being refused.
+
+  ⚠️ **Retracted.** An earlier version of this entry, committed minutes before this result, called the
+  restore "still open" and suggested that a disconnect might clear the phantom quickly on restore
+  where a sleep would not — which would have explained why every long 409 on record followed a sleep.
+  A disconnect has now produced a multi-minute 409 as well, so that inference is contradicted. Whether
+  sleeps and disconnects differ at restore is no longer supported by anything on record.
 
   **The method is the transferable part.** A poller on the suspending machine cannot sample its own
   sleep — it samples up to the suspend, again after the resume, and never once in the interval being
