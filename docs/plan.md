@@ -894,28 +894,40 @@ pinning a role deliberately, not by making every session's identity accidental.
   about a second. So the broker releases correctly when a FIN arrives, and believes indefinitely when
   one cannot.
 
-  **The restore blocked — and that is measured too.** When the path returned, the relay's two
-  addresses parted ways. One reconnected and went on receiving pushed mail normally. The other's
-  subscribe was still being refused with **409** nearly **4 minutes** after the network itself had
-  recovered — **5 minutes 30 seconds** after the path first dropped, and that is only the last
-  observation, not the end of the lockout. Throughout that period the broker kept reporting the
-  refused address as **`live`** —
-  the phantom and the lockout it causes, at the same moment, observed independently from both
-  machines — while the relay machine's network was demonstrably up and its ordinary HTTP sends to the
-  same broker **succeeded**. So the refusal is specific to the subscribe path, for an address the
-  broker believes is already held; the broker itself was healthy throughout.
+  **The restore blocked — both addresses, for about 16 minutes, measured.** When the path returned,
+  the relay tried to resubscribe and **both** of its addresses were refused with **409**. The broker
+  went on reporting both as **`live`** — sampled every 2 seconds from a machine that stayed
+  connected, without a single offline reading — until it released them on its own: the first about
+  16 minutes after the drop, the second 30 seconds later. Each was readmitted within 15 seconds of
+  its release. Nobody intervened and the relay process ran unchanged throughout, so the lockout ended
+  only when the broker finally discovered the dead socket by itself. The length reproduces the earlier
+  field incident almost exactly: that one recovered after 15m31s and 35 attempts, and this run's last
+  refusal report read 15m30s and 35 attempts. That fits the broker's own kernel giving up on
+  retransmitting to a peer that is gone — the only point at which a 0.4.7 broker learns of a death —
+  but it is inference: the broker host's retransmission setting was not read.
 
-  It went unseen at first, for two reasons that generalise. Each address's relay frames reach only
-  that address's own session, so the session that ran the test watched its own address reconnect
-  cleanly and never saw the other's 409. And the relay's `/health` lists its local subscriptions
-  regardless of whether the broker accepted them — so it reported both addresses subscribed while one
-  was being refused.
+  Meanwhile the relay machine's network was demonstrably up, and its ordinary HTTP sends to the same
+  broker **succeeded**. So the refusal is specific to the subscribe path, for an address the broker
+  believes is already held; the broker itself was healthy throughout. This is the case 0.4.14's
+  silence limit exists for, which should release such a socket after 150 seconds rather than about
+  16 minutes — not yet deployed, so not yet measured.
 
-  ⚠️ **Retracted.** An earlier version of this entry, committed minutes before this result, called the
-  restore "still open" and suggested that a disconnect might clear the phantom quickly on restore
-  where a sleep would not — which would have explained why every long 409 on record followed a sleep.
-  A disconnect has now produced a multi-minute 409 as well, so that inference is contradicted. Whether
-  sleeps and disconnects differ at restore is no longer supported by anything on record.
+  It went unseen at first, and both reasons generalise. **The relay's `/health` lists its local
+  subscriptions whether or not the broker accepted them**, so it reported both addresses subscribed
+  while both were being refused. And **the relay re-announces an outage on a flat five-minute
+  schedule**, so when the error changed from "network unreachable" to 409 — the moment the problem
+  stopped being the network and became the broker — no frame said so until the next scheduled
+  repeat, five minutes later. A report of "no 409 here" was sent in good faith inside that gap. A
+  changed error is new information, and it should be announced when it changes.
+
+  ⚠️ **Retracted, twice.** An earlier version of this entry said that when the path returned one
+  address reconnected and went on receiving pushed mail, and only the other was refused, for "nearly
+  4 minutes" past recovery. The first half came from the relay's `/health` — the indicator this very
+  entry calls untrustworthy — and the relay's own frames show both addresses refused; the duration was
+  merely the last observation at the time, not the end. The version before that called the restore
+  "still open" and suggested that a disconnect might clear the phantom faster than a sleep, which
+  would have explained why every long 409 on record followed a sleep. A disconnect has now produced a
+  16-minute 409, so that inference is contradicted, and nothing on record supports a difference.
 
   **The method is the transferable part.** A poller on the suspending machine cannot sample its own
   sleep — it samples up to the suspend, again after the resume, and never once in the interval being
