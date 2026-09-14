@@ -384,10 +384,7 @@ pub fn run() -> ! {
     // banner told sessions to use `ws:` while `watch`'s own docstring told them not to — the banner
     // was simply never updated. `watch` reconnects internally, and it is also the only path that can
     // fall back to the disambiguated name when this repo's address is already held.
-    let watch_cmd = match &fallback {
-        Some(f) => format!("{me} watch {addr} --fallback {f}"),
-        None => format!("{me} watch {addr}"),
-    };
+    let watch_cmd = monitor_watch_command(&me, &addr.to_string(), fallback.as_deref());
     let identity_note = if pinned {
         format!(
             "\nThis address is PINNED, so it is yours explicitly. If another live session already \
@@ -444,6 +441,62 @@ pub fn run() -> ! {
          user first.",
         cfg.url
     ));
+}
+
+/// The command a session hands to `Monitor` to arm its inbox.
+///
+/// **The exe path is always single-quoted**, because `Monitor` runs this in bash and bash strips
+/// the backslashes from an unquoted Windows path — `C:\Users\...` becomes `C:Users...`, exit 127.
+///
+/// Single quotes rather than double, for how it reads: the command is shown to the session inside
+/// the banner's own double-quoted `command: "..."`, where nested double quotes render as
+/// `""C:\...exe" watch"` and invite whoever copies it to drop them, reintroducing the bug.
+/// `self_command` double-quotes a path containing a space, so those quotes are stripped first, and a
+/// single quote inside the path is escaped the POSIX way.
+///
+/// Scoped to this one line deliberately. The banner's `send` and `ack` lines carry the same path, but
+/// they are not guaranteed to run in bash — in PowerShell a quoted path at the start of a statement
+/// is an expression rather than a command — so quoting them would swap one shell's bug for another's.
+fn monitor_watch_command(me: &str, addr: &str, fallback: Option<&str>) -> String {
+    let me = format!("'{}'", me.trim_matches('"').replace('\'', r"'\''"));
+    match fallback {
+        Some(f) => format!("{me} watch {addr} --fallback {f}"),
+        None => format!("{me} watch {addr}"),
+    }
+}
+
+#[cfg(test)]
+mod monitor_command_tests {
+    use super::monitor_watch_command;
+
+    /// Monitor runs its `command:` in bash, and bash strips backslashes from an unquoted word:
+    /// `C:\Users\...\agent-msg-bus.exe` becomes `C:Users...agent-msg-bus.exe` and fails with exit
+    /// 127. The banner handed sessions exactly that line, so arming it verbatim failed — and it only
+    /// ever worked when whoever copied it added quotes by hand.
+    #[test]
+    fn the_monitor_command_survives_bash_with_a_windows_exe_path() {
+        let me = r"C:\Users\someone\AppData\Local\agent-msg-bus\agent-msg-bus.exe";
+        let cmd = monitor_watch_command(me, "machine-a/repo", None);
+        assert!(
+            cmd.starts_with(&format!("'{me}'")),
+            "the exe path is unquoted, so bash strips its backslashes and exits 127: {cmd}"
+        );
+        assert!(cmd.ends_with(" watch machine-a/repo"), "{cmd}");
+    }
+
+    /// `self_command` already double-quotes a path containing a space. Wrapping that in single
+    /// quotes would hand bash literal `"` characters as part of the filename.
+    #[test]
+    fn a_path_already_quoted_for_spaces_is_not_quoted_twice() {
+        let me = r#""C:\Program Files\agent-msg-bus\agent-msg-bus.exe""#;
+        let cmd = monitor_watch_command(me, "machine-a/repo", Some("machine-a/repo.abcd1234"));
+        assert!(
+            cmd.starts_with(r"'C:\Program Files\agent-msg-bus\agent-msg-bus.exe'"),
+            "a space-quoted path was not re-quoted cleanly: {cmd}"
+        );
+        assert!(!cmd.contains('"'), "literal double quotes would become part of the filename: {cmd}");
+        assert!(cmd.ends_with(" watch machine-a/repo --fallback machine-a/repo.abcd1234"), "{cmd}");
+    }
 }
 
 #[cfg(test)]

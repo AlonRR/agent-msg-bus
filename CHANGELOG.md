@@ -22,6 +22,68 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.15] — 2026-09-14
+
+### Fixed
+
+- **The relay's "this process was suspended" qualifier could not fire for the outage it was built
+  for.** 0.4.9 separated wall clock from retry work so a sleeping laptop's low attempt count would
+  be explained instead of reading as a wedged loop. Retry work was the measured duration of each
+  connect attempt plus the nominal backoff — and `Instant` keeps advancing while the machine is
+  suspended. So a laptop that slept while a connect was in flight booked the whole sleep as one
+  attempt's worth of retry work: the quantity built to *exclude* suspension absorbed it, the gap
+  between the two clocks collapsed, and the qualifier stayed silent.
+
+  Captured in the field on a real sleep of ~578 minutes, reported as `585m23s, 11 attempts` with no
+  qualifier — one attempt per 53 minutes against a 30s cap. It was worse than one missed footnote:
+  while awake, retry work and wall clock both grow ~51s per attempt, so a collapsed gap *stays*
+  collapsed. One suspension silenced the qualifier for the entire remainder of that outage, across
+  every repeat. The same shape recurred later with a clean baseline in front of it: 114 attempts at
+  a steady 51.6s, then 2 attempts in 142m57s, and again no qualifier.
+
+  The connect is now wrapped in a **30s timeout**, and the booking is bounded by it. Because no
+  attempt that was actually running can exceed the timeout, any longer measurement is by
+  construction time the process was not running, and it stays out of retry work. A timeout rather
+  than a bare ceiling on the booking, deliberately: a ceiling alone would under-book legitimate
+  connects on systems whose default connect timeout is far longer than Windows's ~21s, and that
+  under-booking can open a spurious gap on an early repeat. A side effect, and a benign one: a
+  connect that would previously have blocked longer now retries after 30s.
+
+  The existing qualifier tests could not have caught this — they construct retry work directly,
+  and `outage_detail` and `unexplained_gap` were always correct given their inputs. The defect was
+  in what fed them. The new tests exercise the booking itself, including a replay of the field
+  numbers, and were shown failing against the old behaviour before the fix.
+
+  Diagnosed by the machine that sleeps, which pointed at the exact line and gave a two-frame proof
+  that needed none of the relay's internal state.
+
+- **The SessionStart banner's `Monitor` command could not be run as written.** It interpolated the
+  executable path unquoted into a command `Monitor` runs in bash, and bash strips backslashes from
+  an unquoted word. Checked in real bash rather than asserted: the old form reaches bash as
+  `C:Users…agent-msg-bus.exe` and exits **127**; the corrected form runs. Arming the inbox from the
+  banner verbatim therefore always failed on Windows, and only ever worked when whoever copied it
+  added quotes by hand.
+
+  The path is now single-quoted in that line. Single rather than double because the command is
+  displayed inside the banner's own double-quoted `command: "…"`, where nested double quotes render
+  as `""C:\…exe" watch"` and invite the copier to drop them. A path the banner had already
+  double-quoted for containing a space is unwrapped first, so bash never receives literal `"`
+  characters as part of the filename.
+
+  Scoped to that line on purpose. The banner's `send` and `ack` lines carry the same path, but they
+  are not guaranteed to run in bash — in PowerShell a quoted path at the start of a statement is an
+  expression, not a command — so quoting them would trade one shell's failure for another's.
+
+  Reported by another session that hit it.
+
+### Changed
+
+- **`docs/plan.md`'s Phase 0 conclusion is narrowed, not reversed.** It said a WebSocket frame
+  starts a turn in an idle session, "exactly what no hook can do". A `SessionStart` hook registered
+  with `asyncRewake: true` that exits 2 now also starts a turn — which covers the moment a session
+  starts, precisely when its subscription is missing. No hook fires for an event arriving mid-session,
+  so the frame is still the only thing that delivers a message into a session already running.
+
 ## [0.4.14] — 2026-09-12
 
 ### Fixed

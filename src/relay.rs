@@ -61,6 +61,26 @@ fn upstream_is_stale(since_last_frame: Duration) -> bool {
     since_last_frame > UPSTREAM_SILENCE_LIMIT
 }
 
+/// The longest one upstream connect attempt is allowed to run before it is abandoned.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How much of a finished connect attempt counts as retry work.
+///
+/// **Bounded by `CONNECT_TIMEOUT`, because `Instant` does not stop when the process does.** The
+/// connect is wrapped in a timeout, so no attempt that was actually running can take longer than
+/// that — any measured excess is time the process was suspended, and booking it as retry work puts
+/// the suspension into the one quantity built to exclude it. The gap between wall clock and
+/// `retrying` then collapses, and the "this process was suspended" qualifier can never fire.
+///
+/// Measured in the field before this bound existed: a laptop slept ~578 minutes mid-connect and
+/// reported `585m23s, 11 attempts` with no qualifier — one attempt per 53 minutes against a 30s
+/// cap, read as a wedged retry loop. And because `retrying` and wall clock then grow at the same
+/// ~51s per attempt, the collapsed gap stays collapsed: one suspension silenced the qualifier for
+/// the whole remainder of that outage.
+fn booked_attempt(measured: Duration) -> Duration {
+    measured.min(CONNECT_TIMEOUT)
+}
+
 /// **One relay per machine, multiplexing every session on it.**
 ///
 /// The first cut was one relay per address, which forced a port per session and tied a process
@@ -167,7 +187,18 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
 
     loop {
         let attempt_started = std::time::Instant::now();
-        match tokio_tungstenite::connect_async(upstream.as_str()).await {
+        // Bounded, so that no attempt which was genuinely running can exceed CONNECT_TIMEOUT on any
+        // OS. That bound is what lets `booked_attempt` treat a longer measurement as suspension.
+        let attempt = match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(upstream.as_str()),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|e| e.to_string()),
+            Err(_) => Err(format!("connect timed out after {}s", CONNECT_TIMEOUT.as_secs())),
+        };
+        match attempt {
             Ok((upstream, _)) => {
                 log_event(&addr, "upstream connected");
                 if announced_down {
@@ -240,7 +271,7 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
                 let now = std::time::Instant::now();
                 let since = *outage_since.get_or_insert(now);
                 attempts += 1;
-                retrying += attempt_started.elapsed();
+                retrying += booked_attempt(attempt_started.elapsed());
                 // The next sleep is this backoff; the doubling happens after it.
                 if due_to_announce(backoff, last_announce.map(|t| now.duration_since(t))) {
                     let detail = if announced_down {
@@ -460,5 +491,43 @@ mod tests {
         assert!(!upstream_is_stale(Duration::from_secs(35)), "reconnected after one missed ping");
         assert!(!upstream_is_stale(Duration::from_secs(65)), "reconnected after two missed pings");
         assert!(!upstream_is_stale(UPSTREAM_SILENCE_LIMIT), "fired exactly at the limit");
+    }
+
+    // ---- what feeds `retrying` ---------------------------------------------------------
+    // The qualifier tests above construct `retrying` directly, so they could not see this: the
+    // defect was never in `outage_detail` or `unexplained_gap`, which are correct given their
+    // inputs. It was in what was booked INTO `retrying`.
+
+    /// `Instant` keeps advancing while a laptop is suspended. If the machine sleeps while a connect
+    /// is in flight, the measured duration of that one attempt is the whole sleep — and booking it
+    /// as retry work puts the suspension into the very quantity built to exclude it.
+    #[test]
+    fn a_suspension_inside_a_connect_attempt_is_not_booked_as_retry_work() {
+        assert!(
+            booked_attempt(Duration::from_secs(578 * 60)) <= CONNECT_TIMEOUT,
+            "a 578-minute suspension was booked as one connect attempt's worth of retry work"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_connect_is_booked_at_its_measured_cost() {
+        let windows_10060 = Duration::from_secs(21);
+        assert_eq!(booked_attempt(windows_10060), windows_10060, "real retry work was discounted");
+    }
+
+    /// Replays the outage captured in the field: ten attempts at the measured 10060 cadence, then
+    /// one the machine slept through for ~578 minutes, reported at 585m23s and 11 attempts. The
+    /// frame carried no qualifier — so it read as a wedged retry loop, which is precisely the
+    /// misreading 0.4.9 exists to prevent, on the one class of machine it was built for.
+    #[test]
+    fn the_field_outage_that_slept_mid_connect_carries_the_qualifier() {
+        let mut retrying = Duration::ZERO;
+        for _ in 0..10 {
+            retrying += booked_attempt(Duration::from_secs(21)) + Duration::from_secs(30);
+        }
+        retrying += booked_attempt(Duration::from_secs(578 * 60)) + Duration::from_secs(30);
+
+        let d = outage_detail(Duration::from_secs(585 * 60 + 23), 11, 30, retrying, "os error 10060");
+        assert!(d.contains("suspended"), "an outage that slept mid-connect said nothing: {d}");
     }
 }

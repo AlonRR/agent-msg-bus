@@ -99,7 +99,15 @@ would muddy a negative result.
 | Does the socket survive the machine sleeping? | ⚠️ **No — but the system recovers unaided.** Measured 10–11 Sep 2026 on a laptop across **four** sleep/resume cycles in one night: the socket dies without a clean close, and both the relay process and the `watch` process survive and reconnect. Nothing was lost; the mailbox ended at 0 pending. What is **not** settled is whether the subscription is dead for the whole sleep or only across the resume boundary — see Known limitations |
 
 **The premise holds.** A WebSocket frame from an external process starts a turn in a session sitting
-idle at the prompt — exactly what no hook can do, and exactly what the old bus needed.
+idle at the prompt — exactly what no hook could do when this was measured, and exactly what the old
+bus needed.
+
+*Narrowed, 14 Sep 2026 — not overturned.* A `SessionStart` hook registered with `asyncRewake: true`
+that exits 2 now also starts a turn in an idle session: reported measured on startup and resume, and
+observed first-hand on resume. That covers the moment a session **starts**, which is exactly when a
+subscription is missing, so it can re-arm the inbox unattended. It does not cover an **event arriving
+mid-session** — no hook fires for that — so the frame remains the only thing that delivers a message
+into a session that is already running.
 `Monitor({ws:…, persistent:true})` is a real subscription: no polling, no arming per message, no 5 s
 latency floor.
 
