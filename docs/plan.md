@@ -912,13 +912,27 @@ pinning a role deliberately, not by making every session's identity accidental.
   silence limit exists for, which should release such a socket after 150 seconds rather than about
   16 minutes — not yet deployed, so not yet measured.
 
-  It went unseen at first, and both reasons generalise. **The relay's `/health` lists its local
+  **Nothing was delivered for the whole lockout, and nothing was lost.** The locked-out session's own
+  record shows no message body arriving between the drop and the release; the mail queued in that
+  time arrived as one batch on readmission. The broker's store kept it, so the cost was a quarter of
+  an hour of silence, not data.
+
+  It went unseen at first, and all three reasons generalise — three reassuring indicators, wrong in
+  the same direction. **The broker said `live`.** **The relay's `/health` lists its local
   subscriptions whether or not the broker accepted them**, so it reported both addresses subscribed
-  while both were being refused. And **the relay re-announces an outage on a flat five-minute
+  while both were being refused. And **the watch stream kept delivering frames** — the relay's own
+  outage announcements, which are composed locally and never touch the broker, so they arrive fine
+  while the broker refuses everything else. The one component still working was the one saying all
+  was well.
+
+  Those announcements also came late. **The relay re-announces an outage on a flat five-minute
   schedule**, so when the error changed from "network unreachable" to 409 — the moment the problem
   stopped being the network and became the broker — no frame said so until the next scheduled
   repeat, five minutes later. A report of "no 409 here" was sent in good faith inside that gap. A
-  changed error is new information, and it should be announced when it changes.
+  changed error is new information, and it should be announced when it changes. And the relay's
+  "unreachable for N" figure starts counting only once its 90-second silence limit declares the old
+  socket dead, so it under-reports the true outage by up to 90 seconds: here the drop preceded the
+  derived onset by about 90 seconds (inferred from that reconciliation, not instrumented).
 
   ⚠️ **Retracted, twice.** An earlier version of this entry said that when the path returned one
   address reconnected and went on receiving pushed mail, and only the other was refused, for "nearly
