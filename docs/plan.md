@@ -879,6 +879,30 @@ pinning a role deliberately, not by making every session's identity accidental.
   legitimate owner's reconnect for **15m31s across 35 attempts**. Failing to notice a dead client
   locked the address against its real holder's return.
 
+  **Measured directly, 14 Sep 2026 — the belief in a dead socket, produced on purpose.** Everything
+  above was inferred from correlation after the fact. This was a deliberate reproduction. A relay
+  machine's Wi-Fi was disconnected for **75 seconds** with its relay process left running: the
+  half-open condition, in which no close can reach the broker. The adapter's own state was read back
+  to confirm the path was gone, rather than assumed from the command having returned. Sampling the
+  broker's view every 2 seconds, from a machine that stayed connected and whose capture loop was
+  confirmed still running across the window, both of that relay's addresses read **`live` for the
+  entire 75 seconds**. On the relay's side the upstream was provably dead — it was emitting
+  `upstream_unreachable` from its reconnect loop — so no socket could have been live, and every one
+  of those readings was phantom.
+
+  The control ran on the same machine minutes earlier: a clean process kill was released within
+  about a second. So the broker releases correctly when a FIN arrives, and believes indefinitely when
+  one cannot.
+
+  **Still open: the restore.** When the path returned, no 409 surfaced as a relay frame and the
+  broker's view showed no offline gap. That does not establish that no 409 occurred: the relay only
+  announces once its backoff has grown past 16 seconds, so a 409 on an early retry never becomes a
+  frame. The relay's per-attempt log is the record that can show one. A sleep may also differ from a
+  disconnect in exactly this phase — a disconnect aborts the local socket, so the broker's next packet
+  after restore can be answered with a reset that clears the phantom, whereas a sleeping machine's
+  socket is frozen rather than aborted. That would explain why every long 409 on record followed a
+  sleep. It is inference, not measurement.
+
   **The method is the transferable part.** A poller on the suspending machine cannot sample its own
   sleep — it samples up to the suspend, again after the resume, and never once in the interval being
   measured, yielding a confident log with a hole exactly where the answer is. The sampling has to
