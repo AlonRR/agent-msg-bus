@@ -590,8 +590,8 @@ session makes the call, the same way it once pasted the Monitor line.
 
 #### Where the id comes from
 
-Every session this was tried in has `CLAUDE_CODE_BRIDGE_SESSION_ID=session_<id>` in its environment
-(measured in this session's tool subprocesses). Messages from other sessions arrive with
+The session this design was written in has `CLAUDE_CODE_BRIDGE_SESSION_ID=session_<id>` in its
+environment (measured in its tool subprocesses: one session, so not yet evidence about others). Messages from other sessions arrive with
 `from="bridge:session_<id>"`, and `SendMessage`'s own description says to reply by using that as
 `to` (documented). The 2.1.272 binary parses `bridge:` as an address scheme alongside `uds:` (read
 from the binary). Hooks run as children of the session, so the `SessionStart` hook should see the
@@ -646,6 +646,9 @@ Cost now scales with **messages sent**, not with **hours sessions stay open**.
   auto-mode sender to a prompting recipient, was delivered with no hold). A held nudge delays the wake;
   the bus copy is unaffected.
 - A wake turn is still a paid turn: the cost per message is the same as it was under a watch.
+- **A wildcard send wakes every matching live session**, each at one paid turn. That is no worse
+  than a watch, where the frame woke all of them too, but decision 2 below controls only *which
+  kinds* wake, not *how many sessions*. A sender should narrow `<to>` before nudging a wildcard.
 
 #### Verify before building
 
