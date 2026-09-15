@@ -194,7 +194,8 @@ enum Cmd {
     ///
     /// Use this with Monitor's `command:` form instead of `ws:`. Monitor's ws source ENDS the watch
     /// when the socket closes and does not retry, so a relay restart leaves the session deaf until a
-    /// human re-arms it. This reconnects internally, so the watch is never torn down.
+    /// human re-arms it. This reconnects internally, so a relay restart does not end the watch.
+    /// Monitor itself may still expire it; the session must re-arm when Monitor says so.
     Watch {
         addr: String,
         #[arg(long)]

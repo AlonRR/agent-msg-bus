@@ -33,10 +33,14 @@ something. Five messages sat undelivered for days, two of them to sessions that 
 
 ## The mechanism
 
-`Monitor({ws: …, persistent: true})` — a WebSocket subscription held open for the life of a session.
-A frame pushed by the broker **starts a turn in an idle session**. Verified 5 Aug 2026: frames at
-+60 s and +180 s each woke a session that had ended its turn and was waiting on the user, with no
-human input, payload intact, on one long-lived socket.
+A `Monitor` subscription — a long-lived socket the session holds open. A frame pushed by the broker
+**starts a turn in an idle session**. Verified 5 Aug 2026: frames at +60 s and +180 s each woke a
+session that had ended its turn and was waiting on the user, with no human input, payload intact, on
+one long-lived socket.
+
+The subscription is not permanent. Measured 15 Sep 2026, Claude Code expires a Monitor watch after
+30 minutes even with `persistent: true`, so a session re-arms it on Monitor's expiry notice. Mail
+sent in between queues and is delivered on the next subscribe; it is not lost.
 
 That is the thing no hook can do, and the reason this design replaces the old one rather than
 patching it.

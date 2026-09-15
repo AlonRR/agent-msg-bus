@@ -83,7 +83,8 @@ actually works *before* stopping it. See the relay note at the top of this page.
 before copying, which is right for a first install and wrong for an update: it ends every session's
 inbox and stops the relay. Use `update` on a machine that is already running.
 
-Arm the subscription once per session, using Monitor's `command:` form:
+Arm the subscription at the start of each session, and **again whenever Monitor says the watch
+expired**, using Monitor's `command:` form:
 
 ```
 Monitor({command: "agent-msg-bus watch <your-address> --fallback <machine>/<repo>.<session-prefix>",
@@ -93,9 +94,18 @@ Monitor({command: "agent-msg-bus watch <your-address> --fallback <machine>/<repo
 `agent-msg-bus whoami` prints the exact line, with the fallback filled in — or omitted, if your
 address is pinned.
 
+⚠️ **Monitor expires a watch even with `persistent: true`.** Measured 15 Sep 2026: the watch was
+killed at exactly 30 minutes, its process was gone, and the broker listed the address offline until
+the session armed it again. The expiry arrives as a notice that starts a turn, so a session that
+re-arms on it stays reachable, at the cost of one turn every half hour; a session that ignores it
+stops receiving. Mail is not lost in the gap — it queues and arrives on the next subscribe, marked
+`"replay": true`. This is Claude Code's behaviour, not this tool's, and it has already changed once:
+the day before, the same call ran until the session ended. Monitor's start message says which
+applies — `expires in …` or `runs until TaskStop or session end`.
+
 ⚠️ **Not `Monitor({ws: ...})`.** A `ws:` watch ENDS when its socket closes and does not retry, so
 the next relay restart leaves this session silently deaf until a human notices. `watch` reconnects
-inside the process, so the watch is never torn down — and it is also the only path that can fall
+inside the process, so a relay restart does not end it — and it is also the only path that can fall
 back when another live session already holds your repo's address.
 
 ⚠️ **Write anything longer than a line to a file and use `--body-file`.** A body passed as a shell

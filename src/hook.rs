@@ -406,18 +406,13 @@ pub fn run() -> ! {
         )
     };
 
+    let subscribe = subscribe_instructions(&watch_cmd);
     emit(&format!(
         "{stale}agent-msg-bus is available. This session's address is `{addr}` and it is registered \
          with the broker at {}.\n\
          {identity_note}\
          \n\
-         To receive messages from other Claude Code sessions, arm the subscription once:\n\
-         \n\
-             Monitor({{command: \"{watch_cmd}\", persistent: true, description: \"agent-msg-bus inbox\"}})\n\
-         \n\
-         Use the `command:` form, not `ws:`. A `ws:` watch ENDS when its socket closes and does not \
-         retry, so a relay restart leaves this session silently deaf; `watch` reconnects internally \
-         and the watch is never torn down.\n\
+         {subscribe}\
          \n\
          To send:  {me} send --from {addr} --to <address> --kind fyi|request|blocking \
          --subject \"...\" --body-file <path>\n\
@@ -462,6 +457,70 @@ fn monitor_watch_command(me: &str, addr: &str, fallback: Option<&str>) -> String
     match fallback {
         Some(f) => format!("{me} watch {addr} --fallback {f}"),
         None => format!("{me} watch {addr}"),
+    }
+}
+
+/// How to arm the inbox, as the banner tells it.
+///
+/// Kept apart from `run` so its claims about how long a watch lives are pinned by tests. It used to
+/// say to arm once because the watch "is never torn down" — true of `watch`, and no longer true of
+/// the Monitor holding it: on 15 Sep 2026 Monitor was measured expiring a `persistent: true` watch
+/// after 30 minutes and killing its command.
+fn subscribe_instructions(watch_cmd: &str) -> String {
+    format!(
+        "To receive messages from other Claude Code sessions, arm the subscription:\n\
+         \n\
+             Monitor({{command: \"{watch_cmd}\", persistent: true, description: \"agent-msg-bus inbox\"}})\n\
+         \n\
+         Monitor can expire this watch on its own schedule even with `persistent: true` - measured at \
+         30 minutes on 15 Sep 2026 - and it kills the command when it does. The expiry arrives as a \
+         notice that wakes this session: re-arm with the same call when you see it, or this session \
+         stops receiving until something else wakes it. Nothing sent to this address in the gap is \
+         lost; it queues and arrives on the next subscribe, marked `\"replay\": true`.\n\
+         \n\
+         Use the `command:` form, not `ws:`. A `ws:` watch ENDS when its socket closes and does not \
+         retry, so a relay restart leaves this session silently deaf; `watch` reconnects internally, \
+         so a relay restart does not end it.\n"
+    )
+}
+
+#[cfg(test)]
+mod subscribe_instruction_tests {
+    use super::subscribe_instructions;
+
+    const CMD: &str = "'x' watch machine-a/repo";
+
+    /// Measured 15 Sep 2026: a Monitor watch armed with `persistent: true` was killed at exactly
+    /// 30 minutes, its process was gone, the broker listed the address offline, and push stopped
+    /// until the session armed it again. A banner that promises one arming is enough leaves every
+    /// session that believes it deaf half an hour later.
+    #[test]
+    fn the_banner_does_not_promise_a_watch_that_outlives_monitors_expiry() {
+        let s = subscribe_instructions(CMD);
+        assert!(!s.contains("never torn down"), "still promises an endless watch: {s}");
+        assert!(!s.contains("subscription once"), "still says a single arming is enough: {s}");
+    }
+
+    #[test]
+    fn the_banner_says_to_re_arm_when_monitor_reports_the_watch_expired() {
+        let s = subscribe_instructions(CMD);
+        assert!(s.contains("expire"), "nothing tells the session its watch can expire: {s}");
+        assert!(s.contains("re-arm"), "nothing tells the session to re-arm: {s}");
+        assert!(s.contains(CMD), "the exact command to re-arm with is missing: {s}");
+    }
+
+    /// The expiry notice is the only thing that wakes a session whose watch has gone, so the
+    /// reassurance that matters is that nothing sent in the gap is lost.
+    #[test]
+    fn the_banner_says_mail_sent_while_unarmed_is_replayed_not_lost() {
+        let s = subscribe_instructions(CMD);
+        assert!(s.contains("replay"), "a session will assume the gap lost mail: {s}");
+    }
+
+    #[test]
+    fn the_banner_still_steers_away_from_the_ws_form() {
+        let s = subscribe_instructions(CMD);
+        assert!(s.contains("not `ws:`"), "the ws: warning was dropped: {s}");
     }
 }
 

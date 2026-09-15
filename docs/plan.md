@@ -94,7 +94,7 @@ would muddy a negative result.
 | Does the query string survive? | ✅ **Yes** — server saw `GET /sub?addr=machine-a/homelab.probe&token=phase0test`. Confirms the auth design, since the `ws` schema has no headers field |
 | Does a frame wake a genuinely **idle** session? | ✅ **YES.** Frame 1 at 15:16:21 (+60 s). The session had ended its turn and was waiting on the user; the frame re-invoked it unprompted, payload intact, no human input |
 | Does a **second** frame on the same socket wake it again? | ✅ **YES.** Frame 2 at 15:18:21 (+180 s), same connection. The subscription is not one-shot |
-| Does `persistent: true` outlive the old 1 h cap? | ✅ **YES.** Connected 15:15:21, still live at 16:20:51 — **65 min 30 s**, including **60 minutes of total silence** (15:20:51 → 16:20:51, no frames, no pings). It ended only because the probe's own `sleep(3600)` expired |
+| Does `persistent: true` outlive the old 1 h cap? | ✅ **YES.** Connected 15:15:21, still live at 16:20:51 — **65 min 30 s**, including **60 minutes of total silence** (15:20:51 → 16:20:51, no frames, no pings). It ended only because the probe's own `sleep(3600)` expired. ⚠️ **No longer true, measured 15 Sep 2026:** Monitor now expires a `persistent: true` watch after exactly 30 minutes and kills its command, and the broker lists the address offline until the session re-arms — see requirement 1 below |
 | Is a dropped subscription visible or silent? | ✅ **Visible.** Monitor surfaced `[WebSocket closed: 1006 Connection ended]` as an event — the session is *told* it went deaf |
 | Does the socket survive the machine sleeping? | ⚠️ **No — but the system recovers unaided.** Measured 10–11 Sep 2026 on a laptop across **four** sleep/resume cycles in one night: the socket dies without a clean close, and both the relay process and the `watch` process survive and reconnect. Nothing was lost; the mailbox ended at 0 pending. What is **not** settled is whether the subscription is dead for the whole sleep or only across the resume boundary — see Known limitations |
 
@@ -123,6 +123,11 @@ behaviour across the LAN through a firewall, and not across a suspend/resume. Bo
    surfaced as an event, so it is actionable — but something must act on it, or the session is
    silently deaf from then on. That is the old bus's defining failure mode and it must not be
    recreated. Re-arming belongs in the skill, with a `Stop` hook as backstop.
+   *Now on a timer too, measured 15 Sep 2026.* Monitor expires even a healthy `persistent: true`
+   watch after exactly 30 minutes and kills its command, so re-arming is no longer only a response to
+   a close: it is a standing half-hourly duty, prompted by Monitor's own expiry notice. That notice
+   starts a turn, so a session that acts on it stays reachable; the SessionStart banner says so from
+   0.4.16. Mail sent in the gap queues and replays, so the cost is latency and a turn, not loss.
 2. **The broker must close cleanly.** The probe just exited, producing `1006` (abnormal, no close
    handshake). A real broker sends `1001 going away` on shutdown so a client can distinguish an
    orderly restart from a network fault.

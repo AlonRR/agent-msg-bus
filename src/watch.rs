@@ -15,10 +15,14 @@
 //! Monitor({command: "agent-msg-bus watch machine-a/homelab.x", persistent: true, ...})
 //! ```
 //!
-//! Monitor keeps a `command:` watch alive for as long as the process runs, and this process never
-//! exits — so reconnection happens inside it and the watch is never torn down. That keeps push
-//! delivery (sub-second) rather than falling back to polling, which was the obvious workaround and
-//! costs up to a minute of latency.
+//! Monitor keeps a `command:` watch alive while the process runs, and this process never exits on
+//! its own — so reconnection happens inside it and a relay restart does not end the watch. That keeps
+//! push delivery (sub-second) rather than falling back to polling, which was the obvious workaround
+//! and costs up to a minute of latency.
+//!
+//! Monitor itself can still end it. Measured 15 Sep 2026, Monitor expires a `persistent: true` watch
+//! after 30 minutes and kills this process. Nothing in here can prevent that; the session has to
+//! re-arm on Monitor's expiry notice, and mail sent in the gap replays on the next subscribe.
 //!
 //! **One message per stdout line**, because Monitor turns each line into one notification — the same
 //! rule as one-message-per-frame on the wire.

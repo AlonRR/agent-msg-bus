@@ -22,6 +22,22 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.16] — 2026-09-15
+
+### Changed
+
+- **The SessionStart banner no longer tells a session to arm its inbox once.** It said the watch
+  "is never torn down", which was true of `watch` and stopped being true of the Monitor holding it.
+  Measured on 15 Sep 2026: Claude Code now expires a `persistent: true` watch after exactly 30
+  minutes and kills its command, and the broker lists the address offline until the session arms it
+  again. A session that took the banner at its word went deaf half an hour after it started. The
+  banner now says the watch can expire, says to re-arm with the same call on Monitor's expiry
+  notice, and says that mail sent in the gap replays rather than being lost. The subscribe paragraph
+  moved into its own function so that those claims are pinned by tests.
+- `docs/usage.md`, the README, the `watch` help text and `docs/plan.md`'s Phase 0 result now say the
+  same. The Phase 0 measurement that `persistent: true` outlived the old one-hour cap is marked
+  superseded rather than deleted.
+
 ## [0.4.15] — 2026-09-14
 
 ### Fixed
