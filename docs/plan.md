@@ -959,24 +959,34 @@ pinning a role deliberately, not by making every session's identity accidental.
   come from outside the thing being measured. That is the same error, one layer out, as `watch`
   being unable to report its own deafness and the relay being unable to notice its own half-open
   socket.
-- **After the broker gained the 150-second silence limit: two field outages, one laptop, one day.**
-  Recorded with the broker's own log still unread, so how each address was released is open, and
-  every mechanism below is labelled.
-  - **One refused, briefly.** After a 2-second standby, the relay reconnected into a **409** and was
-    readmitted about a minute later, against about 16 minutes for the same condition before the
-    change. The timings fit the designed gap between the relay's 90-second silence limit and the
-    broker's 150-second one (inferred); that the broker's limit is what released it is not
-    established. The standby does not account for it either: the broker-clock bound below puts the
-    readmission a minute or more later than a socket orphaned at the standby would allow.
-  - **One not refused at all.** After a 3-second standby, the relay failed with "network
-    unreachable", got **no 409**, and both addresses were back within about 50 seconds, too soon for
-    a limit that cannot act before 150. A prediction registered beforehand, that the silence limit
-    would release them 150–165 seconds after their last frame, was **refuted**: an outside capture
-    every ~2 seconds showed no offline edge. Leading explanation, inferred and untested: on resume
-    the laptop no longer knows the old connection, so the broker's next ping draws a reset and the
-    broker releases at once.
-  - So a stale socket is not a property of sleeping. What decides it is whether anything tells the
-    broker that the connection is gone.
+- **After the broker gained the 150-second silence limit: every field outage on record was released
+  by it.** Read from the broker's own log once it became reachable (15 Sep 2026). Each release below
+  is a timestamped "silent past the ping interval" line, one per address; the laptop's two addresses
+  are released within about a second of each other. An earlier version of this entry was written
+  before the log was read and got one of these wrong; see the retraction at the end.
+
+  | Outage | Trigger | Broker releases (broker clock) | Refused on reconnect? |
+  |---|---|---|---|
+  | 14 Sep ~13:16 | 2-second standby, about 3 minutes earlier | 13:17:41.97, 13:17:42.02 | yes, 409 |
+  | 14 Sep ~17:55 | 3-second standby | 17:56:34.20, 17:56:34.29 | no 409 announced |
+  | 14 Sep ~19:29 | not reported | 19:29:19.91, 19:29:20.89 | unknown |
+  | 14 Sep ~20:24 | not reported | 20:24:33.73, 20:24:33.77 | unknown |
+  | 15 Sep ~08:12 | **address change** (DHCP, awake, no standby) | 08:13:57.42, 08:14:25.75 | yes, 409 |
+
+  - **The cleanest is the last.** The laptop's IP address changed at 08:11:31–48Z while it was awake.
+    Its own socket failed at once, so its relay reconnected from the new address straight into a
+    **409**; the broker, still pinging the old address, got nothing back and had nothing to tell it
+    the connection was gone. An outside capture sampling the broker every ~2 seconds saw each address
+    go offline within 2 seconds of its logged release and come back **~23 seconds** later, and a
+    replay-flag probe sent into the outage confirmed that readmission came after it. From the first
+    refusal to readmission took about **2¼ minutes**, against about 16 before the limit existed.
+  - **Still unexplained: the 17:55 outage showed no offline edge.** The same kind of capture ran from
+    half a minute before those releases to half an hour after and never saw either address offline.
+    That needs both readmissions to have landed within one ~2-second sample of their releases, and
+    nothing found so far explains why they would. Recorded as an open anomaly, not a finding.
+  - A stale socket is not a property of sleeping: an address change while awake produces one too.
+    What decides it is whether anything tells the broker the connection is gone, and in every
+    outage on record nothing did.
   - **A broker-clock timer for readmission, from the replay flag.** On connect the broker first sends
     everything unacked, marked `replay`; a message to an address already connected is pushed live,
     unmarked. A probe sent into an outage therefore dates the readmission on the broker's own clock:
@@ -989,6 +999,13 @@ pinning a role deliberately, not by making every session's identity accidental.
     The broker writes a line only when its silence limit releases an address; a reset, a close, a
     failed ping or a forced takeover releases silently. Its log is therefore one-sided: a silence line
     is strong evidence, and the absence of one proves nothing.
+  - ⚠️ **Retracted, 15 Sep 2026.** The first version of this entry, committed before the broker's log
+    was read, said the 17:55 outage was released "too soon for a limit that cannot act before 150"
+    seconds, and offered as its leading explanation a reset drawn by the broker's next ping after the
+    laptop resumed. The log shows the silence limit releasing both addresses at 17:56:34, which puts
+    the broker's last frame about a minute *before* the standby. The reset explanation is refuted, and
+    a capture that saw no offline edge was never evidence of an early release — it is the anomaly
+    recorded above.
 - **Killing the relay ends the session's Monitor subscription** and nothing re-arms it automatically.
   The close is visible (`1006`), not silent, so it is actionable — but until the skill acts on it,
   recovery is a human step. The relay absorbs upstream outages; it cannot absorb its own restart.
