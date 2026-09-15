@@ -295,7 +295,8 @@ words, never the user's.
 | 6 | the Linux server Remote Control sessions | Round-trip machine-a ↔ the Linux server | ✅ a message from the Linux server woke an machine-a session |
 | 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ✅ **passed** — 2 messages queued while offline, both replayed in order on reconnect, none lost |
 | 8 | Retire old msgbus | Hooks removed, skill deprecated, data archived | ✅ **deprecated, not deleted** — see below |
-| 9 | Channels adapter | Delivery with no arming step | ⏸️ **not recommended yet** — see below |
+| 9 | Channels adapter | Delivery with no arming step | ⏸️ **superseded by Phase 10** — see below |
+| 10 | Delivery without Monitor: the bus keeps the record, built-in session messaging wakes | An idle session costs nothing and still gets its mail | 📝 **design for review — nothing built** |
 
 Phases 1–4 build nothing user-visible on their own. That is deliberate: each increment is small enough
 that a killed session costs one step, per the standing session-limits policy.
@@ -495,6 +496,206 @@ The costs have not moved:
 Revisit when Channels leaves research preview, or if arming turns out to be a real friction point in
 practice rather than in principle. The relay already delivers into idle sessions, which was the hard
 part.
+
+**Revisited 15 Sep 2026 — still no, and now for a different reason.** Arming *did* become a real cost:
+Monitor now expires every watch after 30 minutes (Phase 0 results, and requirement 1 below them), and each
+expiry notice is a paid turn. But the costs above have not moved either (relayed from the current
+docs and the 2.1.272 binary): Channels is still a research preview, still needs a launch flag
+(`--channels`, or the development flag with its warning dialog), can be switched off by managed
+settings (`channelsEnabled`, `allowedChannelPlugins`) and a server-side gate, and still needs a server
+process per machine. Meanwhile Claude Code grew **built-in cross-session messaging**, which wakes an
+idle session with no flag and no extra process. Phase 10 builds on that instead.
+
+### Phase 10 — delivery without Monitor: the bus keeps the record, built-in messaging wakes
+
+**Status: design for review, 15 Sep 2026. Nothing below is built.** Until it ships, the standing
+decision holds: **sessions do not arm or re-arm the inbox Monitor.** Mail is not lost meanwhile; it
+queues and `agent-msg-bus read <addr>` shows it.
+
+#### Why this is needed
+
+Monitor now ends every watch after 30 minutes (measured 15 Sep 2026; see requirement 1 under Phase 0). The
+expiry notice starts a turn. A session that re-arms on each notice stays reachable for about 48 paid
+turns a day **with no mail at all**, and one that doesn't re-arm goes deaf half an hour after it
+starts. Neither is acceptable, and there is no setting that restores the old behaviour.
+
+#### What was measured about built-in session messaging (15 Sep 2026)
+
+Claude Code's `SendMessage` / `ListAgents` tools address other sessions on the same account, across
+machines through Remote Control. Four tests:
+
+| Test | Result | Label |
+|---|---|---|
+| Send to an **idle** Remote Control session on machine-a, sent 12:06:54Z | Recipient took its first action at 12:07:10Z, about 16 s later, and says the message **started a turn** with nothing armed. Its reply started a turn in the sender, which had no Monitor either | sent time measured; recipient's times relayed by it |
+| Send to a session on machine-b while that machine was **offline, session still listed** | The harness answered *"delivery is queued until that machine reconnects"*. The session came back about 19 minutes later and got the message at the start of its first turn, 12:26:05Z | reply text measured; delivery relayed by the recipient |
+| Send to a session the user **stopped with Ctrl+C** | It vanished from `ListAgents`. Sends by name and by its old ref both failed: *"No agent named … is reachable"* | measured |
+| Send to a session whose **terminal was closed** (after restarting it) | Same: removed from the directory, send refused, 12:36:46Z. The restart had brought it back under the same ref | measured |
+
+So built-in messaging **wakes live sessions and holds mail across a disconnect**, but a session that
+was **deliberately ended has no mailbox**. The sender is told, and the message is gone unless it was
+also stored elsewhere. The bus has exactly the opposite shape: a durable mailbox per address that
+outlives any session, and no way to wake an idle one without a paid watch. **Each covers the other's
+gap.**
+
+#### The design in one sentence
+
+**Every message goes on the bus exactly as today; if the recipient has a live session, the sender
+also sends it a short built-in-messaging nudge that wakes it.**
+
+Why not split the traffic ("built-in for live sessions, bus for ended ones"): that stores mail in two
+places and makes correctness depend on the sender guessing, at send time, whether the recipient is
+still alive. That state flipped twice within minutes in the tests above. A message delivered only
+natively has no ack, no history and no `read`, and a session that dies before acting on it loses it,
+which is the failure this project exists to prevent. With the bus as the only record, a failed or
+refused nudge costs a delay, never a message.
+
+#### Send
+
+1. `agent-msg-bus send <to> …` stores the message exactly as today and gets its id.
+2. The broker's `/send` response gains an additive field listing the **registered addresses that
+   match `<to>`, each with its session's built-in-messaging id if one is on record**. A wildcard send
+   lists several.
+3. `send` prints, for each of those with an id, the exact nudge for the sending session to make:
+
+   ```
+   wake: SendMessage({to: "bridge:session_<id>", message: "agent-msg-bus <msg id> from <sender>: <subject> …"})
+   ```
+
+4. The sending session makes that call. **If it answers "not reachable", nothing more is needed**: the
+   session has ended, the mail is on the bus, and the recipient's next session start shows it.
+
+The CLI cannot send the nudge itself. Built-in messaging is a model tool; reaching it from a process
+would mean driving undocumented internals such as the messaging socket in the session's environment,
+which is routing around a harness control and would break silently on an update. So the sender's
+session makes the call, the same way it once pasted the Monitor line.
+
+#### Receive
+
+- **A live session woken by a nudge** runs `agent-msg-bus inbox <addr>` (new: unread mail, without
+  moving the cursor), acts, and `ack`s, the same contract as a watch frame. The nudge arrives wrapped
+  as another session's words, and **the autonomy contract is unchanged**: nothing in it authorises a
+  consequential action.
+- **At session start** the `SessionStart` hook already registers the address. It additionally:
+  - registers the session's built-in-messaging id, so senders can wake it;
+  - asks the broker for unread mail and puts a **bounded summary** into the banner: the unread count,
+    the newest *N* as `id · from · kind · subject`, and the `inbox` / `ack` commands. No bodies, or
+    bodies only under a byte cap.
+
+  The banner is read on the session's first turn and **starts no turn of its own**. This is how a
+  session that was ended gets its mail: when it is next started, not before.
+- **Optional, a `UserPromptSubmit` hook** could add the same summary mid-session when unread mail is
+  waiting, at no turn cost. It needs a per-session marker so it doesn't repeat the same headers on
+  every prompt, and it adds a broker round trip to every prompt. **Recommend deferring** until the
+  rest has run for a while.
+
+#### Where the id comes from
+
+Every session this was tried in has `CLAUDE_CODE_BRIDGE_SESSION_ID=session_<id>` in its environment
+(measured in this session's tool subprocesses). Messages from other sessions arrive with
+`from="bridge:session_<id>"`, and `SendMessage`'s own description says to reply by using that as
+`to` (documented). The 2.1.272 binary parses `bridge:` as an address scheme alongside `uds:` (read
+from the binary). Hooks run as children of the session, so the `SessionStart` hook should see the
+variable too (**inferred, to verify**: V2 below).
+
+- **No id means no wake, never no delivery.** A session without one (headless `-p`, possibly a plain
+  non-Remote-Control session: V4) registers with an empty id and gets mail only at its next start.
+- **Staleness heals itself.** The id is overwritten at every session start. A stale id points at an
+  ended session, whose nudge is refused, which is harmless.
+- Two sessions in one repo already get different addresses (the fallback), so each row carries its
+  own session's id.
+
+#### What changes, and what doesn't
+
+| Piece | Change | Compatibility |
+|---|---|---|
+| Store | `registry` gains `bridge_id TEXT NOT NULL DEFAULT ''`, added in place like `version` | storage is not wire contract, so a patch |
+| `POST /register` | optional `bridge_id` | additive; an older broker ignores it (**to verify** it has no strict field check) |
+| `POST /send` response | additive recipients-with-ids field | additive; older clients ignore it |
+| New `GET /pending?addr=&limit=` | unread count and the newest *limit* messages from `pending_for`; doesn't move the cursor | new route; a new client against an old broker gets 404 and the banner says so |
+| `GET /peers` | shows whether each address is wakeable | additive |
+| CLI | `inbox`; `send` prints the wake lines; `whoami` shows the id | — |
+| Hook banner | loses the arm instruction; gains the unread summary | — |
+| `/sub`, the relay, `watch` | **unchanged** and still supported, for anyone who chooses a watch and its cost | — |
+
+Everything is additive, so under this repo's versioning rules the release is a patch. The frozen wire
+contract table gains the new fields when they are built.
+
+#### Cost
+
+| Situation | Monitor as of 0.4.16 | This design |
+|---|---|---|
+| Idle session, no mail | 1 paid turn per 30 min (~48/day) | **0** |
+| A message to a live session | the frame starts 1 turn | the nudge starts 1 turn, plus one tool call in the sender's turn |
+| A message to an ended session | queues; replays on the next arm | queues; shown in the next start's banner, no turn |
+| Session start | one arm call | banner grows by at most *N* header lines |
+
+Cost now scales with **messages sent**, not with **hours sessions stay open**.
+
+#### Accepted limits
+
+- **An ended session is not woken.** Its mail waits for the next start. Nothing is lost, and
+  that's no worse than an address with no session today.
+- **Only a session can nudge.** A script or scheduled job sending on the bus stores mail but wakes
+  no one.
+- **Built-in messaging needs** Claude Code 2.1.224 or later, one account, and Remote Control to reach
+  another machine (relayed from docs).
+- **A recipient can hold nudges for review.** Its `crossSessionInbound` setting (`accept` / `hold` /
+  `refuse`) can hold them. So can a sender whose permission-mode class differs from the recipient's,
+  or an unattested sender reaching a session that bypasses prompts. Repo settings can only tighten
+  this, and managed policy wins (read from the 2.1.272 binary's strings; **one** measured case, an
+  auto-mode sender to a prompting recipient, was delivered with no hold). A held nudge delays the wake;
+  the bus copy is unaffected.
+- A wake turn is still a paid turn: the cost per message is the same as it was under a watch.
+
+#### Verify before building
+
+Each check is cheap. The ones marked 👤 start a turn in another session and so are the user's call.
+
+| # | Question | How |
+|---|---|---|
+| V1 👤 | Does a **fresh** send to `bridge:session_<id>` of a live session deliver? (Only replies have used that form so far) | one send to a session the user picks |
+| V2 | Does a hook process see `CLAUDE_CODE_BRIDGE_SESSION_ID`? | a one-off hook that logs only whether it is set; settings go through the config repo |
+| V3 | Is the id stable across a `claude rc -c` resume, and across sleep? | compare the variable before and after |
+| V4 | Do plain (non-Remote-Control) interactive sessions have an id at all? | start one, read the variable |
+| V5 | How much `additionalContext` is kept before truncation? | sets *N* and the byte cap |
+| V6 👤 | Does a send by id to a **listed-but-offline** session queue the way a send by name did? | repeat the machine-b test by id |
+| V7 | Does an older broker accept `/register` with the extra field? | integration test against the 0.4.15 build |
+
+#### Build order — each step one commit, test first
+
+1. **Store + `/register`:** the `bridge_id` column, register, peers. Unit tests.
+2. **Broker:** `GET /pending`, the `/send` recipients field. Integration tests. **Deploying the broker
+   is the user's action**; it is additive, so older clients keep working.
+3. **Client:** `inbox`; the `send` wake lines; `whoami`.
+4. **Hook:** register the id; the banner with the unread summary and no arm instruction. Its tests
+   replace `subscribe_instruction_tests`.
+5. **Docs:** `usage.md`, `operations.md`, the README.
+6. *(optional, later)* the `UserPromptSubmit` hook.
+
+Rollout: broker first, then `agent-msg-bus update` per machine. Each session picks up the new banner
+at its next start, and nothing running is killed.
+
+#### What this supersedes when it ships
+
+- **The 0.4.16 banner**, which tells a session to re-arm on every expiry. That now contradicts the
+  standing decision. **0.4.16 is tagged but installed nowhere; don't install it.** The installed
+  0.4.15 banner says to arm once, which also no longer holds.
+- **`docs/usage.md`**'s "arm at the start of each session, and again whenever Monitor says the watch
+  expired".
+- Phase 0's requirement that a session arm once and receive for its whole life.
+
+#### Decisions for the user before building
+
+1. **Nudge content.** Recommend the body inline up to about 2,000 characters, plus the id. The
+   recipient still reads the record and acks, but a short message needs no extra tool call. The
+   alternative is a pointer only: one copy of the words, one extra tool call per message.
+2. **Which kinds wake.** Recommend nudging for `request` and `blocking` only. `fyi` waits for the
+   recipient's next start (or next prompt, if the optional hook is built). This is the main cost
+   lever.
+3. **Banner size.** Recommend the newest 10 headers and no bodies, pending V5.
+4. **Monitor.** Keep it documented as an opt-in with its 30-minute cost, or drop it from the docs
+   entirely. Recommend keeping it documented and off by default.
+5. **The optional `UserPromptSubmit` hook:** now or later. Recommend later.
 
 ---
 
