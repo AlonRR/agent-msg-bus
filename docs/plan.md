@@ -647,6 +647,26 @@ whereas sending through the harness's private socket would.
   bus addresses (the fallback), so match on the `sessionId` the registration recorded.
 - **No name found means no wake, never no delivery.** The mail is on the bus and the banner shows it
   at that session's next start.
+- **A row can outlive its session.** One killed abruptly still had a row 60 seconds later, and only
+  a clean exit removed it within seconds (relayed by machine-a, 16 Sep). So a row on its own is not
+  evidence of a live session: check that its `pid` is alive **and** that the process's start time
+  matches the `procStart` the row recorded, or pid reuse will point a wake at a stranger.
+- **Filter on `entrypoint`.** `cli` is a real terminal session. `sdk-cli` is a Remote Control child
+  or a `-p` run, whose name is derived from the folder rather than chosen (measured here; `-p`
+  relayed) — those are short-lived and their names collide, so they are not wake targets by default.
+- ⛔ **Never read the sibling key files.** Each session also has a file holding its peer auth token.
+  The wake path needs the session row and nothing else; that token is not ours to read, copy or log.
+
+This reintroduces pid checking, which *"Addressing and liveness"* above deliberately removed — so be
+exact about what it decides. Liveness for **delivery** is still the socket and the mailbox, unchanged.
+The pid check decides only **whether to attempt a wake**, and both ways it can be wrong are cheap: a
+false live costs one refused send, a false dead costs one session reading its mail at its next start
+instead of now.
+
+⚠️ **Do not identify sessions by scanning process command lines.** On 16 Sep that approach matched
+the wrong process and killed a live Remote Control session (relayed by machine-a). The hook matches
+on the `session_id` it is already handed, and the sender matches on what the registry recorded —
+neither needs to read anyone else's command line.
 
 #### What changes, and what doesn't
 
@@ -708,8 +728,8 @@ Each check is cheap. The ones marked 👤 start a turn in another session and so
 | ✅ V1 | Does a **fresh** send (not a reply) wake an idle session? | **Answered 16 Sep, measured**: yes, addressed by `ListAgents` name — see the table above |
 | V1b | Does a fresh send to `bridge:session_<id>` deliver? | **No longer load-bearing.** The name is the address; the `bridge:`/`uds:` forms are transports |
 | V2 | Does the live-session directory exist and carry a `name` on **machine-b** too, not just here? | read one row on that machine |
-| V3 | Does a session's row update its `name` and `status` in place, and disappear when the session ends? | watch one row across a rename, an idle→busy change and an exit |
-| V4 | Does a `-p` or otherwise nameless session get a row, and with what `name`? | start one, read the row |
+| ◐ V3 | Does a row update `name` and `status` in place, and disappear when the session ends? | **Half answered 16 Sep, relayed by machine-a:** the row of a session killed abruptly was **still present 60 s later** and gone a few minutes after. In-place updates still unmeasured |
+| ✅ V4 | Does a `-p` or otherwise nameless session get a row? | **Answered 16 Sep, relayed:** yes — `entrypoint=sdk-cli`, `nameSource=derived` from the folder name, no bridge id, and the row disappears within seconds of a clean exit |
 | V5 | How much `additionalContext` is kept before truncation? | sets *N* and the byte cap |
 | ✅ V6 | Does a send to a **listed-but-offline** session queue? | **Answered 15 Sep, measured by name**: queued and delivered ~19 min later |
 | V7 | Does an older broker accept `/register` with the extra field? | integration test against the 0.4.15 build |
