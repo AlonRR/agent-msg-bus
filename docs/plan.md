@@ -530,6 +530,7 @@ machines through Remote Control. Four tests:
 | Send to a session on machine-b while that machine was **offline, session still listed** | The harness answered *"delivery is queued until that machine reconnects"*. The session came back about 19 minutes later and got the message at the start of its first turn, 12:26:05Z | reply text measured; delivery relayed by the recipient |
 | Send to a session the user **stopped with Ctrl+C** | It vanished from `ListAgents`. Sends by name and by its old ref both failed: *"No agent named … is reachable"* | measured |
 | Send to a session whose **terminal was closed** (after restarting it) | Same: removed from the directory, send refused, 12:36:46Z. The restart had brought it back under the same ref | measured |
+| **16 Sep, V1:** a peer made a **fresh** send (not a reply) to this session, addressed by its `ListAgents` **name** | Arrived 07:56:00.799Z and **started the turn** in a session idle since the previous afternoon, with nothing armed. First tool call 07:56:41Z | measured |
 
 So built-in messaging **wakes live sessions and holds mail across a disconnect**, but a session that
 was **deliberately ended has no mailbox**. The sender is told, and the message is gone unless it was
@@ -553,12 +554,14 @@ refused nudge costs a delay, never a message.
 
 1. `agent-msg-bus send <to> …` stores the message exactly as today and gets its id.
 2. The broker's `/send` response gains an additive field listing the **registered addresses that
-   match `<to>`, each with its session's built-in-messaging id if one is on record**. A wildcard send
+   match `<to>`, each with its session's registered wake name if one is on record**. A wildcard send
    lists several.
-3. `send` prints, for each of those with an id, the exact nudge for the sending session to make:
+3. `send` prints, for each recipient it holds a wake hint for, the exact nudge for the sending
+   session to make. A hint for another machine is re-checked against `ListAgents` before it is used,
+   because a stored name ages; a hint for this machine is re-read from the live-session directory:
 
    ```
-   wake: SendMessage({to: "bridge:session_<id>", message: "agent-msg-bus <msg id> from <sender>: <subject> …"})
+   wake: SendMessage({to: "<session name> [ref]", message: "agent-msg-bus <msg id> from <sender>: <subject> — run: agent-msg-bus inbox <addr>"})
    ```
 
 4. The sending session makes that call. **If it answers "not reachable", nothing more is needed**: the
@@ -576,7 +579,8 @@ session makes the call, the same way it once pasted the Monitor line.
   as another session's words, and **the autonomy contract is unchanged**: nothing in it authorises a
   consequential action.
 - **At session start** the `SessionStart` hook already registers the address. It additionally:
-  - registers the session's built-in-messaging id, so senders can wake it;
+  - registers this session's **wake name**, read from the machine's own live-session directory, so
+    the session itself need not act (next section);
   - asks the broker for unread mail and puts a **bounded summary** into the banner: the unread count,
     the newest *N* as `id · from · kind · subject`, and the `inbox` / `ack` commands. No bodies, or
     bodies only under a byte cap.
@@ -588,32 +592,72 @@ session makes the call, the same way it once pasted the Monitor line.
   every prompt, and it adds a broker round trip to every prompt. **Recommend deferring** until the
   rest has run for a while.
 
-#### Where the id comes from
+#### Where the wake address comes from — corrected 16 Sep 2026
 
-The session this design was written in has `CLAUDE_CODE_BRIDGE_SESSION_ID=session_<id>` in its
-environment (measured in its tool subprocesses: one session, so not yet evidence about others). Messages from other sessions arrive with
-`from="bridge:session_<id>"`, and `SendMessage`'s own description says to reply by using that as
-`to` (documented). The 2.1.272 binary parses `bridge:` as an address scheme alongside `uds:` (read
-from the binary). Hooks run as children of the session, so the `SessionStart` hook should see the
-variable too (**inferred, to verify**: V2 below).
+An earlier draft of this phase had the hook register `CLAUDE_CODE_BRIDGE_SESSION_ID`, which every
+session carries in its environment. **That was wrong, and the V1 test is what showed it.** The same
+peer session reached this one as `from="bridge:session_016…"` on 15 Sep and as
+`from="uds:\\.\pipe\LOCAL\cc-msg-…"` on 16 Sep (both measured). The `from` value is **the address of
+a transport, not of a session** — it changes when the route does. Registering it would have put a
+value in the registry that goes stale without anything ending.
 
-- **No id means no wake, never no delivery.** A session without one (headless `-p`, possibly a plain
-  non-Remote-Control session: V4) registers with an empty id and gets mail only at its next start.
-- **Staleness heals itself.** The id is overwritten at every session start. A stale id points at an
-  ended session, whose nudge is refused, which is harmless.
-- Two sessions in one repo already get different addresses (the fallback), so each row carries its
-  own session's id.
+The stable address is the one a sender actually types: the session's `ListAgents` **name**, plus its
+`[ref]` when the name is ambiguous. `SendMessage`'s description says so outright — *"the name IS the
+address; there is no separate address syntax"* (documented) — and a fresh send by name woke this
+session with nothing armed (measured, table above).
+
+**Correction 2, same day: registering the name at session start does not work either.** Acting on the
+banner costs a turn, and a session that is reopened and then left alone never takes one — which is
+exactly the session a wake exists for. Seven sessions reopened at logon on machine-a sat idle for
+hours on 15 Sep and took no turn until something woke them (relayed by that machine's session; it is
+the finding the now-disabled wake hook came from). **A mechanism that only reaches sessions which
+have already acted is not a delivery mechanism.**
+
+Two facts settle where the name comes from instead:
+
+- **The hook cannot learn it from its own environment.** No `CLAUDE_*` variable carries it (measured,
+  this session's full environment), and the session's command line is
+  `claude.exe --dangerously-skip-permissions --resume`, so a `--name` given at launch does not
+  survive a resume (measured).
+- **The machine already keeps a live-session directory.** Every live session on this machine has a
+  file in the CLI's own state directory carrying its `sessionId`, `cwd`, `name`, `nameSource`,
+  `status` (`idle` / `busy`), `updatedAt`, `kind`, version and messaging identifiers. Nine files on
+  16 Sep: one per live local session, and none for any session the directory listed as offline
+  (measured). The `SessionStart` hook payload already carries `session_id`, so a hook finds its own
+  row without depending on an environment variable at all.
+
+So **nothing requires the recipient to have acted**:
+
+| Recipient | How its name is found | Cost to the recipient |
+|---|---|---|
+| Same machine | read the live-session directory: match the `cwd` the bus address derives from, take `name`, and `status` even says whether it is idle | none, ever |
+| Another machine | the registry hint, written by that machine's hook at its last session start, re-checked against `ListAgents` when the sender is about to wake it | none, ever |
+
+⚠️ **That directory is undocumented harness state: treat it as a hint, not a contract.** Read it
+read-only, never write it, and fall back to bus-only delivery the moment a file is missing or its
+shape is not what this expects — the same discipline as `version_advice`. This is not the same thing
+as driving the messaging socket: reading a local file to learn one's own name takes nothing over,
+whereas sending through the harness's private socket would.
+
+- **Names are neither unique nor stable.** One listing on 16 Sep had three sessions called `Tools`
+  and two called `Code` (measured), so the `[ref]` is stored alongside. A name is also a conversation
+  title that can be regenerated (relayed) — the second reason the stored hint is re-checked at send
+  time rather than trusted.
+- **Two live sessions in one repo** produce two rows with the same `cwd`; they already hold different
+  bus addresses (the fallback), so match on the `sessionId` the registration recorded.
+- **No name found means no wake, never no delivery.** The mail is on the bus and the banner shows it
+  at that session's next start.
 
 #### What changes, and what doesn't
 
 | Piece | Change | Compatibility |
 |---|---|---|
-| Store | `registry` gains `bridge_id TEXT NOT NULL DEFAULT ''`, added in place like `version` | storage is not wire contract, so a patch |
-| `POST /register` | optional `bridge_id` | additive; an older broker ignores it (**to verify** it has no strict field check) |
-| `POST /send` response | additive recipients-with-ids field | additive; older clients ignore it |
+| Store | `registry` gains `wake_name` and `wake_ref` (`TEXT NOT NULL DEFAULT ''`), added in place like `version` | storage is not wire contract, so a patch |
+| `POST /register` | optional `wake_name`, `wake_ref` | additive; an older broker ignores them (**to verify** it has no strict field check) |
+| `POST /send` response | additive field: the matching registered addresses and their wake hints | additive; older clients ignore it |
 | New `GET /pending?addr=&limit=` | unread count and the newest *limit* messages from `pending_for`; doesn't move the cursor | new route; a new client against an old broker gets 404 and the banner says so |
 | `GET /peers` | shows whether each address is wakeable | additive |
-| CLI | `inbox`; `send` prints the wake lines; `whoami` shows the id | — |
+| CLI | `inbox`; `send` prints the wake lines; `whoami` shows this session's wake name | — |
 | Hook banner | loses the arm instruction; gains the unread summary | — |
 | `/sub`, the relay, `watch` | **unchanged** and still supported, for anyone who chooses a watch and its cost | — |
 
@@ -630,6 +674,11 @@ contract table gains the new fields when they are built.
 | Session start | one arm call | banner grows by at most *N* header lines |
 
 Cost now scales with **messages sent**, not with **hours sessions stay open**.
+
+⚠️ **No step of this design may reintroduce a recurring cost.** That is the property the decision to
+stop arming Monitor actually bought, and it is the one test every later refinement has to pass: a step
+that costs a turn *on a clock* rather than *on a message* fails this phase, however convenient it is
+otherwise.
 
 #### Accepted limits
 
@@ -656,22 +705,24 @@ Each check is cheap. The ones marked 👤 start a turn in another session and so
 
 | # | Question | How |
 |---|---|---|
-| V1 👤 | Does a **fresh** send to `bridge:session_<id>` of a live session deliver? (Only replies have used that form so far) | one send to a session the user picks |
-| V2 | Does a hook process see `CLAUDE_CODE_BRIDGE_SESSION_ID`? | a one-off hook that logs only whether it is set; settings go through the config repo |
-| V3 | Is the id stable across a `claude rc -c` resume, and across sleep? | compare the variable before and after |
-| V4 | Do plain (non-Remote-Control) interactive sessions have an id at all? | start one, read the variable |
+| ✅ V1 | Does a **fresh** send (not a reply) wake an idle session? | **Answered 16 Sep, measured**: yes, addressed by `ListAgents` name — see the table above |
+| V1b | Does a fresh send to `bridge:session_<id>` deliver? | **No longer load-bearing.** The name is the address; the `bridge:`/`uds:` forms are transports |
+| V2 | Does the live-session directory exist and carry a `name` on **machine-b** too, not just here? | read one row on that machine |
+| V3 | Does a session's row update its `name` and `status` in place, and disappear when the session ends? | watch one row across a rename, an idle→busy change and an exit |
+| V4 | Does a `-p` or otherwise nameless session get a row, and with what `name`? | start one, read the row |
 | V5 | How much `additionalContext` is kept before truncation? | sets *N* and the byte cap |
-| V6 👤 | Does a send by id to a **listed-but-offline** session queue the way a send by name did? | repeat the machine-b test by id |
+| ✅ V6 | Does a send to a **listed-but-offline** session queue? | **Answered 15 Sep, measured by name**: queued and delivered ~19 min later |
 | V7 | Does an older broker accept `/register` with the extra field? | integration test against the 0.4.15 build |
 
 #### Build order — each step one commit, test first
 
-1. **Store + `/register`:** the `bridge_id` column, register, peers. Unit tests.
+1. **Store + `/register`:** the `wake_name` / `wake_ref` columns, register, peers. Unit tests.
 2. **Broker:** `GET /pending`, the `/send` recipients field. Integration tests. **Deploying the broker
    is the user's action**; it is additive, so older clients keep working.
 3. **Client:** `inbox`; the `send` wake lines; `whoami`.
-4. **Hook:** register the id; the banner with the unread summary and no arm instruction. Its tests
-   replace `subscribe_instruction_tests`.
+4. **Hook:** read this machine's live-session directory for the wake name and register it; the banner
+   with the unread summary and no arm instruction. Its tests replace `subscribe_instruction_tests`,
+   and one of them must prove the hook still works when that directory is absent or malformed.
 5. **Docs:** `usage.md`, `operations.md`, the README.
 6. *(optional, later)* the `UserPromptSubmit` hook.
 
@@ -689,9 +740,12 @@ at its next start, and nothing running is killed.
 
 #### Decisions for the user before building
 
-1. **Nudge content.** Recommend the body inline up to about 2,000 characters, plus the id. The
-   recipient still reads the record and acks, but a short message needs no extra tool call. The
-   alternative is a pointer only: one copy of the words, one extra tool call per message.
+1. **Wake content.** Recommend a **pointer only** — id, kind, sender, subject and the `inbox` command
+   — never the body. This reverses the first draft, which had the body inline under a cap to save the
+   recipient a tool call. Machine-a's session argued the other way and the argument holds: a woken
+   session has to reach the record anyway for the id it acks, and one that acts on an inline copy
+   without acking leaves the unread count wrong, which re-shows handled mail in the next start's
+   banner. The price is one extra tool call per woken message.
 2. **Which kinds wake.** Recommend nudging for `request` and `blocking` only. `fyi` waits for the
    recipient's next start (or next prompt, if the optional hook is built). This is the main cost
    lever.
