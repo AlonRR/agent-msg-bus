@@ -83,6 +83,14 @@ actually works *before* stopping it. See the relay note at the top of this page.
 before copying, which is right for a first install and wrong for an update: it ends every session's
 inbox and stops the relay. Use `update` on a machine that is already running.
 
+⚠️ **Its default source is this repo's last `target/release` build, which can be OLDER than what is
+installed.** That build is whatever was last compiled on that machine: on 16 Sep 2026 one machine's
+repo build was 0.4.8 while its installed binary was 0.4.15, so a bare `update` would have downgraded
+the binary every session and the relay there depend on — reporting success while doing it. From
+v0.4.17 an older source is refused, naming both versions. Build a current one with `cargo build
+--release` first, or point `--from` at the binary you actually mean. `--force` installs an older
+build deliberately, which is how a rollback is done.
+
 Arm the subscription at the start of each session, and **again whenever Monitor says the watch
 expired**, using Monitor's `command:` form:
 
@@ -141,6 +149,12 @@ starts a new one at the head. First check what is genuinely unread with
 `read <you> --since <last id you actually handled>` — `read` ignores the cursor, which is exactly
 why it is the trustworthy view when the cursor is suspect, and `forget` strands anything still
 waiting.
+
+⚠️ **`--since` takes a MESSAGE ID, not a timestamp** — `YYYYMMDDThhmmssmmm-nnnnnnnnn`, exactly as
+`read` prints it. Ids are compared as text, so a timestamp sorts below every id the store can hold
+and matches the whole history instead of narrowing it. Until v0.4.17 that was accepted silently: a
+session asking what arrived while it was away got everything back, with no error and no way to tell
+old mail from new. It is now refused by the CLI and by the broker.
 
 ---
 

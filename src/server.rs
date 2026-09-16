@@ -348,6 +348,16 @@ async fn messages(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "addr is required"})))
             .into_response();
     };
+    // Refused here for the same reason a bad cursor is refused before `ack`: `since` is compared as
+    // text against ids, so a wrong shape does not narrow the read — it matches every row and returns
+    // the whole history looking like a filtered one. Answered as the client error it is, not as a
+    // 500, so the caller corrects the argument instead of retrying.
+    if let Some(s) = q.get("since") {
+        if let Some(why) = crate::store::since_refusal(s) {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": why})))
+                .into_response();
+        }
+    }
     let since = q.get("since").map(|s| s.as_str());
     let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
     match st.store.lock().unwrap().history(addr, since, limit) {

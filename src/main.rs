@@ -135,6 +135,11 @@ enum Cmd {
     /// push-only, so without this the full text of a long message was unrecoverable once acked.
     Read {
         addr: String,
+        /// Only messages after this message id — YYYYMMDDThhmmssmmm-nnnnnnnnn. NOT a timestamp.
+        ///
+        /// Ids are compared as text, so a timestamp does not narrow the read: it matches every
+        /// stored row and returns the whole history looking like a filtered one. Anything that is
+        /// not an id is refused rather than accepted.
         #[arg(long)]
         since: Option<String>,
         #[arg(long, default_value_t = 20)]
@@ -189,6 +194,13 @@ enum Cmd {
         /// Say what would change, then stop.
         #[arg(long)]
         dry_run: bool,
+        /// Install even when the source is OLDER than what is already installed.
+        ///
+        /// Needed for a deliberate rollback. Without it an older source is refused, because the
+        /// default source is this repo's last `target/release` build and that can be months behind
+        /// the installed binary — a downgrade nobody asked for, machine-wide and silent.
+        #[arg(long)]
+        force: bool,
     },
     /// Subscribe and print each message as a line, reconnecting forever.
     ///
@@ -252,7 +264,9 @@ fn main() {
             watch(&relay, addr, fallback.clone())
         }
         Cmd::Whoami => whoami(&cli),
-        Cmd::Update { ref from, ref to, dry_run } => update(from.as_deref(), to.as_deref(), dry_run),
+        Cmd::Update { ref from, ref to, dry_run, force } => {
+            update(from.as_deref(), to.as_deref(), dry_run, force)
+        }
         _ => run_client(&cli),
     }
 }
@@ -263,7 +277,7 @@ async fn watch(relay: &str, addr: &str, fallback: Option<String>) -> ! {
 }
 
 /// Swap the installed binary. Reports what stays on the old build; never restarts anything.
-fn update(from: Option<&str>, to: Option<&str>, dry_run: bool) {
+fn update(from: Option<&str>, to: Option<&str>, dry_run: bool, force: bool) {
     use agent_msg_bus::update as up;
     let from = from.map(std::path::PathBuf::from).unwrap_or_else(up::default_source_path);
     let to = to.map(std::path::PathBuf::from).unwrap_or_else(up::default_install_path);
@@ -286,6 +300,19 @@ fn update(from: Option<&str>, to: Option<&str>, dry_run: bool) {
     if plan.already_current() {
         println!("\nalready on {}; nothing to do.", plan.from_version);
         return;
+    }
+    // Before --dry-run, deliberately: a dry run of a refused update should report the refusal, not
+    // describe a swap that would not happen.
+    if let Some(why) = plan.downgrade_refusal() {
+        if !force {
+            eprintln!("\nagent-msg-bus: {why}");
+            std::process::exit(1);
+        }
+        println!(
+            "\n--force: installing {} over the newer {} deliberately.",
+            plan.from_version,
+            plan.to_version.clone().unwrap_or_default()
+        );
     }
     if dry_run {
         println!("\n--dry-run: would move the installed binary to {}", plan.backup.display());
@@ -629,23 +656,30 @@ fn run_client(cli: &Cli) {
         Cmd::Ack { addr, up_to_id } => {
             c.ack(addr, up_to_id).map(|_| println!("acked {addr} up to {up_to_id}")).map_err(Into::into)
         }
-        Cmd::Read { addr, since, limit } => c
-            .read(addr, since.as_deref(), *limit)
-            .map(|msgs| {
-                if msgs.is_empty() {
-                    println!("no stored messages for {addr}");
-                }
-                for m in msgs {
-                    println!("{}", "=".repeat(76));
-                    println!("id      : {}", m.id);
-                    println!("from    : {}  ->  {}   [{}]", m.from, m.to, m.kind);
-                    println!("ts      : {}", m.ts);
-                    println!("subject : {}", m.subject);
-                    println!("{}", "-".repeat(76));
-                    println!("{}", m.body);
-                }
-            })
-            .map_err(Into::into),
+        // Refused before the request goes out, so the caller is corrected rather than handed the
+        // whole history in the shape of a filtered read.
+        Cmd::Read { addr, since, limit } => {
+            match since.as_deref().and_then(agent_msg_bus::store::since_refusal) {
+                Some(why) => Err(why.into()),
+                None => c
+                    .read(addr, since.as_deref(), *limit)
+                    .map(|msgs| {
+                        if msgs.is_empty() {
+                            println!("no stored messages for {addr}");
+                        }
+                        for m in msgs {
+                            println!("{}", "=".repeat(76));
+                            println!("id      : {}", m.id);
+                            println!("from    : {}  ->  {}   [{}]", m.from, m.to, m.kind);
+                            println!("ts      : {}", m.ts);
+                            println!("subject : {}", m.subject);
+                            println!("{}", "-".repeat(76));
+                            println!("{}", m.body);
+                        }
+                    })
+                    .map_err(Into::into),
+            }
+        }
         Cmd::Prune { days, provisional_hours, yes } => c
             .prune(*days, *provisional_hours, !*yes)
             .map(|addrs| {
@@ -851,5 +885,35 @@ mod tests {
     #[test]
     fn the_argument_definitions_are_internally_consistent() {
         Cli::command().debug_assert();
+    }
+
+    fn arg_help(sub: &str, arg: &str) -> String {
+        let cmd = Cli::command();
+        let sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == sub)
+            .unwrap_or_else(|| panic!("no `{sub}` subcommand"));
+        let a = sub
+            .get_arguments()
+            .find(|a| a.get_id() == arg)
+            .unwrap_or_else(|| panic!("`{sub}` has no --{arg}"));
+        a.get_help().map(|h| h.to_string()).unwrap_or_default()
+    }
+
+    /// `--since` took a message id and said so nowhere, so a timestamp looked like a reasonable
+    /// guess - and a timestamp is accepted by text comparison against every row. The refusal is the
+    /// real fix; the help text is what stops the wrong guess being made in the first place.
+    #[test]
+    fn the_read_since_argument_says_it_takes_a_message_id() {
+        let help = arg_help("read", "since");
+        assert!(help.contains("message id"), "--since does not say what it takes: {help:?}");
+        assert!(help.contains("NOT a timestamp"), "--since does not rule out a timestamp: {help:?}");
+    }
+
+    /// A rollback is a real operation, so the downgrade guard must have a documented way through.
+    #[test]
+    fn update_has_a_force_flag_for_a_deliberate_downgrade() {
+        let help = arg_help("update", "force");
+        assert!(help.to_lowercase().contains("older"), "--force does not say what it permits: {help:?}");
     }
 }

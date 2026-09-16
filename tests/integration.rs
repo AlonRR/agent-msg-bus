@@ -698,6 +698,55 @@ async fn a_refused_ack_is_a_client_error_not_a_server_fault() {
     assert!(msg.contains("is not a message id"), "the refusal did not explain itself: {msg}");
 }
 
+/// `--since` was FAIL-OPEN, which is worse than an error: a timestamp is compared as text against
+/// message ids, sorts below every id this store can hold, and therefore matched every row. A session
+/// back from five days away asked what had arrived while it was gone and was handed the entire
+/// history with no error — old mail indistinguishable from new. Reported by that session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_filtered_by_a_timestamp_is_refused_rather_than_returning_everything() {
+    let h = start().await;
+    let c = h.client();
+    blocking(move || c.register("machine-a/reader", "s1", "machine-a", "r", "/x", 1).unwrap()).await;
+
+    let base = h.base.clone();
+    let (status, body): (u16, serde_json::Value) = blocking(move || {
+        let url = format!(
+            "{base}/messages?addr={}&since={}",
+            agent_msg_bus::client::urlencode("machine-a/reader"),
+            agent_msg_bus::client::urlencode("2026-09-11T23:00:00Z")
+        );
+        match ureq::get(&url).set("Authorization", &format!("Bearer {TOKEN}")).call() {
+            Ok(r) => (r.status(), r.into_json().unwrap()),
+            Err(ureq::Error::Status(code, r)) => (code, r.into_json().unwrap()),
+            Err(e) => panic!("transport error, not an HTTP status: {e}"),
+        }
+    })
+    .await;
+
+    assert_eq!(status, 400, "a timestamp was accepted as a read filter");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("is not a message id"),
+        "the refusal did not explain itself: {body:?}"
+    );
+
+    // POSITIVE CONTROL. Without this the test would pass just as happily against a broker that had
+    // stopped serving `/messages` at all, which is a different bug wearing the same status code.
+    let base = h.base.clone();
+    let ok = blocking(move || {
+        let url = format!(
+            "{base}/messages?addr={}&since=20260911T102540928-000000296",
+            agent_msg_bus::client::urlencode("machine-a/reader")
+        );
+        match ureq::get(&url).set("Authorization", &format!("Bearer {TOKEN}")).call() {
+            Ok(r) => r.status(),
+            Err(ureq::Error::Status(code, _)) => code,
+            Err(e) => panic!("transport error, not an HTTP status: {e}"),
+        }
+    })
+    .await;
+    assert_eq!(ok, 200, "a well-formed id was refused too - the route itself is broken");
+}
+
 /// Two different client mistakes, two different answers. A malformed cursor is 400; a well-formed
 /// ack aimed at a name nothing answers to is 404 — and that second one is the typo case, which used
 /// to return 200 with `{"ok":true}` after writing a cursor for a mailbox that did not exist.

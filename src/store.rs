@@ -99,6 +99,27 @@ pub fn cursor_refusal(addr: &str, up_to: &str) -> Option<String> {
     ))
 }
 
+/// Why `since` cannot be used to filter a read, or `None` if it is a well-formed message id.
+///
+/// **`--since` is compared as TEXT against message ids, so a wrong shape does not fail — it matches
+/// everything.** An ISO timestamp has `-` where an id has a digit, and `-` sorts below every digit,
+/// so `id > since` is true for every row ever stored and the caller is handed the entire history
+/// while believing they asked for a slice of it. A returning session then reads old mail as new.
+///
+/// Reported by a session that had been away for five days and tried to read what arrived while it
+/// was gone. Refusing costs a corrected call; accepting costs a wrong answer that looks right.
+pub fn since_refusal(since: &str) -> Option<String> {
+    if is_message_id(since) {
+        return None;
+    }
+    Some(format!(
+        "'{since}' is not a message id (expected YYYYMMDDThhmmssmmm-nnnnnnnnn). Refusing to filter \
+         by it: ids are compared as text, so a value of the wrong shape does not narrow the read — \
+         a timestamp sorts below every id this store can hold and would hand back the ENTIRE \
+         history while looking like a filtered one."
+    ))
+}
+
 pub fn is_message_id(s: &str) -> bool {
     let b = s.as_bytes();
     // 8 digits, 'T', 9 digits, '-', 9 digits.
@@ -916,6 +937,49 @@ mod tests {
             body: "b".into(),
             reply_to: String::new(),
         }
+    }
+
+    // ---- read filters -----------------------------------------------------
+
+    /// This is the whole reason `--since` cannot be left unchecked: a timestamp is not a slightly
+    /// wrong cursor, it is one that matches every row in the table.
+    #[test]
+    fn a_timestamp_sorts_below_every_message_id_of_its_own_year_or_later() {
+        // The `-` at index 4 is what does it: it sorts below every digit, so the comparison is
+        // decided before the date is even reached.
+        assert!("2026-09-11T23:00:00Z" < "20260911T102540928-000000296");
+        assert!("2026-09-11T23:00:00Z" < "20260101T000000000-000000000");
+        assert!("2026-09-11T23:00:00Z" < "29991231T235959999-999999999");
+        // ⚠️ NOT below every id that could ever exist - only from its own year on. An earlier year
+        // sorts below it, and an earlier draft of this test asserted otherwise and failed. The
+        // guarantee being relied on is "matches every id this store can hold", and every id here is
+        // minted with a four-digit year at least as large as the year in any timestamp a caller
+        // would pass.
+        assert!("2026-09-11T23:00:00Z" > "19990101T000000000-000000000");
+    }
+
+    #[test]
+    fn a_timestamp_is_refused_as_a_read_filter_rather_than_matching_everything() {
+        let why = since_refusal("2026-09-11T23:00:00Z")
+            .expect("a timestamp was accepted as --since and would return the entire history");
+        assert!(why.contains("message id"), "refusal does not say what was expected: {why}");
+    }
+
+    #[test]
+    fn a_real_message_id_is_accepted_as_a_read_filter() {
+        assert!(since_refusal("20260911T102540928-000000296").is_none());
+    }
+
+    /// The refusal has to carry the shape, or the caller's next guess is another wrong one.
+    #[test]
+    fn the_read_filter_refusal_names_the_shape_to_use() {
+        let why = since_refusal("yesterday").unwrap();
+        assert!(why.contains("YYYYMMDDThhmmssmmm"), "refusal does not show the shape: {why}");
+    }
+
+    #[test]
+    fn an_empty_read_filter_is_refused_too() {
+        assert!(since_refusal("").is_some(), "an empty --since was accepted");
     }
 
     // ---- addressing -------------------------------------------------------

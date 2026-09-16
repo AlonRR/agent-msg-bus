@@ -70,6 +70,55 @@ impl Plan {
     pub fn already_current(&self) -> bool {
         self.to_version.as_deref() == Some(self.from_version.as_str())
     }
+
+    /// Why installing this source would move the machine BACKWARDS, or `None` if it would not.
+    ///
+    /// `update` takes its source from this repo's `target/release` build unless told otherwise, and
+    /// that build is whatever was last compiled here — which can be months older than what is
+    /// installed. On 16 Sep 2026 the repo build on one machine was 0.4.8 while the installed binary
+    /// was 0.4.15, so a bare `update` would have put a seven-release-old binary into the path every
+    /// session and the relay depend on, reporting success while doing it.
+    ///
+    /// Refusing is the right default because the damage is silent and machine-wide, while the cost
+    /// of a false refusal is one flag. Only a comparison that can actually be made counts: if either
+    /// side is not a plain `x.y.z`, this says nothing rather than guessing.
+    pub fn downgrade_refusal(&self) -> Option<String> {
+        let installed = self.to_version.as_deref()?;
+        let new = version_triple(&self.from_version)?;
+        let old = version_triple(installed)?;
+        if new >= old {
+            return None;
+        }
+        Some(format!(
+            "{} reports {}, which is OLDER than the {} already installed at {}. Refusing: `update` \
+             takes its source from this repo's target/release build unless --from says otherwise, \
+             and that build is whatever was last compiled here — which can be months behind what is \
+             deployed. Installing it would put an older binary in the path every session and the \
+             relay on this machine use. Build a current one with `cargo build --release`, point \
+             --from at the binary you mean, or pass --force to install the older build deliberately.",
+            self.from.display(),
+            self.from_version,
+            installed,
+            self.to.display()
+        ))
+    }
+}
+
+/// The three numbers in `x.y.z`, or `None` for anything else.
+///
+/// Numeric on purpose: compared as text, "0.4.10" sorts below "0.4.9", which would get the
+/// comparison wrong in both directions at exactly the versions this project is at. Anything that is
+/// not three plain integers — a git describe, a nightly tag, a `-dirty` suffix — returns `None`, and
+/// every caller treats that as "cannot say" rather than as a verdict.
+fn version_triple(v: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
 }
 
 /// Work out what would change, verifying the SOURCE before anything is moved.
@@ -282,5 +331,78 @@ mod tests {
             backup: PathBuf::from("c"),
         };
         assert!(!p.already_current());
+    }
+
+    // ---- the downgrade guard ----------------------------------------------
+
+    fn versions(from: &str, to: Option<&str>) -> Plan {
+        Plan {
+            from: PathBuf::from("new"),
+            to: PathBuf::from("installed"),
+            from_version: from.into(),
+            to_version: to.map(|s| s.to_string()),
+            backup: PathBuf::from("backup"),
+        }
+    }
+
+    /// The case this guard exists for, measured on a real machine on 16 Sep 2026: the repo's
+    /// `target/release` build was 0.4.8 and the installed binary was 0.4.15, so the default `update`
+    /// would have installed a seven-release-old binary over a working one — machine-wide, silently,
+    /// and reporting success.
+    #[test]
+    fn an_older_source_is_refused_rather_than_installed_over_a_newer_build() {
+        let why = versions("0.4.8", Some("0.4.15"))
+            .downgrade_refusal()
+            .expect("an older build was accepted as an update");
+        assert!(why.contains("0.4.8") && why.contains("0.4.15"), "refusal names neither version: {why}");
+    }
+
+    /// A refusal a caller cannot get past is a bug report, not a guard. Deliberate downgrades are a
+    /// real operation — a rollback is one — so the message has to name the way through.
+    #[test]
+    fn the_downgrade_refusal_says_how_to_override_it() {
+        let why = versions("0.4.8", Some("0.4.15")).downgrade_refusal().unwrap();
+        assert!(why.contains("--force"), "refusal does not say how to proceed deliberately: {why}");
+    }
+
+    #[test]
+    fn a_newer_source_is_not_a_downgrade() {
+        assert!(versions("0.4.16", Some("0.4.15")).downgrade_refusal().is_none());
+    }
+
+    #[test]
+    fn an_equal_version_is_not_a_downgrade() {
+        assert!(versions("0.4.15", Some("0.4.15")).downgrade_refusal().is_none());
+    }
+
+    /// ⚠️ The comparison must be NUMERIC. Compared as text, "0.4.10" sorts below "0.4.9", so a
+    /// string comparison would wave through the downgrade this guard is for and block the upgrade
+    /// past it — wrong in both directions at exactly the version numbers this project is at.
+    #[test]
+    fn versions_are_compared_numerically_not_as_text() {
+        assert!(
+            versions("0.4.10", Some("0.4.9")).downgrade_refusal().is_none(),
+            "0.4.10 over 0.4.9 is an upgrade and was refused - the comparison is textual"
+        );
+        assert!(
+            versions("0.4.9", Some("0.4.10")).downgrade_refusal().is_some(),
+            "0.4.9 over 0.4.10 is a downgrade and was allowed - the comparison is textual"
+        );
+    }
+
+    /// A comparison that cannot be made must say nothing rather than guess. A local build with an
+    /// unusual version string is not evidence of anything, and blocking it would make the guard the
+    /// reason a machine could not be updated.
+    #[test]
+    fn a_version_that_cannot_be_parsed_is_never_refused() {
+        assert!(versions("nightly-abc", Some("0.4.15")).downgrade_refusal().is_none());
+        assert!(versions("0.4.15", Some("nightly-abc")).downgrade_refusal().is_none());
+    }
+
+    /// An installed binary too old to report a version is the case `update` exists to end. Refusing
+    /// it would leave the oldest machines the only ones that cannot be fixed.
+    #[test]
+    fn an_installed_binary_that_cannot_report_a_version_is_never_refused() {
+        assert!(versions("0.4.15", None).downgrade_refusal().is_none());
     }
 }

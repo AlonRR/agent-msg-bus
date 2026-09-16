@@ -22,6 +22,28 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.17] — 2026-09-16
+
+### Fixed
+
+- **`update` would silently install an OLDER binary than the one already installed.** Its source
+  defaults to this repo's `target/release` build, which is whatever was last compiled on that
+  machine — measured on 16 Sep 2026: the repo build was 0.4.8 while the installed binary was 0.4.15,
+  so a bare `update` would have put a seven-release-old binary into the path every session and the
+  relay depend on, and reported success. An older source is now refused, naming both versions and
+  the way past it; `--force` installs it deliberately, which is what a rollback needs. The
+  comparison is numeric, because compared as text "0.4.10" sorts below "0.4.9" — wrong in both
+  directions at exactly the versions this project is at. A version either side cannot parse is
+  never refused: a comparison that cannot be made says nothing rather than guessing.
+- **`read --since` accepted a timestamp and silently returned the entire history.** `since` is
+  compared as text against message ids, and a timestamp sorts below every id this store can hold, so
+  `id > since` matched every row — a session asking what arrived while it was away got everything,
+  with no error and no way to tell old mail from new. Reported by a session returning after five
+  days. Anything that is not a message id is now refused, by the CLI before the request goes out and
+  by `GET /messages` as a 400, in the same shape as the existing cursor refusal. `--since` also has
+  help text now, which it never had; the absent description is what made a timestamp a reasonable
+  guess in the first place.
+
 ## [0.4.16] — 2026-09-15
 
 ### Changed
