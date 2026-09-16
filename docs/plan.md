@@ -595,11 +595,18 @@ session makes the call, the same way it once pasted the Monitor line.
 #### Where the wake address comes from — corrected 16 Sep 2026
 
 An earlier draft of this phase had the hook register `CLAUDE_CODE_BRIDGE_SESSION_ID`, which every
-session carries in its environment. **That was wrong, and the V1 test is what showed it.** The same
-peer session reached this one as `from="bridge:session_016…"` on 15 Sep and as
-`from="uds:\\.\pipe\LOCAL\cc-msg-…"` on 16 Sep (both measured). The `from` value is **the address of
-a transport, not of a session** — it changes when the route does. Registering it would have put a
-value in the registry that goes stale without anything ending.
+session carries in its environment, and had senders address that. **The V1 test showed the `from`
+value is not an identity**: the same peer session reached this one as a `bridge:` address on 15 Sep
+and as a local pipe on 16 Sep (both measured). Which form arrives depends on the route taken, so a
+recipient cannot treat it as a name, and a sender cannot construct it.
+
+⚠️ **One correction to that correction, measured later the same day.** The bridge id *itself* is
+stable: a peer session restarted under a new process kept its `sessionId`, its name **and** its
+bridge id, changing only the pid, the socket path and the CLI version. So the id does not rot the way
+the first draft of this paragraph claimed. It is kept in the hint as a secondary identifier — but the
+address this design sends to is the **name**, because that is what `SendMessage` documents as the
+address and what a fresh send actually resolved by (measured), whereas a fresh send to a `bridge:`
+form is still unverified (V1b).
 
 The stable address is the one a sender actually types: the session's `ListAgents` **name**, plus its
 `[ref]` when the name is ambiguous. `SendMessage`'s description says so outright — *"the name IS the
@@ -630,7 +637,7 @@ So **nothing requires the recipient to have acted**:
 
 | Recipient | How its name is found | Cost to the recipient |
 |---|---|---|
-| Same machine | read the live-session directory: match the `cwd` the bus address derives from, take `name`, and `status` even says whether it is idle | none, ever |
+| Same machine | read the live-session directory: match the `sessionId` the registry already records, take `name`, and `status` even says whether it is idle. `cwd` is the cross-check, not the key | none, ever |
 | Another machine | the registry hint, written by that machine's hook at its last session start, re-checked against `ListAgents` when the sender is about to wake it | none, ever |
 
 ⚠️ **That directory is undocumented harness state: treat it as a hint, not a contract.** Read it
@@ -651,6 +658,9 @@ whereas sending through the harness's private socket would.
   a clean exit removed it within seconds (relayed by machine-a, 16 Sep). So a row on its own is not
   evidence of a live session: check that its `pid` is alive **and** that the process's start time
   matches the `procStart` the row recorded, or pid reuse will point a wake at a stranger.
+- **Rows are keyed by pid, and the pid changes on every restart**, while the `sessionId`, the name
+  and the bridge id do not (measured 16 Sep, one session restarted). Match on `sessionId` — never on
+  pid, socket path or file name, all three of which move.
 - **Filter on `entrypoint`.** `cli` is a real terminal session. `sdk-cli` is a Remote Control child
   or a `-p` run, whose name is derived from the folder rather than chosen (measured here; `-p`
   relayed) — those are short-lived and their names collide, so they are not wake targets by default.
