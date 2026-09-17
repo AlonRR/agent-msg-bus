@@ -273,9 +273,10 @@ pub fn version_advice(mine: &str, broker: Seen<'_>, relay: Seen<'_>, me: &str) -
         "⚠ agent-msg-bus BUILD MISMATCH\n{}\n\
          Update this machine's binary with:  {me} update\n\
          That swaps the file WITHOUT stopping anything, so no session loses its inbox. Already-\n\
-         running processes keep the build they started with: a session picks the new one up when it\n\
-         re-arms its subscription, and the relay only when it is restarted — which is a decision \
-         about\nwhether this machine can get its relay back, so check its supervisor first.\n\n",
+         running processes keep the build they started with: a session picks the new one up at its\n\
+         next start, when the SessionStart hook runs the installed binary, and the relay only when \
+         it is restarted — which is a decision about whether this machine can get its relay back, \
+         so check its supervisor first.\n\n",
         lines.join("\n")
     )
 }
@@ -406,7 +407,18 @@ pub fn run() -> ! {
         )
     };
 
-    let subscribe = subscribe_instructions(&watch_cmd);
+    // What is actually waiting. With nothing subscribed, a session that does not look does not get
+    // its mail, so the count belongs in front of it at start rather than in a doc it has not opened.
+    // `peers` is an existing route and the only one that reports a pending count, so this needs no
+    // broker change. A failure is not worth failing the banner over: it degrades to "could not ask",
+    // which is deliberately not the same as "nothing waiting".
+    let mine = addr.to_string();
+    let unread = client
+        .peers(true)
+        .ok()
+        .and_then(|p| p.known.into_iter().find(|k| k.addr == mine).map(|k| k.pending));
+
+    let subscribe = inbox_instructions(&me, &mine, &watch_cmd, unread);
     emit(&format!(
         "{stale}agent-msg-bus is available. This session's address is `{addr}` and it is registered \
          with the broker at {}.\n\
@@ -460,66 +472,140 @@ fn monitor_watch_command(me: &str, addr: &str, fallback: Option<&str>) -> String
     }
 }
 
-/// How to arm the inbox, as the banner tells it.
+/// What the banner says about receiving mail.
 ///
-/// Kept apart from `run` so its claims about how long a watch lives are pinned by tests. It used to
-/// say to arm once because the watch "is never torn down" — true of `watch`, and no longer true of
-/// the Monitor holding it: on 15 Sep 2026 Monitor was measured expiring a `persistent: true` watch
-/// after 30 minutes and killing its command.
-fn subscribe_instructions(watch_cmd: &str) -> String {
+/// Kept apart from `run` so its claims are pinned by tests. It used to hand the session a
+/// ready-to-paste `Monitor({command: …, persistent: true})` call, and **every session that pasted it
+/// then paid a turn every thirty minutes for the rest of its life**: Monitor expires a watch at
+/// exactly 30 minutes (measured 15 Sep 2026) and the expiry notice itself starts a turn, about 48 a
+/// day whether or not any mail arrives.
+///
+/// The standing decision from that day is that sessions do not subscribe. The mailbox is the record
+/// — mail queues in the broker and survives every restart — so what a session actually needs at
+/// start is *how much is waiting* and *how to read it*, which is what this now gives it.
+///
+/// The paste-ready call is deliberately absent. Push still works and is still documented, but
+/// someone who wants it has to go and get it, because a line a session can paste without deciding
+/// anything is how the old cost came back on every restart.
+fn inbox_instructions(me: &str, addr: &str, watch_cmd: &str, unread: Option<usize>) -> String {
+    let waiting = match unread {
+        Some(0) => "Nothing is waiting for this address.\n".to_string(),
+        Some(n) => format!(
+            "**{n} message{} waiting for this address, unacked.** Read {} now:  {me} read {addr}\n",
+            if n == 1 { " is" } else { "s are" },
+            if n == 1 { "it" } else { "them" }
+        ),
+        // Said rather than shown as zero: "no mail" and "could not ask" are different facts, and
+        // printing the first when the second is true is how a session concludes its inbox is empty
+        // while messages sit in it.
+        None => "The broker could not be asked how much mail is waiting — check with `read` rather \
+                 than assuming there is none.\n"
+            .to_string(),
+    };
     format!(
-        "To receive messages from other Claude Code sessions, arm the subscription:\n\
+        "{waiting}\
          \n\
-             Monitor({{command: \"{watch_cmd}\", persistent: true, description: \"agent-msg-bus inbox\"}})\n\
+         THIS SESSION IS NOT SUBSCRIBED, AND THAT IS DELIBERATE. Claude Code expires a `Monitor` \
+         watch after 30 minutes even with `persistent: true` (measured 15 Sep 2026), and each expiry \
+         notice starts a paid turn — roughly 48 a day for a session that keeps re-arming, whether or \
+         not any mail arrives. Standing decision since that day: do not arm one, and do not re-arm \
+         one that expires.\n\
          \n\
-         Monitor can expire this watch on its own schedule even with `persistent: true` - measured at \
-         30 minutes on 15 Sep 2026 - and it kills the command when it does. The expiry arrives as a \
-         notice that wakes this session: re-arm with the same call when you see it, or this session \
-         stops receiving until something else wakes it. Nothing sent to this address in the gap is \
-         lost; it queues and arrives on the next subscribe, marked `\"replay\": true`.\n\
+         Nothing is lost by not subscribing. The mailbox is the record: mail queues in the broker, \
+         survives restarts, and is delivered to whoever next reads the address. What is given up is \
+         only the interruption.\n\
          \n\
-         Use the `command:` form, not `ws:`. A `ws:` watch ENDS when its socket closes and does not \
-         retry, so a relay restart leaves this session silently deaf; `watch` reconnects internally, \
-         so a relay restart does not end it.\n"
+         So: read at the start of a session, and after handling anything,\n\
+             {me} read {addr}\n\
+             {me} ack {addr} <last-message-id>\n\
+         \n\
+         If push is genuinely needed — an agent that must react within seconds — the `watch` command \
+         is unchanged and supported:  {watch_cmd}\n\
+         Running it under Monitor costs one turn every thirty minutes and has to be re-armed by hand \
+         on every expiry notice. Decide that deliberately; do not do it by default. Use the \
+         `command:` form, not `ws:` — a `ws:` watch ENDS when its socket closes and does not retry, \
+         so a relay restart leaves the session silently deaf, while `watch` reconnects internally.\n"
     )
 }
 
 #[cfg(test)]
-mod subscribe_instruction_tests {
-    use super::subscribe_instructions;
+mod inbox_instruction_tests {
+    use super::inbox_instructions;
 
     const CMD: &str = "'x' watch machine-a/repo";
+    const ME: &str = "'x'";
+    const ADDR: &str = "machine-a/repo";
 
-    /// Measured 15 Sep 2026: a Monitor watch armed with `persistent: true` was killed at exactly
-    /// 30 minutes, its process was gone, the broker listed the address offline, and push stopped
-    /// until the session armed it again. A banner that promises one arming is enough leaves every
-    /// session that believes it deaf half an hour later.
+    fn banner(unread: Option<usize>) -> String {
+        inbox_instructions(ME, ADDR, CMD, unread)
+    }
+
+    /// ⛔ THE ONE THAT MATTERS. The banner used to carry a ready-to-paste
+    /// `Monitor({command: …, persistent: true})` call, and a session that pasted it paid a turn
+    /// every thirty minutes from then on — Monitor expires the watch at 30 minutes (measured
+    /// 15 Sep 2026) and the expiry notice itself starts a turn. The standing decision is that
+    /// sessions do not subscribe, and a banner that hands over a call to paste is how that decision
+    /// gets undone silently on every new session.
     #[test]
-    fn the_banner_does_not_promise_a_watch_that_outlives_monitors_expiry() {
-        let s = subscribe_instructions(CMD);
-        assert!(!s.contains("never torn down"), "still promises an endless watch: {s}");
-        assert!(!s.contains("subscription once"), "still says a single arming is enough: {s}");
+    fn the_banner_hands_the_session_no_ready_to_paste_monitor_call() {
+        let s = banner(Some(0));
+        assert!(!s.contains("Monitor({"), "still hands over a paste-ready Monitor call: {s}");
+        assert!(!s.contains("persistent: true, description"), "still spells out the arming call: {s}");
+    }
+
+    /// Saying "do not subscribe" without saying why invites the next session to decide the rule is
+    /// stale and re-arm anyway. The cost is the reason, so the cost is in the text.
+    #[test]
+    fn the_banner_says_the_session_is_not_subscribed_and_what_that_would_cost() {
+        let s = banner(Some(0));
+        assert!(s.contains("NOT SUBSCRIBED"), "does not say the session has no subscription: {s}");
+        assert!(s.contains("30 minutes"), "does not give the expiry that makes it costly: {s}");
+        assert!(s.contains("paid turn"), "does not say what re-arming actually costs: {s}");
+    }
+
+    /// With nothing pushing, reading IS the delivery mechanism, so both commands have to be in
+    /// front of the session rather than in a doc it has not opened.
+    #[test]
+    fn the_banner_gives_the_read_and_ack_commands_for_this_address() {
+        let s = banner(Some(2));
+        assert!(s.contains(&format!("{ME} read {ADDR}")), "no read command: {s}");
+        assert!(s.contains(&format!("{ME} ack {ADDR}")), "no ack command: {s}");
     }
 
     #[test]
-    fn the_banner_says_to_re_arm_when_monitor_reports_the_watch_expired() {
-        let s = subscribe_instructions(CMD);
-        assert!(s.contains("expire"), "nothing tells the session its watch can expire: {s}");
-        assert!(s.contains("re-arm"), "nothing tells the session to re-arm: {s}");
-        assert!(s.contains(CMD), "the exact command to re-arm with is missing: {s}");
-    }
-
-    /// The expiry notice is the only thing that wakes a session whose watch has gone, so the
-    /// reassurance that matters is that nothing sent in the gap is lost.
-    #[test]
-    fn the_banner_says_mail_sent_while_unarmed_is_replayed_not_lost() {
-        let s = subscribe_instructions(CMD);
-        assert!(s.contains("replay"), "a session will assume the gap lost mail: {s}");
+    fn waiting_mail_is_announced_with_its_count() {
+        let s = banner(Some(3));
+        assert!(s.contains("3 messages are waiting"), "does not say how much mail is waiting: {s}");
     }
 
     #[test]
-    fn the_banner_still_steers_away_from_the_ws_form() {
-        let s = subscribe_instructions(CMD);
+    fn one_waiting_message_is_not_announced_as_plural() {
+        let s = banner(Some(1));
+        assert!(s.contains("1 message is waiting"), "reads as a plural for a single message: {s}");
+    }
+
+    #[test]
+    fn an_empty_mailbox_is_stated_plainly() {
+        let s = banner(Some(0));
+        assert!(s.contains("Nothing is waiting"), "leaves an empty mailbox ambiguous: {s}");
+    }
+
+    /// ⚠️ "No mail" and "could not ask" are different facts. Printing the first when the second is
+    /// true is how a session concludes its inbox is empty while messages sit in it.
+    #[test]
+    fn a_count_that_could_not_be_fetched_is_never_shown_as_an_empty_mailbox() {
+        let s = banner(None);
+        assert!(!s.contains("Nothing is waiting"), "an unavailable count was shown as empty: {s}");
+        assert!(s.contains("could not be asked"), "does not admit the count is unknown: {s}");
+    }
+
+    /// Push is still supported for anyone who deliberately wants it - with its price attached, and
+    /// still steered away from the `ws:` form, which ends on the first relay restart.
+    #[test]
+    fn the_deliberate_push_path_is_still_documented_with_its_cost_and_its_trap() {
+        let s = banner(Some(0));
+        assert!(s.contains(CMD), "the watch command is not shown at all: {s}");
+        assert!(s.contains("deliberately"), "push is offered without a decision attached: {s}");
         assert!(s.contains("not `ws:`"), "the ws: warning was dropped: {s}");
     }
 }

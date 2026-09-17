@@ -91,25 +91,36 @@ v0.4.17 an older source is refused, naming both versions. Build a current one wi
 --release` first, or point `--from` at the binary you actually mean. `--force` installs an older
 build deliberately, which is how a rollback is done.
 
-Arm the subscription at the start of each session, and **again whenever Monitor says the watch
-expired**, using Monitor's `command:` form:
+## ⛔ Do not arm a subscription. Read your mail instead.
+
+**A session holds no `Monitor` subscription by default, and that is a deliberate standing decision
+(15 Sep 2026), not an oversight.** Claude Code expires a watch after exactly 30 minutes even with
+`persistent: true` — measured — and every expiry notice starts a paid turn, about 48 a day per
+subscribed session whether or not any mail arrives. A session that re-arms pays that forever; one
+that ignores the notice goes deaf anyway.
+
+**Nothing is lost by not subscribing.** The mailbox is the record: mail queues in the broker,
+survives every restart, and is still there whenever someone reads it. What you give up is only the
+wake — nobody is interrupted the moment a message lands.
+
+So the routine is:
 
 ```
-Monitor({command: "agent-msg-bus watch <your-address> --fallback <machine>/<repo>.<session-prefix>",
-         persistent: true, description: "agent-msg-bus inbox"})
+agent-msg-bus read <your-address>          # what is waiting, whether or not it was ever delivered
+agent-msg-bus ack  <your-address> <id>     # after you have handled it
 ```
 
-`agent-msg-bus whoami` prints the exact line, with the fallback filled in — or omitted, if your
-address is pinned.
+The SessionStart banner tells you your address and how many messages are unread, so a session that
+just started already knows whether to look.
 
-⚠️ **Monitor expires a watch even with `persistent: true`.** Measured 15 Sep 2026: the watch was
-killed at exactly 30 minutes, its process was gone, and the broker listed the address offline until
-the session armed it again. The expiry arrives as a notice that starts a turn, so a session that
-re-arms on it stays reachable, at the cost of one turn every half hour; a session that ignores it
-stops receiving. Mail is not lost in the gap — it queues and arrives on the next subscribe, marked
-`"replay": true`. This is Claude Code's behaviour, not this tool's, and it has already changed once:
-the day before, the same call ran until the session ended. Monitor's start message says which
-applies — `expires in …` or `runs until TaskStop or session end`.
+**If you genuinely want push** — an agent that must react within seconds — `agent-msg-bus whoami`
+still prints the exact `Monitor` line, and the `watch` command is unchanged and supported. You are
+choosing one paid turn every thirty minutes, and you are re-arming on every expiry notice yourself.
+Do not do it by default and do not do it for a session someone else is paying for.
+
+The replacement for all of this is Phase 10 in [plan.md](plan.md): the bus keeps the record, and a
+sender wakes a live recipient through Claude Code's own cross-session messaging, so an idle session
+costs nothing. Designed, not built.
 
 ⚠️ **Not `Monitor({ws: ...})`.** A `ws:` watch ENDS when its socket closes and does not retry, so
 the next relay restart leaves this session silently deaf until a human notices. `watch` reconnects

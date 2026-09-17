@@ -22,6 +22,30 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.18] — 2026-09-17
+
+### Changed
+
+- **The SessionStart banner no longer tells a session to arm a subscription, and no longer hands it
+  a call to paste.** It had done both since the beginning, and 0.4.16 made it worse by adding
+  "re-arm on every expiry notice" — which is exactly the recurring cost the standing decision of
+  15 Sep 2026 exists to stop: Monitor expires a watch after 30 minutes even with `persistent: true`,
+  and each expiry notice starts a paid turn, about 48 a day per subscribed session whether or not
+  any mail arrives. A banner carrying a paste-ready `Monitor({…})` call silently reinstated that on
+  every new session, whatever anyone had decided. The banner now states that the session is not
+  subscribed and why, in the session's own context where the decision actually gets made.
+- **The banner says how much mail is waiting.** With nothing subscribed, reading *is* the delivery
+  mechanism, so a session needs to know at start whether to look. The count comes from the existing
+  `/peers` route — no broker change — and a failure to fetch it is reported as "could not be asked"
+  rather than shown as an empty mailbox, because a session that reads "nothing waiting" stops
+  looking.
+- **Push is still supported, now as a deliberate choice**: the `watch` command stays in the banner
+  with its cost attached and the `ws:` warning intact, but the paste-ready arming call is gone. If
+  you want it, you have to decide it.
+- `docs/usage.md` replaces "arm the subscription at the start of each session" with the read/ack
+  routine; the README and the `migrate` and `pin` messages, which all still told sessions to re-arm,
+  say the same thing now.
+
 ## [0.4.17] — 2026-09-16
 
 ### Fixed

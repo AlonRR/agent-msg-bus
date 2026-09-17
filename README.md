@@ -38,9 +38,16 @@ A `Monitor` subscription — a long-lived socket the session holds open. A frame
 session that had ended its turn and was waiting on the user, with no human input, payload intact, on
 one long-lived socket.
 
-The subscription is not permanent. Measured 15 Sep 2026, Claude Code expires a Monitor watch after
-30 minutes even with `persistent: true`, so a session re-arms it on Monitor's expiry notice. Mail
-sent in between queues and is delivered on the next subscribe; it is not lost.
+**The subscription is not permanent, and since 15 Sep 2026 it is not used by default.** Claude Code
+expires a Monitor watch after 30 minutes even with `persistent: true`, and each expiry notice starts
+a paid turn — roughly 48 a day for every subscribed session, whether or not any mail arrives. So
+sessions here hold no subscription. Mail queues in the broker, which is what the mailbox was always
+for: a session reads it at its next start, or whenever something else wakes it. The push path still
+works and is still supported for anyone who deliberately wants it, at that cost.
+
+The replacement — the bus keeps the record, and a sender wakes a live recipient through Claude Code's
+own cross-session messaging, so an idle session costs nothing — is Phase 10 in
+[docs/plan.md](docs/plan.md). Designed, not built.
 
 That is the thing no hook can do, and the reason this design replaces the old one rather than
 patching it.

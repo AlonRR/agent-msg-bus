@@ -759,14 +759,24 @@ Each check is cheap. The ones marked 👤 start a turn in another session and so
 Rollout: broker first, then `agent-msg-bus update` per machine. Each session picks up the new banner
 at its next start, and nothing running is killed.
 
-#### What this supersedes when it ships
+#### What this supersedes
 
-- **The 0.4.16 banner**, which tells a session to re-arm on every expiry. That now contradicts the
-  standing decision. **0.4.16 is tagged but installed nowhere; don't install it.** The installed
-  0.4.15 banner says to arm once, which also no longer holds.
-- **`docs/usage.md`**'s "arm at the start of each session, and again whenever Monitor says the watch
-  expired".
-- Phase 0's requirement that a session arm once and receive for its whole life.
+**Already superseded, in v0.4.18 — not waiting for this phase.** The guidance every new session reads
+was still the old guidance, which meant the decision to stop subscribing was being undone on every
+session start, whatever anyone had agreed:
+
+- **The banner no longer hands over a paste-ready `Monitor({…})` call**, and no longer says to
+  re-arm on every expiry notice (0.4.16's wording, which was the recurring cost written into the
+  product). It now says the session is not subscribed, why, how much mail is waiting, and how to
+  read and ack it. **0.4.16 was tagged and installed nowhere; do not install it.**
+- **`docs/usage.md`** replaces "arm the subscription at the start of each session" with the read/ack
+  routine, and the README and the `migrate` / `pin` messages no longer tell sessions to re-arm.
+- Phase 0's requirement that a session arm once and receive for its whole life no longer holds.
+
+The waiting-mail count in the banner is an early, no-broker-change piece of this phase: it uses the
+existing `/peers` route rather than the `/pending` route proposed below. When Phase 10 is built,
+`/pending` replaces that call and adds the message headers; the banner's contract with the session
+does not change.
 
 #### Decisions for the user before building
 

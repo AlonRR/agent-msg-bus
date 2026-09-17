@@ -340,7 +340,9 @@ fn update(from: Option<&str>, to: Option<&str>, dry_run: bool, force: bool) {
         }
         println!();
         println!("Each keeps the build it started with until it is restarted:");
-        println!("  - a session's `watch` updates when that session re-arms its subscription;");
+        println!("  - a session picks the new build up at its next start, when the SessionStart");
+        println!("    hook runs the installed binary (a `watch`, if one was deliberately started,");
+        println!("    keeps the old build until that watch is restarted);");
         println!("  - the relay updates only when the relay is restarted, which is a decision about");
         println!("    whether this machine can get its relay back — check that its supervisor can");
         println!("    actually relaunch it BEFORE stopping it.");
@@ -713,15 +715,16 @@ fn run_client(cli: &Cli) {
                     println!("  note: nothing was waiting for {from} — the migration is still in");
                     println!("        effect for anything sent to that name from now on.");
                 }
-                println!("{to} is now a registered address; re-arm your subscription against it.");
+                println!("{to} is now a registered address. Mail for it queues in the broker; read");
+                println!("it with `read {to}`. Nothing needs arming.");
             })
             .map_err(Into::into),
         Cmd::Pin { addr } => match agent_msg_bus::hook::set_pin(addr) {
             Ok(p) => {
                 println!("pinned this session to {addr}");
                 println!("  {}", p.display());
-                println!("Re-run the SessionStart hook or `whoami` to see it take effect, and");
-                println!("re-arm your Monitor subscription against the new address.");
+                println!("Re-run the SessionStart hook or `whoami` to see it take effect.");
+                println!("Mail for the new address queues in the broker; nothing needs arming.");
                 Ok(())
             }
             Err(e) => Err(e.into()),
