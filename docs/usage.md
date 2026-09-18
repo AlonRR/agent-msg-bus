@@ -72,7 +72,8 @@ decision for a person.
 the new one copied into the freed path. **Nothing is killed and nothing is restarted.** Processes
 already running carry on with the old file, undisturbed:
 
-- a session's `watch` picks up the new build when that session **re-arms its subscription**;
+- a session picks the new build up at its **next start**, when the SessionStart hook runs the
+  installed binary (a `watch`, if one was deliberately started, keeps its build until restarted);
 - the relay picks it up only when the **relay is restarted**.
 
 That last one is a decision, not a step. Restarting the relay makes every session on the machine

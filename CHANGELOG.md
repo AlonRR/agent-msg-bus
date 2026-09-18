@@ -22,6 +22,20 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Changed
+
+- **Example addresses no longer carry real machine names.** Two of them appeared 43 times across the
+  docs, the changelog, doc comments and test data, as the machine half of example bus addresses. They
+  are now the `machine-a` / `machine-b` placeholders the rest of the documentation already used, so
+  the convention is consistent and the repo carries no real host names. No behaviour change: every
+  occurrence was prose or test data, and the addressing format is untouched. Raised by a sweep of the
+  repositories planned for release.
+- **`docs/plan.md` now says outright that its addresses and host names are illustrative** — and why
+  they are deliberately private-range rather than RFC 5737 documentation addresses: the client-side
+  guard being demonstrated refuses an address *for being private*, so a documentation-range example
+  would make the quoted refusals nonsense. The same sweep asked whether one of them was a live
+  address; it is not, and now the page says so rather than leaving a reader to work it out.
+
 ## [0.4.18] — 2026-09-17
 
 ### Changed

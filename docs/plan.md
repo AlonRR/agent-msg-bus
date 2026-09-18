@@ -173,6 +173,13 @@ wss://msgbus.example.internal    -> "msgbus.example.internal resolves to <proxy-
                               link-local, or cloud-metadata range"
 ```
 
+⚠️ **Every address and hostname on this page is illustrative.** `10.0.0.x` and `*.example.internal`
+are stand-ins for whatever a real deployment uses; none of them is any machine this was built on, and
+the same goes for the `machine-a` / `machine-b` / `CT 1xx` names. They are deliberately **not** RFC
+5737 documentation addresses (`192.0.2.x`): the guard being demonstrated refuses an address *because
+it is in a private range*, so an example outside that range would make the quoted refusals nonsense.
+A private example that belongs to nobody is the honest way to show it.
+
 This is a **client-side SSRF guard**, not a network, firewall, TLS or CA problem:
 
 - HTTP from machine-a to `<broker-ip>:9450` works (`register`, `peers` both fine over the LAN).
