@@ -109,11 +109,18 @@ Where it looks for a build, in order — explicit beats ambient:
 |---|---|
 | `--from <path>` | one-off, or a script that already knows |
 | `AMB_UPDATE_SOURCE` | per-machine, set by whatever starts the fleet |
-| `update_source` in `~/.agent-msg-bus/config.json` | the normal answer for a machine that is not a dev box |
-| this repo's `target/release` build | a machine that builds its own, checked last because it is the source that goes stale by accident |
+| `update_source` in `~/.agent-msg-bus/config.json` | the normal answer, and the one to reach for |
 
 **A machine with none of those set never self-updates**, and that is deliberate: guessing a source
 unattended is how a working binary gets replaced by a worse one.
+
+⚠️ **There is no implicit source, and in particular not this repo's `target/release` build.** 0.4.19
+had that fallback for one day. `default_source_path` is relative, so it resolved only when the
+command happened to run inside the repo: from a repo shell `self-update` installed the local build,
+and from a startup task — the reason the command exists — the same command silently did nothing.
+Making the path absolute would have fixed the inconsistency and kept the real hazard, which is that a
+logon would install whatever that machine last happened to compile. Use `update` for the by-hand
+path; it still defaults to the repo build, because a person types it standing in the repo.
 
 ⚠️ **It always exits 0**, including when the swap fails. The caller is a boot task with a fleet to
 start, and a machine on yesterday's build is a much smaller problem than a fleet that did not come up

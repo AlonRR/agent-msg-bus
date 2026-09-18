@@ -386,16 +386,14 @@ fn self_update(from: Option<&str>, to: Option<&str>, dry_run: bool) {
     let to = to.map(std::path::PathBuf::from).unwrap_or_else(up::default_install_path);
     let cfg_source = agent_msg_bus::hook::load_config().map(|c| c.update_source).unwrap_or_default();
     let env_source = std::env::var("AMB_UPDATE_SOURCE").unwrap_or_default();
-    let repo_build = up::default_source_path();
-    let repo_build = if repo_build.exists() { Some(repo_build) } else { None };
 
-    let Some(from) = up::resolve_source(
-        from,
-        Some(env_source.as_str()),
-        Some(cfg_source.as_str()),
-        repo_build.as_deref(),
-    ) else {
-        println!("self-update: no source configured on this machine; nothing to do.");
+    let Some(from) = up::resolve_source(from, Some(env_source.as_str()), Some(cfg_source.as_str()))
+    else {
+        println!(
+            "self-update: no source configured on this machine; nothing to do. Set `update_source` \
+             in the config file (or AMB_UPDATE_SOURCE) to the binary this machine should install \
+             from. There is deliberately no implicit source — see `update` for the by-hand path."
+        );
         return;
     };
     if !from.exists() {

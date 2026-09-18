@@ -22,6 +22,26 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.20] — 2026-09-18
+
+### Fixed
+
+- **`self-update`'s implicit fallback to this repo's `target/release` build is gone.** It lasted one
+  day and was worse than having no fallback: `default_source_path` is *relative*, so it resolved only
+  when the command happened to be running inside the repo. From a repo shell `self-update` installed
+  the local build; from a startup task — the entire reason the command exists — the same command
+  silently found nothing and reported "no source configured". One command, two behaviours, decided by
+  the working directory. Found by the session that wired it into a real starter, within a day of it
+  shipping, because it ran the command from where it would actually run rather than from the repo.
+- Making the path absolute would have fixed the inconsistency and kept the real hazard: a logon would
+  then install whatever that machine last happened to compile, which is the shape of the near-
+  downgrade on 16 Sep. **An unattended updater takes an explicit source or does nothing**, so
+  `self-update` now resolves `--from`, `AMB_UPDATE_SOURCE` and `update_source` and stops there,
+  saying what to set when it finds none. `update` is unchanged and still defaults to the repo build —
+  a person types that one standing in the repo.
+
+## [0.4.19] — 2026-09-18
+
 ### Added
 
 - **`self-update`: one fixed line for a machine's startup script, so the script never needs changing

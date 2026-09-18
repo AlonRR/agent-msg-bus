@@ -130,12 +130,7 @@ pub enum SelfUpdate {
 /// Explicit beats ambient, and the repo build is last because it is the one that is stale by
 /// accident: it is whatever was last compiled on that machine, which on 16 Sep 2026 was seven
 /// releases behind what was installed.
-pub fn resolve_source(
-    cli: Option<&str>,
-    env: Option<&str>,
-    config: Option<&str>,
-    repo_build: Option<&Path>,
-) -> Option<PathBuf> {
+pub fn resolve_source(cli: Option<&str>, env: Option<&str>, config: Option<&str>) -> Option<PathBuf> {
     // An empty string is "unset", not the current directory: it is what an untouched config field
     // and an exported-but-empty variable both look like, and treating it as a path would point the
     // installer at whatever happened to be there.
@@ -144,7 +139,19 @@ pub fn resolve_source(
             return Some(PathBuf::from(s));
         }
     }
-    repo_build.map(|p| p.to_path_buf())
+    // ⛔ NO IMPLICIT FALLBACK, and in particular not this repo's `target/release` build.
+    //
+    // 0.4.19 had one, and it was worse than useless: `default_source_path` is RELATIVE, so it
+    // resolved only when the process happened to be running inside the repo. Run from a repo shell
+    // `self-update` installed the local build; run from a startup task — the entire reason the
+    // command exists — the same command silently found nothing. One command, two behaviours, decided
+    // by the working directory. Reported from a real starter within a day of shipping it.
+    //
+    // Making the path absolute would have fixed the inconsistency and kept the real hazard: a
+    // logon would install whatever that machine last happened to compile, which is how the 16 Sep
+    // near-downgrade happened. An unattended updater takes an explicit source or does nothing.
+    // `update` keeps the repo default — it is typed by a person standing in the repo.
+    None
 }
 
 /// What to do, given the source's version and the installed one. Pure, so the interesting
@@ -478,50 +485,45 @@ mod tests {
 
     // ---- self-update: where the build comes from, and whether to take it ----
 
-    fn repo() -> PathBuf {
-        PathBuf::from("repo/target/release/agent-msg-bus")
-    }
-
     /// Explicit beats ambient, every time. A machine is told to use a specific binary precisely
     /// when the ambient answer is wrong, so the ambient answer must never win.
     #[test]
     fn an_explicit_source_beats_every_ambient_one() {
-        let got = resolve_source(Some("cli.exe"), Some("env.exe"), Some("cfg.exe"), Some(&repo()));
-        assert_eq!(got, Some(PathBuf::from("cli.exe")));
+        assert_eq!(
+            resolve_source(Some("cli.exe"), Some("env.exe"), Some("cfg.exe")),
+            Some(PathBuf::from("cli.exe"))
+        );
     }
 
     #[test]
-    fn the_environment_beats_the_config_and_the_repo_build() {
-        let got = resolve_source(None, Some("env.exe"), Some("cfg.exe"), Some(&repo()));
-        assert_eq!(got, Some(PathBuf::from("env.exe")));
+    fn the_environment_beats_the_config() {
+        assert_eq!(resolve_source(None, Some("env.exe"), Some("cfg.exe")), Some(PathBuf::from("env.exe")));
     }
 
     #[test]
-    fn the_config_beats_the_repo_build() {
-        let got = resolve_source(None, None, Some("cfg.exe"), Some(&repo()));
-        assert_eq!(got, Some(PathBuf::from("cfg.exe")));
+    fn the_config_is_used_when_nothing_else_is_given() {
+        assert_eq!(resolve_source(None, None, Some("cfg.exe")), Some(PathBuf::from("cfg.exe")));
     }
 
-    /// The repo build is last on purpose: it is the source that goes stale by accident, and it is
-    /// what made a bare `update` a seven-release downgrade on 16 Sep 2026.
+    /// ⛔ THE 0.4.19 DEFECT, pinned so it cannot come back. There was a fallback to this repo's
+    /// `target/release` build, and `default_source_path` is RELATIVE — so the fallback resolved
+    /// only when the process happened to be running inside the repo. From a repo shell the command
+    /// installed the local build; from a startup task, which is the reason it exists, the same
+    /// command silently found nothing. Reported from a real starter within a day of shipping it.
+    ///
+    /// An unattended updater takes an explicit source or does nothing at all. There is no third
+    /// option that is not "install whatever this machine last happened to compile".
     #[test]
-    fn the_repo_build_is_the_last_resort() {
-        assert_eq!(resolve_source(None, None, None, Some(&repo())), Some(repo()));
-    }
-
-    /// ⛔ A machine nobody configured must NEVER guess. Silence is the safe answer here: this runs
-    /// unattended at boot, where guessing wrong replaces a working binary on every machine that
-    /// happens to have a stale file lying around.
-    #[test]
-    fn nothing_configured_means_no_source_rather_than_a_guess() {
-        assert_eq!(resolve_source(None, None, None, None), None);
+    fn nothing_configured_means_no_source_and_never_an_implicit_repo_build() {
+        assert_eq!(resolve_source(None, None, None), None);
     }
 
     /// An empty string is "unset", not a path to the current directory. It is what an untouched
     /// config field and an exported-but-empty variable both look like.
     #[test]
     fn an_empty_setting_counts_as_unset() {
-        assert_eq!(resolve_source(Some(""), Some(""), Some(""), None), None);
+        assert_eq!(resolve_source(Some(""), Some(""), Some("")), None);
+        assert_eq!(resolve_source(Some("   "), None, None), None);
     }
 
     #[test]
