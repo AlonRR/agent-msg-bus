@@ -92,6 +92,38 @@ v0.4.17 an older source is refused, naming both versions. Build a current one wi
 --release` first, or point `--from` at the binary you actually mean. `--force` installs an older
 build deliberately, which is how a rollback is done.
 
+## Keeping a machine current without touching its startup script
+
+`agent-msg-bus self-update` is built to be called by a machine's startup script, once per boot, with
+no arguments. Every decision lives in the binary, so **the line in the startup script never has to
+change again** — which is the point: a launcher that needs editing whenever the update policy changes
+is a launcher that will be wrong on some machine.
+
+```
+agent-msg-bus self-update          # install a newer build if there is one, otherwise do nothing
+```
+
+Where it looks for a build, in order — explicit beats ambient:
+
+| Source | When to use it |
+|---|---|
+| `--from <path>` | one-off, or a script that already knows |
+| `AMB_UPDATE_SOURCE` | per-machine, set by whatever starts the fleet |
+| `update_source` in `~/.agent-msg-bus/config.json` | the normal answer for a machine that is not a dev box |
+| this repo's `target/release` build | a machine that builds its own, checked last because it is the source that goes stale by accident |
+
+**A machine with none of those set never self-updates**, and that is deliberate: guessing a source
+unattended is how a working binary gets replaced by a worse one.
+
+⚠️ **It always exits 0**, including when the swap fails. The caller is a boot task with a fleet to
+start, and a machine on yesterday's build is a much smaller problem than a fleet that did not come up
+because an update check went wrong. A failure is printed to stderr — check the launcher's log, not
+the exit code. `--dry-run` says what it would do and changes nothing.
+
+An older source is refused here as well, and it matters more here than by hand: unattended, a stale
+source would reinstall itself at every boot. A version that cannot be compared with the installed one
+installs nothing and says so.
+
 ## ⛔ Do not arm a subscription. Read your mail instead.
 
 **A session holds no `Monitor` subscription by default, and that is a deliberate standing decision

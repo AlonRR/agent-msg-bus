@@ -32,6 +32,11 @@ pub struct Config {
     /// Where the machine's relay listens. Defaults to the documented port.
     #[serde(default = "default_relay")]
     pub relay: String,
+    /// Where `self-update` looks for a newer binary on this machine. Empty means unset, and unset
+    /// means this machine never self-updates — the safe default for a machine nobody has told where
+    /// builds come from.
+    #[serde(default)]
+    pub update_source: String,
 }
 
 fn default_relay() -> String {

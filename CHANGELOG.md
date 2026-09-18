@@ -22,6 +22,26 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Added
+
+- **`self-update`: one fixed line for a machine's startup script, so the script never needs changing
+  again.** Every decision about whether to update lives in the binary, not in the launcher: the
+  launcher calls `agent-msg-bus self-update` once per boot and the binary works out whether there is
+  anything to do. The source is the first of `--from`, `AMB_UPDATE_SOURCE`, `update_source` in the
+  config file, then this repo's `target/release` build if there is one — explicit beats ambient, and
+  the repo build is last because it is the one that goes stale by accident. A machine with none of
+  those configured never self-updates, which is the safe default for one nobody has told where
+  builds come from.
+- **It always exits 0**, including when the swap itself fails, because the caller is a boot task with
+  a fleet to start: a machine left on yesterday's build is a far smaller problem than a fleet that
+  did not come up because an update check went wrong. Failures are printed to stderr rather than
+  swallowed. Nothing is killed or restarted, exactly as `update`.
+- An older source is refused here too, and that matters more unattended than it does by hand: a
+  stale source would otherwise reinstall itself at every boot. A version that cannot be compared
+  installs nothing and says so, rather than being turned into a verdict.
+- `update_source` is a new optional config key. Absent means unset, and old config files keep
+  working unchanged.
+
 ### Changed
 
 - **Example addresses no longer carry real machine names.** Two of them appeared 43 times across the

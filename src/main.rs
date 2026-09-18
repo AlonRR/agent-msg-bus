@@ -202,6 +202,27 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Install a newer build if one is available, and do nothing otherwise. Never fails.
+    ///
+    /// Built for a machine's startup script to call, unattended, once per boot: it decides for
+    /// itself whether there is anything to do and **always exits 0**, because a starter that cannot
+    /// bring the fleet up because an update check failed is worse than a machine on yesterday's
+    /// build. Nothing is killed or restarted, exactly as `update`.
+    ///
+    /// The source is the first of: `--from`, `AMB_UPDATE_SOURCE`, `update_source` in the config
+    /// file, then this repo's `target/release` build if there is one. A machine with none of those
+    /// never self-updates, which is the safe default for one nobody has told where builds come from.
+    SelfUpdate {
+        /// Binary to install from, overriding every other source.
+        #[arg(long)]
+        from: Option<String>,
+        /// Installed binary to replace. Defaults to this platform's install location.
+        #[arg(long)]
+        to: Option<String>,
+        /// Say what would happen, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Subscribe and print each message as a line, reconnecting forever.
     ///
     /// Use this with Monitor's `command:` form instead of `ws:`. Monitor's ws source ENDS the watch
@@ -266,6 +287,9 @@ fn main() {
         Cmd::Whoami => whoami(&cli),
         Cmd::Update { ref from, ref to, dry_run, force } => {
             update(from.as_deref(), to.as_deref(), dry_run, force)
+        }
+        Cmd::SelfUpdate { ref from, ref to, dry_run } => {
+            self_update(from.as_deref(), to.as_deref(), dry_run)
         }
         _ => run_client(&cli),
     }
@@ -346,6 +370,81 @@ fn update(from: Option<&str>, to: Option<&str>, dry_run: bool, force: bool) {
         println!("  - the relay updates only when the relay is restarted, which is a decision about");
         println!("    whether this machine can get its relay back — check that its supervisor can");
         println!("    actually relaunch it BEFORE stopping it.");
+    }
+}
+
+/// `self-update` — install a newer build if there is one, and never be the reason a boot fails.
+///
+/// The starter script calls this once per boot and passes no arguments, which is the whole point:
+/// every decision lives here, so the starter is one fixed line that never needs revisiting. It
+/// **always exits 0**, including when the swap itself fails — a machine left on yesterday's build is
+/// a much smaller problem than a fleet that did not start because an update check went wrong. A
+/// failure is still said out loud, on stderr, rather than swallowed.
+fn self_update(from: Option<&str>, to: Option<&str>, dry_run: bool) {
+    use agent_msg_bus::update as up;
+
+    let to = to.map(std::path::PathBuf::from).unwrap_or_else(up::default_install_path);
+    let cfg_source = agent_msg_bus::hook::load_config().map(|c| c.update_source).unwrap_or_default();
+    let env_source = std::env::var("AMB_UPDATE_SOURCE").unwrap_or_default();
+    let repo_build = up::default_source_path();
+    let repo_build = if repo_build.exists() { Some(repo_build) } else { None };
+
+    let Some(from) = up::resolve_source(
+        from,
+        Some(env_source.as_str()),
+        Some(cfg_source.as_str()),
+        repo_build.as_deref(),
+    ) else {
+        println!("self-update: no source configured on this machine; nothing to do.");
+        return;
+    };
+    if !from.exists() {
+        println!("self-update: source {} does not exist; nothing to do.", from.display());
+        return;
+    }
+
+    let source_version = up::version_of(&from);
+    let installed = if to.exists() { up::version_of(&to) } else { None };
+
+    match up::decide(source_version.as_deref(), installed.as_deref()) {
+        up::SelfUpdate::NoSource => {
+            println!("self-update: {} could not report a version; nothing to do.", from.display())
+        }
+        up::SelfUpdate::AlreadyCurrent(v) => println!("self-update: already on {v}; nothing to do."),
+        up::SelfUpdate::SourceIsOlder { source, installed } => println!(
+            "self-update: the source is {source} and {installed} is installed — keeping the newer \
+             one. Nothing to do."
+        ),
+        up::SelfUpdate::CannotCompare { source, installed } => println!(
+            "self-update: cannot tell whether {source} is newer than the installed {installed}, so \
+             nothing was changed."
+        ),
+        up::SelfUpdate::Install { version } => {
+            if dry_run {
+                println!(
+                    "self-update: --dry-run: would install {version} from {} over {}",
+                    from.display(),
+                    to.display()
+                );
+                return;
+            }
+            match up::plan(&from, &to).and_then(|p| up::apply(&p).map(|()| p)) {
+                Ok(p) => {
+                    println!("self-update: installed {version} at {}", p.to.display());
+                    println!("self-update: previous build kept at {}", p.backup.display());
+                    let holders = up::processes_still_on_the_old_build();
+                    if !holders.is_empty() {
+                        println!(
+                            "self-update: {} process(es) still run the old build — nothing was \
+                             killed, by design; each picks the new one up when it next starts.",
+                            holders.len()
+                        );
+                    }
+                }
+                // Loud, and still exit 0: the caller is a boot task that has a fleet to start.
+                Err(e) => eprintln!("self-update: FAILED to install {version}: {e} — continuing."),
+            }
+        }
     }
 }
 
@@ -821,7 +920,9 @@ fn run_client(cli: &Cli) {
             Ok(())
         }
         Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami
-        | Cmd::Watch { .. } | Cmd::Update { .. } => unreachable!("handled in main"),
+        | Cmd::Watch { .. } | Cmd::Update { .. } | Cmd::SelfUpdate { .. } => {
+            unreachable!("handled in main")
+        }
     };
     if let Err(e) = result {
         eprintln!("agent-msg-bus: {e}");

@@ -104,6 +104,76 @@ impl Plan {
     }
 }
 
+/// What a `self-update` run decided. Every variant is a normal outcome, including the ones that do
+/// nothing: this runs from a boot task, where an error that stops the fleet starting is far worse
+/// than a machine staying on yesterday's build.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelfUpdate {
+    /// No source configured and none found. Not an error — a machine that was never told where new
+    /// builds come from should quietly never self-update.
+    NoSource,
+    /// The installed binary already reports the source's version.
+    AlreadyCurrent(String),
+    /// The source is OLDER. Refused for the same reason `update` refuses it, and it matters more
+    /// here: this path runs unattended, so a stale source would reinstall itself at every boot.
+    SourceIsOlder { source: String, installed: String },
+    /// A newer build is available and should be swapped in.
+    Install { version: String },
+    /// One side's version is not a plain `x.y.z`, so "newer" cannot be established. Does nothing,
+    /// and says so: a comparison that cannot be made is not evidence either way, and installing on
+    /// a guess is how an unattended path replaces a working binary with a worse one.
+    CannotCompare { source: String, installed: String },
+}
+
+/// Which binary `self-update` installs from, in precedence order.
+///
+/// Explicit beats ambient, and the repo build is last because it is the one that is stale by
+/// accident: it is whatever was last compiled on that machine, which on 16 Sep 2026 was seven
+/// releases behind what was installed.
+pub fn resolve_source(
+    cli: Option<&str>,
+    env: Option<&str>,
+    config: Option<&str>,
+    repo_build: Option<&Path>,
+) -> Option<PathBuf> {
+    // An empty string is "unset", not the current directory: it is what an untouched config field
+    // and an exported-but-empty variable both look like, and treating it as a path would point the
+    // installer at whatever happened to be there.
+    for candidate in [cli, env, config] {
+        if let Some(s) = candidate.map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(PathBuf::from(s));
+        }
+    }
+    repo_build.map(|p| p.to_path_buf())
+}
+
+/// What to do, given the source's version and the installed one. Pure, so the interesting
+/// combinations are testable without touching a filesystem.
+pub fn decide(source_version: Option<&str>, installed: Option<&str>) -> SelfUpdate {
+    let Some(source) = source_version else {
+        return SelfUpdate::NoSource;
+    };
+    // Nothing installed is a first install, not a downgrade — and it is the case this path exists
+    // to fix on a machine that has never had the binary.
+    let Some(installed) = installed else {
+        return SelfUpdate::Install { version: source.to_string() };
+    };
+    if source == installed {
+        return SelfUpdate::AlreadyCurrent(installed.to_string());
+    }
+    match (version_triple(source), version_triple(installed)) {
+        (Some(new), Some(old)) if new > old => SelfUpdate::Install { version: source.to_string() },
+        (Some(_), Some(_)) => SelfUpdate::SourceIsOlder {
+            source: source.to_string(),
+            installed: installed.to_string(),
+        },
+        _ => SelfUpdate::CannotCompare {
+            source: source.to_string(),
+            installed: installed.to_string(),
+        },
+    }
+}
+
 /// The three numbers in `x.y.z`, or `None` for anything else.
 ///
 /// Numeric on purpose: compared as text, "0.4.10" sorts below "0.4.9", which would get the
@@ -404,5 +474,114 @@ mod tests {
     #[test]
     fn an_installed_binary_that_cannot_report_a_version_is_never_refused() {
         assert!(versions("0.4.15", None).downgrade_refusal().is_none());
+    }
+
+    // ---- self-update: where the build comes from, and whether to take it ----
+
+    fn repo() -> PathBuf {
+        PathBuf::from("repo/target/release/agent-msg-bus")
+    }
+
+    /// Explicit beats ambient, every time. A machine is told to use a specific binary precisely
+    /// when the ambient answer is wrong, so the ambient answer must never win.
+    #[test]
+    fn an_explicit_source_beats_every_ambient_one() {
+        let got = resolve_source(Some("cli.exe"), Some("env.exe"), Some("cfg.exe"), Some(&repo()));
+        assert_eq!(got, Some(PathBuf::from("cli.exe")));
+    }
+
+    #[test]
+    fn the_environment_beats_the_config_and_the_repo_build() {
+        let got = resolve_source(None, Some("env.exe"), Some("cfg.exe"), Some(&repo()));
+        assert_eq!(got, Some(PathBuf::from("env.exe")));
+    }
+
+    #[test]
+    fn the_config_beats_the_repo_build() {
+        let got = resolve_source(None, None, Some("cfg.exe"), Some(&repo()));
+        assert_eq!(got, Some(PathBuf::from("cfg.exe")));
+    }
+
+    /// The repo build is last on purpose: it is the source that goes stale by accident, and it is
+    /// what made a bare `update` a seven-release downgrade on 16 Sep 2026.
+    #[test]
+    fn the_repo_build_is_the_last_resort() {
+        assert_eq!(resolve_source(None, None, None, Some(&repo())), Some(repo()));
+    }
+
+    /// ⛔ A machine nobody configured must NEVER guess. Silence is the safe answer here: this runs
+    /// unattended at boot, where guessing wrong replaces a working binary on every machine that
+    /// happens to have a stale file lying around.
+    #[test]
+    fn nothing_configured_means_no_source_rather_than_a_guess() {
+        assert_eq!(resolve_source(None, None, None, None), None);
+    }
+
+    /// An empty string is "unset", not a path to the current directory. It is what an untouched
+    /// config field and an exported-but-empty variable both look like.
+    #[test]
+    fn an_empty_setting_counts_as_unset() {
+        assert_eq!(resolve_source(Some(""), Some(""), Some(""), None), None);
+    }
+
+    #[test]
+    fn a_newer_source_is_installed() {
+        assert_eq!(
+            decide(Some("0.4.19"), Some("0.4.18")),
+            SelfUpdate::Install { version: "0.4.19".into() }
+        );
+    }
+
+    #[test]
+    fn an_equal_version_is_already_current_and_does_nothing() {
+        assert_eq!(decide(Some("0.4.18"), Some("0.4.18")), SelfUpdate::AlreadyCurrent("0.4.18".into()));
+    }
+
+    /// ⛔ The one that matters unattended: a stale source must not be reinstalled at every boot.
+    #[test]
+    fn an_older_source_is_refused_rather_than_reinstalled_every_boot() {
+        assert_eq!(
+            decide(Some("0.4.8"), Some("0.4.18")),
+            SelfUpdate::SourceIsOlder { source: "0.4.8".into(), installed: "0.4.18".into() }
+        );
+    }
+
+    /// Versions compare numerically here too — the same trap as the downgrade guard.
+    #[test]
+    fn self_update_compares_versions_numerically() {
+        assert_eq!(decide(Some("0.4.10"), Some("0.4.9")), SelfUpdate::Install { version: "0.4.10".into() });
+        assert!(matches!(decide(Some("0.4.9"), Some("0.4.10")), SelfUpdate::SourceIsOlder { .. }));
+    }
+
+    /// Nothing installed yet is a first install, not a downgrade.
+    #[test]
+    fn a_first_install_is_an_install() {
+        assert_eq!(decide(Some("0.4.19"), None), SelfUpdate::Install { version: "0.4.19".into() });
+    }
+
+    #[test]
+    fn no_source_version_is_no_source() {
+        assert_eq!(decide(None, Some("0.4.18")), SelfUpdate::NoSource);
+    }
+
+    /// A version neither side can parse must not be turned into a verdict. Unattended, "install
+    /// because I could not tell" is how a working binary gets replaced by a worse one.
+    #[test]
+    fn a_version_that_cannot_be_compared_installs_nothing_and_says_so() {
+        assert_eq!(
+            decide(Some("nightly-abc"), Some("0.4.18")),
+            SelfUpdate::CannotCompare { source: "nightly-abc".into(), installed: "0.4.18".into() }
+        );
+        assert!(matches!(
+            decide(Some("0.4.18"), Some("built-from-source")),
+            SelfUpdate::CannotCompare { .. }
+        ));
+    }
+
+    /// Two identical unparseable strings are still "the same build", which is the common case for a
+    /// locally built binary that has not moved.
+    #[test]
+    fn identical_unparseable_versions_are_already_current() {
+        assert_eq!(decide(Some("nightly-abc"), Some("nightly-abc")), SelfUpdate::AlreadyCurrent("nightly-abc".into()));
     }
 }
