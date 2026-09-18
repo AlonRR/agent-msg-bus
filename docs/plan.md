@@ -197,7 +197,7 @@ Phase 2 check is what found it.
 
 | Option | Shape | Cost |
 |---|---|---|
-| **Loopback relay** (recommended) | `agent-msg-bus relay` runs per machine, holds the LAN connection to the broker host, re-serves on `127.0.0.1`. Monitor connects to loopback, which is permitted | ~1 phase of work; one supervised process per machine; owns reconnect logic, which requirement 1 needed anyway |
+| **Loopback relay** (recommended) | `agent-msg-bus relay` runs per machine, holds the LAN connection to the broker, re-serves on `127.0.0.1`. Monitor connects to loopback, which is permitted | ~1 phase of work; one supervised process per machine; owns reconnect logic, which requirement 1 needed anyway |
 | **SSH tunnel** | `ssh -N -L 9450:127.0.0.1:9450 lab-server`, Monitor hits loopback | No new code, but a tunnel to supervise per machine, with no reconnect or backoff of its own |
 | **Channels** | The MCP server is an ordinary local subprocess with no SSRF guard, so it can reach the LAN directly | Removes the blocker *and* the arming step, but is research preview, needs a launch flag on every session, and Node/Bun everywhere |
 
@@ -211,7 +211,7 @@ to contain.
 ## Architecture
 
 ```
-    machine-a session         machine-b session        server claude-remote-control@<repo>
+    machine-a session         machine-b session       server claude-remote-control@<repo>
          │                     │                            │
          └──── Monitor ws ─────┴────────────────────────────┘
                     ws://<host>:PORT/sub?addr=…&token=…
@@ -225,7 +225,8 @@ to contain.
     agent-msg-bus CLI     SessionStart hook        Channels adapter (Phase 9)
 ```
 
-CT hostname and Caddy vhost are a Phase 2 decision, deliberately not fixed here.
+The broker host's name and its reverse-proxy vhost are a Phase 2 decision, deliberately not fixed
+here.
 
 ### Wire contract — FROZEN. This is the stable interface.
 
@@ -294,12 +295,12 @@ words, never the user's.
 | 1c | HTTP `/register` `/send` `/ack` `/peers` | Tests green | ✅ `ca7a8d5` |
 | 1d | WebSocket `/sub` + replay on reconnect | Tests green | ✅ `ca7a8d5` |
 | 1e | Token auth | Tests green | ✅ `ca7a8d5` |
-| 2 | Deploy the broker to its host | Service live, firewall, Caddy vhost, Proxmox notes, homelab docs | ✅ live on the broker host |
+| 2 | Deploy the broker to its host | Service live, firewall, reverse-proxy vhost, hypervisor notes, homelab docs | ✅ live on the broker host |
 | 2b | Loopback relay (**unplanned** — forced by the private-IP guard) | Cross-host delivery verified | ✅ `1875442`, made per-machine in `2856a43` |
 | 3 | Client CLI: `send` / `peers` / `ack` / `forget` / `whoami` | Works on Windows **and** Linux | ✅ both — 24 tests green on each |
 | 4 | `SessionStart` hook: register + tell the session its address | New session self-registers with no human step | ✅ `2856a43`, in the binary rather than per-OS scripts |
 | 5 | machine-a cutover, both buses in parallel | Round-trip between two real machine-a sessions | ✅ relay is a Scheduled Task; a session is live on the bus |
-| 6 | the Linux server Remote Control sessions | Round-trip machine-a ↔ the Linux server | ✅ a message from the Linux server woke an machine-a session |
+| 6 | Linux server Remote Control sessions | Round-trip machine-a ↔ the server | ✅ a message from the server woke a machine-a session |
 | 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ✅ **passed** — 2 messages queued while offline, both replayed in order on reconnect, none lost |
 | 8 | Retire old msgbus | Hooks removed, skill deprecated, data archived | ✅ **deprecated, not deleted** — see below |
 | 9 | Channels adapter | Delivery with no arming step | ⏸️ **superseded by Phase 10** — see below |

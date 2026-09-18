@@ -30,6 +30,11 @@ explicitly not part of it and can change in a patch.
   the convention is consistent and the repo carries no real host names. No behaviour change: every
   occurrence was prose or test data, and the addressing format is untouched. Raised by a sweep of the
   repositories planned for release.
+- **Container ids are gone from the design doc and one source comment**, 18 of them, replaced by the
+  role each was standing for: the broker host, the Linux server, the Gitea host, the MQTT container,
+  the reverse proxy. An id identifies this particular installation and means nothing to a reader
+  without its inventory; the role is what the sentence was always about. Products stay named — the
+  reverse proxy and the hypervisor are named the same way the sessions this bus serves are.
 - **`docs/plan.md` now says outright that its addresses and host names are illustrative** — and why
   they are deliberately private-range rather than RFC 5737 documentation addresses: the client-side
   guard being demonstrated refuses an address *for being private*, so a documentation-range example
