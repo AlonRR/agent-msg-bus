@@ -1,0 +1,8 @@
+# The projects this repo holds. Schema: alon/tasks SCHEMA.md
+projects:
+  - name:     Agent message bus
+    kind:     maintain
+    state:    needs-attention
+    next:     "machine-a client is 0.4.20 while the broker and the machine-b relay are 0.4.15"
+    trackers: [README.md]
+    review:   2026-09-20
