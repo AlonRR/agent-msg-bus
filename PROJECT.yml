@@ -1,4 +1,6 @@
 # The projects this repo holds. Schema: alon/tasks SCHEMA.md
+# schema version: set by `ledger migrate` or `ledger init` -- do not edit by hand
+schema: 1
 projects:
   - name:     Agent message bus
     kind:     maintain
