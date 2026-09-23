@@ -1104,6 +1104,22 @@ pinning a role deliberately, not by making every session's identity accidental.
 
 ## Known limitations (accepted for v1, written down so they are not rediscovered as surprises)
 
+### `Instant` keeps counting while the machine is suspended — two defects so far, one fact
+
+On the Windows clients this bus runs on, `std::time::Instant` (and so tokio's timers, which are
+built on it) **advances through a suspend**. Measured, twice, on the one machine that sleeps:
+
+| Release | What it broke |
+|---|---|
+| 0.4.15 | The relay booked a ~578-minute sleep as one connect attempt's retry work, so the "this process was suspended" qualifier — built to explain exactly that — stayed silent |
+| 0.4.21 | tokio's default `Burst` delivered the heartbeat's whole missed-tick backlog on waking, so `subscription_dead`'s "two consecutive checks" were seconds apart instead of five minutes |
+
+**Any timer or elapsed-time measurement here that is meant to mean "time this process was actually
+running" has to account for this**, and the default behaviour of both `Instant` and
+`tokio::time::interval` will not. Set `MissedTickBehavior::Delay` on a periodic check whose ticks
+must be an interval apart, and bound a measured duration by what could genuinely have elapsed while
+running. A third instance should be caught by reading this paragraph, not by the laptop.
+
 - **Nothing lists mailboxes that hold unread mail and have no live subscriber.** Designed, not built;
   asked for by a session that had lost mail this way and then found the same shape bus-wide. A
   per-*message* orphan at least appears in `orphans`; a whole dead mailbox shows only as a number in

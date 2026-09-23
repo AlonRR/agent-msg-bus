@@ -3,7 +3,7 @@ name = "agent-msg-bus"
 # THE SINGLE SOURCE OF TRUTH FOR THE VERSION. `--version` reads it via clap's `version` attribute,
 # and the release tag is `v` + this string. A test asserts the first of those two, so the only way
 # they can drift is a tag that does not match — see CHANGELOG.md for the release steps.
-version = "0.4.20"
+version = "0.4.21"
 edition = "2021"
 description = "Push-delivery message bus that lets separately-started Claude Code sessions message each other, and have the message acted on when it arrives."
 readme = "README.md"
@@ -32,3 +32,6 @@ ureq = { version = "2", features = ["json"] }
 tokio-tungstenite = "0.24"
 
 [dev-dependencies]
+# test-util: a paused clock, so a test can make time jump the way a suspended laptop does and then
+# watch what the heartbeat timer does on "waking". No new crate - a feature of the one above.
+tokio = { version = "1", features = ["test-util"] }

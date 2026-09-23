@@ -22,6 +22,36 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.21] — 2026-09-23
+
+### Fixed
+
+- **`subscription_dead`'s "two consecutive checks" did not hold across a resume — the one case it was
+  built for.** The heartbeat timer used tokio's default missed-tick behaviour, `Burst`, and on this
+  platform `Instant` keeps advancing while the machine is suspended (measured: the 0.4.15 relay
+  defect). So after a 2h54m sleep the timer owed ~34 ticks and fired them at once on waking; two of
+  them counted as "two consecutive checks" seconds apart, and the alarm fired about a minute after
+  resume. Reported from the field on 20 Sep by the session on the one machine that sleeps, which
+  asked exactly the right question — two checks, or two catch-up ticks? — and could not answer it
+  because the frames carried no time. The code answers it: catch-up ticks. That death was real, so
+  the alarm told the truth; the risk was the false positive 0.4.12 removed, a resume transient seen
+  twice within seconds.
+- The timer now uses `Delay`: the overdue check fires once, and the next is a full five minutes
+  later. Pinned by a paused-clock test that jumps three hours and asserts the confirming check waits
+  the full interval — it failed against the old timer, which is the reproduction.
+- The relay's 15-second watchdog has the same default and was checked and left alone: a burst there
+  only repeats a staleness test, and the first stale answer breaks out of the loop and drops the
+  timer, so it can act at most once. The broker's intervals run on a host that does not sleep and
+  are untouched, which keeps this release client-only.
+
+### Added
+
+- **Every `_watch` frame carries `at`, the UTC time the watch wrote it**, and the
+  `subscription_dead` alarm names both checks — when the run of not-live answers began and when it
+  was confirmed. The frames were timeless, so the only time anyone could put on an alarm was when a
+  session happened to read it, and the question above took two days of inference instead of a
+  glance at the stream.
+
 ## [0.4.20] — 2026-09-18
 
 ### Fixed

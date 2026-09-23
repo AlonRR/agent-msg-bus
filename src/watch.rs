@@ -62,6 +62,28 @@ fn version_skew(relay: &str) -> Option<String> {
 /// How often `watch` asks the broker whether this subscription still exists.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(300);
 
+/// The heartbeat's timer: consecutive ticks are always at least `HEARTBEAT_EVERY` apart.
+///
+/// **`MissedTickBehavior::Delay` is the whole point of this function.** tokio's default is `Burst`,
+/// which delivers every missed tick back-to-back until the timer has caught up — and on this
+/// platform `Instant` keeps advancing while the machine is suspended (measured: the 0.4.15 relay
+/// defect). So after a laptop slept for 2h54m the timer owed ~34 ticks and fired them at once on
+/// waking. `CONFIRM_NOT_LIVE` then counted two of them as "two consecutive checks" seconds apart —
+/// defeating the second check in the one case it exists for, a resume that looks like a death for
+/// its first minute. Reported from the field, 20 Sep 2026.
+///
+/// `Delay` fires the overdue tick once and schedules the next a full interval later, so a resume
+/// transient must survive two checks genuinely five minutes apart before anyone is alarmed.
+///
+/// The relay's 15-second watchdog has the same default and was checked and left alone: a burst
+/// there only repeats a staleness test, and the first stale answer breaks out of the loop and
+/// drops the timer, so it can act at most once.
+fn heartbeat_timer() -> tokio::time::Interval {
+    let mut t = tokio::time::interval(HEARTBEAT_EVERY);
+    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    t
+}
+
 /// How many consecutive not-live answers before the alarm is raised.
 ///
 /// **A resume is briefly indistinguishable from a death, and it is not one.** While a laptop is
@@ -136,25 +158,36 @@ enum Beat {
 struct HeartbeatWatch {
     strikes: u32,
     announced_dead: bool,
+    /// When the current run of not-live answers began, as a UTC stamp. `None` while live.
+    first_not_live_at: Option<String>,
 }
 
 impl HeartbeatWatch {
     fn new() -> Self {
-        Self { strikes: 0, announced_dead: false }
+        Self { strikes: 0, announced_dead: false, first_not_live_at: None }
     }
 
-    fn observe(&mut self, live: Option<bool>, addr: &str, silent_for: Duration) -> Beat {
+    fn observe(&mut self, live: Option<bool>, addr: &str, silent_for: Duration, at: &str) -> Beat {
         // An unreachable broker resets the count rather than counting against the subscription:
         // being unable to ask is not evidence that this socket is dead.
         match live {
-            Some(false) => self.strikes += 1,
-            _ => self.strikes = 0,
+            Some(false) => {
+                self.strikes += 1;
+                self.first_not_live_at.get_or_insert_with(|| at.to_string());
+            }
+            _ => {
+                self.strikes = 0;
+                self.first_not_live_at = None;
+            }
         }
         match heartbeat_alarm(live, addr, silent_for, self.strikes) {
             // Said once per outage, like the relay's: repeating every five minutes is chatter.
+            // Both check times go in the alarm, so "were they an interval apart?" is answered by
+            // the alarm itself rather than reconstructed from whoever happened to notice it.
             Some(note) if !self.announced_dead => {
                 self.announced_dead = true;
-                Beat::Dead(note)
+                let since = self.first_not_live_at.as_deref().unwrap_or(at);
+                Beat::Dead(format!("{note} First not-live check {since}, confirmed {at} (UTC)."))
             }
             Some(_) => Beat::Quiet,
             // Recovery requires the broker to AFFIRM that the subscription is live. A `None` here
@@ -207,14 +240,35 @@ fn register_bound(addr: &str) {
 /// Emit a line describing the watcher's own connectivity. These are deliberately visible: a watcher
 /// that cannot reach its relay must not look like a quiet bus.
 fn status(state: &str, detail: &str) {
-    println!(
-        "{}",
-        serde_json::json!({
-            "_watch": state,
-            "detail": detail,
-            "note": "agent-msg-bus watch reporting its own connectivity, not a message from another session.",
-        })
-    );
+    println!("{}", status_frame(state, detail, &utc_stamp(time::OffsetDateTime::now_utc())));
+}
+
+/// One `_watch` frame. `at` is when the watch itself wrote it, in UTC.
+///
+/// The frames were timeless, so the only time anyone could put on an alarm was when a session
+/// happened to read it — unreliable by construction, since a session reads its notifications
+/// whenever its next turn comes. The watch's own clock is the only one that knows.
+fn status_frame(state: &str, detail: &str, at: &str) -> serde_json::Value {
+    serde_json::json!({
+        "_watch": state,
+        "at": at,
+        "detail": detail,
+        "note": "agent-msg-bus watch reporting its own connectivity, not a message from another session.",
+    })
+}
+
+/// `2026-09-20T17:31:05Z` — UTC, to the second, with the zone written out so nobody has to guess.
+fn utc_stamp(t: time::OffsetDateTime) -> String {
+    let t = t.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        t.year(),
+        t.month() as u8,
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second()
+    )
 }
 
 type Sock = tokio_tungstenite::WebSocketStream<
@@ -323,7 +377,7 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                 // Checked on a timer, reported only when the answer is wrong. A watcher can sit
                 // here for hours with an open socket and a subscription the broker has already
                 // forgotten; nothing at this end can tell, which is why the check asks the broker.
-                let mut heartbeat = tokio::time::interval(HEARTBEAT_EVERY);
+                let mut heartbeat = heartbeat_timer();
                 heartbeat.tick().await; // the first tick completes immediately
                 let mut last_frame = std::time::Instant::now();
                 let mut heartbeat_state = HeartbeatWatch::new();
@@ -344,6 +398,7 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
                                 broker_thinks_live(&bound),
                                 &bound,
                                 last_frame.elapsed(),
+                                &utc_stamp(time::OffsetDateTime::now_utc()),
                             ) {
                                 Beat::Dead(note) => status("subscription_dead", &note),
                                 Beat::Recovered => status(
@@ -446,7 +501,82 @@ mod heartbeat_tests {
     // the half that can over-suppress a real death or invent a recovery.
 
     fn beat(h: &mut HeartbeatWatch, live: Option<bool>) -> Beat {
-        h.observe(live, "machine-a/repo", Duration::from_secs(600))
+        h.observe(live, "machine-a/repo", Duration::from_secs(600), "2026-09-20T17:31:00Z")
+    }
+
+    fn beat_at(h: &mut HeartbeatWatch, live: Option<bool>, at: &str) -> Beat {
+        h.observe(live, "machine-a/repo", Duration::from_secs(600), at)
+    }
+
+    /// ⛔ THE DEFECT, reported from the only machine that sleeps: `subscription_dead` fired about a
+    /// minute after a 2h54m suspend. `Instant` keeps advancing while this platform is suspended —
+    /// measured, that is the 0.4.15 relay defect — and tokio's default missed-tick behaviour is
+    /// `Burst`, so on waking the timer delivered its whole backlog at once. "Two consecutive checks"
+    /// were seconds apart, in exactly the case the second check exists for.
+    ///
+    /// The paused clock stands in for the suspend: time jumps three hours with nothing ticking, then
+    /// the timer is polled again, as it is when the process resumes.
+    #[tokio::test(start_paused = true)]
+    async fn after_a_long_suspend_the_next_two_checks_are_still_a_full_interval_apart() {
+        let mut t = heartbeat_timer();
+        t.tick().await; // the immediate first tick, as in the loop
+        tokio::time::advance(Duration::from_secs(3 * 3600)).await; // asleep for three hours
+        t.tick().await; // the first check after waking: overdue, so it fires at once
+        let first = tokio::time::Instant::now();
+        t.tick().await; // the check that is supposed to confirm it
+        let gap = tokio::time::Instant::now() - first;
+        assert!(
+            gap >= HEARTBEAT_EVERY,
+            "the confirming check came {gap:?} after the first - a backlog burst, not a second look"
+        );
+    }
+
+    #[test]
+    fn a_timestamp_is_utc_to_the_second() {
+        let t = time::macros::datetime!(2026-09-20 17:31:05.678 UTC);
+        assert_eq!(utc_stamp(t), "2026-09-20T17:31:05Z");
+    }
+
+    /// The watch's frames were timeless, so the only time anyone could put on an alarm was when a
+    /// session happened to read it — which is how "were the two checks five minutes apart?" took two
+    /// days of inference instead of one glance at the stream.
+    #[test]
+    fn every_status_frame_says_when_it_was_written() {
+        let f = status_frame("subscription_dead", "detail", "2026-09-20T17:31:05Z");
+        assert_eq!(f["at"], "2026-09-20T17:31:05Z", "the frame carries no time: {f}");
+        assert_eq!(f["_watch"], "subscription_dead", "the frame lost its state: {f}");
+    }
+
+    /// The alarm names BOTH checks, so whether they were an interval apart is answerable from the
+    /// alarm itself rather than reconstructed from whoever noticed it.
+    #[test]
+    fn the_alarm_names_when_the_failures_began_and_when_they_were_confirmed() {
+        let mut h = HeartbeatWatch::new();
+        assert_eq!(beat_at(&mut h, Some(false), "2026-09-20T17:26:00Z"), Beat::Quiet);
+        match beat_at(&mut h, Some(false), "2026-09-20T17:31:00Z") {
+            Beat::Dead(note) => {
+                assert!(note.contains("2026-09-20T17:26:00Z"), "first failed check not named: {note}");
+                assert!(note.contains("2026-09-20T17:31:00Z"), "confirming check not named: {note}");
+            }
+            other => panic!("expected the alarm, got {other:?}"),
+        }
+    }
+
+    /// A live answer ends a run of failures, so a later alarm must date from the run that is
+    /// actually happening, not from one that already recovered.
+    #[test]
+    fn a_live_answer_forgets_when_the_previous_failures_began() {
+        let mut h = HeartbeatWatch::new();
+        beat_at(&mut h, Some(false), "2026-09-20T10:00:00Z");
+        beat_at(&mut h, Some(true), "2026-09-20T10:05:00Z");
+        beat_at(&mut h, Some(false), "2026-09-20T17:26:00Z");
+        match beat_at(&mut h, Some(false), "2026-09-20T17:31:00Z") {
+            Beat::Dead(note) => assert!(
+                !note.contains("2026-09-20T10:00:00Z") && note.contains("2026-09-20T17:26:00Z"),
+                "the alarm dated itself from a run of failures that had already ended: {note}"
+            ),
+            other => panic!("expected the alarm, got {other:?}"),
+        }
     }
 
     #[test]
