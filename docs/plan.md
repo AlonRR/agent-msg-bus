@@ -1,8 +1,7 @@
 # agent-msg-bus — design, decisions and phasing
 
-Push-delivery message bus for Claude Code sessions. Replaces the file-based `msgbus`
-(`Tools/machine-a/tools/msgbus/`). A full rewrite, not a patch — the old code and scripts were explicitly
-treated as replaceable.
+Push-delivery message bus for Claude Code sessions. Replaces an earlier file-based bus, `msgbus`. A
+full rewrite, not a patch — the old code and scripts were explicitly treated as replaceable.
 
 **Status: deployed and carrying real traffic.** Phases 0–7 complete: broker live on the broker host, relays
 running as services on machine-a, the Linux server and machine-b, sessions self-register at startup, and messages have
@@ -28,8 +27,8 @@ running on it. Phase 9 (Channels) is assessed and **deliberately not built**; se
 | Repo | **`alon/agent-msg-bus`** — its own repo, not inside `machine-a` or `homelab` | Spans three machines; it is not homelab-only infrastructure |
 | Old stuck mail | **Leave exactly as-is** until Phase 8 | No running session gets interrupted; the backlog is dealt with at retirement |
 
-**There is no WAN path into the lab today.** `homelab/docs/manual/firewall-segmentation.md` lists the
-SSL-VPN piece as *"Out of scope for this phase"* and the lab's firewall rollout is still an unchecked
+**There is no WAN path into the lab today.** The lab's firewall plan lists the remote-access VPN as
+*"Out of scope for this phase"*, and the firewall rollout itself is still an unchecked
 checklist. machine-b therefore reaches the broker only on the LAN in v1; the durable queue means it
 receives everything on reconnect rather than losing it. **Do not design as if a VPN exists.**
 
@@ -173,12 +172,13 @@ wss://msgbus.example.internal    -> "msgbus.example.internal resolves to <proxy-
                               link-local, or cloud-metadata range"
 ```
 
-⚠️ **Every address and hostname on this page is illustrative.** `10.0.0.x` and `*.example.internal`
-are stand-ins for whatever a real deployment uses; none of them is any machine this was built on, and
-the same goes for the `machine-a` / `machine-b` / `CT 1xx` names. They are deliberately **not** RFC
-5737 documentation addresses (`192.0.2.x`): the guard being demonstrated refuses an address *because
-it is in a private range*, so an example outside that range would make the quoted refusals nonsense.
-A private example that belongs to nobody is the honest way to show it.
+⚠️ **Every address and host on this page is a placeholder.** `<broker-ip>`, `<proxy-ip>` and the
+other `<…-ip>` names stand for private LAN addresses; `*.example.internal` is a reserved example zone;
+`machine-a`, `machine-b`, "the broker host" and "the Linux server" are roles, not machines. The
+addresses are *named* rather than numbered on purpose. The guard being demonstrated refuses an
+address **because it is in a private range**, so an RFC 5737 documentation address (`192.0.2.x`,
+which is not private) would make the quoted refusals false — and any number from a private range
+cannot be told apart from a real one. A name can be neither.
 
 This is a **client-side SSRF guard**, not a network, firewall, TLS or CA problem:
 
@@ -338,7 +338,7 @@ answer. `<proxy-ip>` was the DNS server (the reverse proxy) being quoted back, n
 So, corrected:
 
 - The wildcard trap is **real but scoped to `*.example.internal`**, exactly as the machine-b session said. It is
-  the same trap `homelab/docs/manual/rc-panel.md` documents for SSH aliases.
+  the same trap that catches SSH aliases on that network.
 - **machine-b is network-reachable** from machine-a. The ping was honest.
 - The reason it cannot be onboarded remotely is **not DNS — it has no SSH server**:
   `Test-NetConnection <machine-b-ip> -Port 22` → `False`, and `ssh machine-b` times out. That is what the
@@ -351,11 +351,11 @@ general, when neither is the problem.
 Phase 7 is one command, run **on machine-b**, with that machine's own token:
 
 ```powershell
-# get machine-b's token (on any machine that can reach the homelab host):
+# get machine-b's token from the broker host:
 ssh <broker-host> 'cat /etc/agent-msg-bus/tokens.json'
 
 # then, on machine-b, from a clone of this repo after `cargo build --release`:
-.\scripts\bootstrap-client.ps1 -Machine machine-b -Token <machine-b's token>
+.\scripts\bootstrap-client.ps1 -Machine machine-b -Token <machine-b's token> -BrokerUrl http://<broker-ip>:9450
 ```
 
 Build and tests on machine-b: `cargo build --release` clean, **24 tests green** (12 store + 8 integration
@@ -1350,7 +1350,6 @@ this one.
 
 ## Deep reference
 
-Homelab context (separate repo): `docs/manual/service-user.md` (Remote Control) ·
-`docs/manual/rc-panel.md` · `docs/services.md` (CT allocation) ·
-`docs/manual/firewall-segmentation.md` (why there is no WAN path).
-Old system: `Tools/machine-a/tools/msgbus/README.md`.
+The deployment notes for the lab this was built in — host allocation, firewall, remote access —
+live in that lab's own private repository, not here. This document keeps the design and the
+decisions; the lab keeps its inventory. The file-based bus this replaced was retired in Phase 8.

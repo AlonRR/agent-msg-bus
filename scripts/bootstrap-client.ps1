@@ -10,14 +10,19 @@
   resolves through wildcard DNS to the Caddy container, so a ping "succeeding" proves nothing.
 
 .PARAMETER Token
-  That machine's own token from the broker. Retrieve it on the homelab host with:
+  That machine's own token from the broker. Retrieve it from the broker host, for example:
 
       ssh <broker-host> 'cat /etc/agent-msg-bus/tokens.json'
 
   and take the entry matching -Machine. Each machine has its own; do not share one.
 
+.PARAMETER BrokerUrl
+  The broker's base URL on the LAN, e.g. http://192.0.2.10:9450. Required: there is no default
+  that could be right on another network, and a wrong default fails later and less clearly than
+  a missing argument does.
+
 .EXAMPLE
-  .\bootstrap-client.ps1 -Machine machine-b -Token <that machine's token>
+  .\bootstrap-client.ps1 -Machine machine-b -Token <that machine's token> -BrokerUrl http://192.0.2.10:9450
 
 .NOTES
   Needs the release binary next to the repo (cargo build --release) or passed via -BinaryPath.
@@ -27,7 +32,7 @@
 param(
     [Parameter(Mandatory)][string]$Machine,
     [Parameter(Mandatory)][string]$Token,
-    [string]$BrokerUrl = 'http://<broker-ip>:9450',
+    [Parameter(Mandatory)][string]$BrokerUrl,
     [string]$Listen = '127.0.0.1:9451',
     [string]$BinaryPath,
     [string]$InstallDir = "$env:LOCALAPPDATA\agent-msg-bus"

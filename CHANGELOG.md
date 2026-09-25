@@ -22,6 +22,27 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Changed
+
+- **The design doc and the scripts no longer describe one particular lab.** A full-history
+  publication audit on 25 Sep found what the 18 Sep pass had missed in the current files: container
+  ids written in lower case, which a case-sensitive scan never matched, a
+  service-user name, the firewall's make and model, and pointers into the lab's private repository.
+  Each is now the role it stood for — the broker host, the lab's firewall — and the pointers are
+  gone, because a reader of this repo cannot follow them.
+- **Example LAN addresses are named placeholders (`<broker-ip>`, `<proxy-ip>`, …), not numbers.**
+  The audit asked for the RFC 5737 documentation range instead of `10.0.0.x`, and was right that a
+  private-range number cannot be told apart from a real one. But several of these addresses sit
+  inside quoted refusals whose whole point is that the address *is private*, and `192.0.2.x` is not
+  — so a documentation-range number would have made those quotes false. A name is neither real nor
+  wrong. Placeholders appear only inside code, because in Markdown prose `<broker-ip>` is read as an
+  HTML tag and vanishes when rendered.
+- **`scripts/bootstrap-client.ps1` now requires `-BrokerUrl`.** It defaulted to an example address,
+  which could never be right on another network and would fail later, less clearly than a missing
+  argument. The usage examples show one.
+- `docs/plan.md` stays in this repo as the design and decision record, with every deployment detail
+  stated by role; the lab's own inventory lives in the lab's repository.
+
 ## [0.4.21] — 2026-09-23
 
 ### Fixed
