@@ -1,0 +1,12 @@
+# The toolchain this repo is built, linted and tested with - locally and in CI alike.
+#
+# Pinned because an unpinned "stable" drifted between machines: on 26 Sep 2026 CI's stable was
+# 1.98.1 and the development machine's was 1.95.0, and a lint that only the newer clippy knows
+# (`result_large_err`) turned the repo's first public CI run red while every local check was clean.
+# With a pin, both run the same compiler and the same clippy, and a new toolchain arrives as a
+# deliberate commit that bumps this line - with its new lints fixed in the same commit - rather than
+# as a red badge nobody changed anything to cause.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

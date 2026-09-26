@@ -299,11 +299,15 @@ pub fn is_conflict(e: &tokio_tungstenite::tungstenite::Error) -> bool {
 /// `fallback` is `None` for a PINNED address, and that is deliberate — a pin is an explicit
 /// declaration of identity, so a collision on one must surface as a failure rather than quietly
 /// answering to some other name.
+///
+/// The error is boxed because `tungstenite::Error` is large, and clippy's `result_large_err` (from
+/// rustc 1.98) rejects returning it by value. The allocation only happens when a connect fails —
+/// a cold path — so boxing costs nothing that matters, and `?` converts into the box on its own.
 pub async fn bind(
     relay: &str,
     primary: &str,
     fallback: Option<&str>,
-) -> Result<(Sock, String), tokio_tungstenite::tungstenite::Error> {
+) -> Result<(Sock, String), Box<tokio_tungstenite::tungstenite::Error>> {
     match tokio_tungstenite::connect_async(sub_url(relay, primary)).await {
         Ok((sock, _)) => Ok((sock, primary.to_string())),
         Err(e) => match fallback {
@@ -311,7 +315,7 @@ pub async fn bind(
                 let (sock, _) = tokio_tungstenite::connect_async(sub_url(relay, f)).await?;
                 Ok((sock, f.to_string()))
             }
-            _ => Err(e),
+            _ => Err(Box::new(e)),
         },
     }
 }
@@ -335,6 +339,7 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
             tokio_tungstenite::connect_async(sub_url(relay, &bound))
                 .await
                 .map(|(s, _)| (s, bound.clone()))
+                .map_err(Box::new)
         } else {
             bind(relay, addr, fallback).await
         };

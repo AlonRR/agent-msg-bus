@@ -22,6 +22,23 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The repo's first public CI run was red, on a lint the development machine could not see.**
+  clippy's `result_large_err` rejected `watch::bind` returning the large `tungstenite::Error` by
+  value. CI's `stable` was rustc 1.98.1 and the development machine's was 1.95.0, whose clippy does
+  not have that lint, so every local check was clean. The error is now boxed. It is only built when
+  a connect fails, so the allocation costs nothing that matters, and `?` converts into the box on
+  its own. Reproduced locally on 1.98.1 before the fix, clean after it.
+
+### Added
+
+- **`rust-toolchain.toml` pins rustc 1.98.1, with clippy and rustfmt.** Local builds, CI and the
+  release workflow now run the same compiler and the same clippy. CI and release install it with a
+  bare `rustup toolchain install`, which reads the pin, instead of naming `stable`, which is what let
+  the two drift apart. A newer toolchain is now a deliberate one-line commit, with its new lints
+  fixed in the same change, instead of a red badge caused by nobody's change.
+
 ### Changed
 
 - **The design doc and the scripts no longer describe one particular lab.** A full-history
