@@ -27,7 +27,7 @@ jobs:
   check-version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
@@ -56,16 +56,16 @@ jobs:
             bin: agent-msg-bus.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
           fetch-depth: 0 # full history, so the release notes' compare base resolves
 
-      - name: Install Rust (stable)
+      - name: Install Rust (pinned in rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index

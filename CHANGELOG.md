@@ -41,6 +41,14 @@ explicitly not part of it and can change in a patch.
 
 ### Changed
 
+- **CI and release run `actions/checkout@v7` and `actions/cache@v6`**, up from `@v4`, which GitHub
+  flagged as targeting the deprecated Node 20 runtime. Both new majors run on Node 24. Their
+  breaking changes were read, not assumed, and none touches these workflows. checkout v6 moved
+  persisted credentials into a separate file, and nothing here relies on them. checkout v7 blocks
+  fork-PR checkout under `pull_request_target` and `workflow_run`, and these workflows use neither.
+  cache v5 needs runner 2.327.1, which GitHub-hosted runners exceed. cache v6 is an internal ESM
+  migration, and the `path`, `key` and `restore-keys` inputs used here are unchanged. This is its
+  own commit, so a red run has one suspect.
 - **The design doc and the scripts no longer describe one particular lab.** A full-history
   publication audit on 25 Sep found what the 18 Sep pass had missed in the current files: container
   ids written in lower case, which a case-sensitive scan never matched, a
