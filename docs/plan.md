@@ -290,15 +290,15 @@ words, never the user's.
 | # | Phase | Done when | Status |
 |---|---|---|---|
 | 0 | Verify Monitor wakes an idle session | Result recorded above | ✅ passed |
-| 1a | Repo skeleton, `.gitattributes`, README, pushed | Builds | ✅ `d072e2c` |
-| 1b | Store: messages, cursors, registry | 12 tests green | ✅ `56b8d63` |
-| 1c | HTTP `/register` `/send` `/ack` `/peers` | Tests green | ✅ `ca7a8d5` |
-| 1d | WebSocket `/sub` + replay on reconnect | Tests green | ✅ `ca7a8d5` |
-| 1e | Token auth | Tests green | ✅ `ca7a8d5` |
+| 1a | Repo skeleton, `.gitattributes`, README, pushed | Builds | ✅ `34788d8` |
+| 1b | Store: messages, cursors, registry | 12 tests green | ✅ `3bf996e` |
+| 1c | HTTP `/register` `/send` `/ack` `/peers` | Tests green | ✅ `07c05cb` |
+| 1d | WebSocket `/sub` + replay on reconnect | Tests green | ✅ `07c05cb` |
+| 1e | Token auth | Tests green | ✅ `07c05cb` |
 | 2 | Deploy the broker to its host | Service live, firewall, reverse-proxy vhost, hypervisor notes, homelab docs | ✅ live on the broker host |
-| 2b | Loopback relay (**unplanned** — forced by the private-IP guard) | Cross-host delivery verified | ✅ `1875442`, made per-machine in `2856a43` |
+| 2b | Loopback relay (**unplanned** — forced by the private-IP guard) | Cross-host delivery verified | ✅ `43c367d`, made per-machine in `4719337` |
 | 3 | Client CLI: `send` / `peers` / `ack` / `forget` / `whoami` | Works on Windows **and** Linux | ✅ both — 24 tests green on each |
-| 4 | `SessionStart` hook: register + tell the session its address | New session self-registers with no human step | ✅ `2856a43`, in the binary rather than per-OS scripts |
+| 4 | `SessionStart` hook: register + tell the session its address | New session self-registers with no human step | ✅ `4719337`, in the binary rather than per-OS scripts |
 | 5 | machine-a cutover, both buses in parallel | Round-trip between two real machine-a sessions | ✅ relay is a Scheduled Task; a session is live on the bus |
 | 6 | Linux server Remote Control sessions | Round-trip machine-a ↔ the server | ✅ a message from the server woke a machine-a session |
 | 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ✅ **passed** — 2 messages queued while offline, both replayed in order on reconnect, none lost |
@@ -383,9 +383,9 @@ down. Suspend/resume was therefore **not** tested here — it was tested later, 
 across four real sleep cycles; see Known limitations for what that settled and the one question it
 left open.
 
-#### ⚠️ `Stop-ScheduledTask` did NOT stop the relay before `d1dc268` — it produced a false pass
+#### ⚠️ `Stop-ScheduledTask` did NOT stop the relay before `fc5b2af` — it produced a false pass
 
-**Superseded by `d1dc268`, kept because the failure it caused is instructive.** Against the
+**Superseded by `fc5b2af`, kept because the failure it caused is instructive.** Against the
 fire-and-forget shim, the obvious way to run step (b) —
 `Stop-ScheduledTask -TaskName 'agent-msg-bus relay'` — did nothing to the relay. Measured on machine-b:
 
@@ -405,9 +405,9 @@ it arrive, and concludes the queue works — **while the machine was never offli
 pass on the exact property Phase 7 exists to prove. The Phase 7 run above therefore used
 `Stop-Process -Name agent-msg-bus`, which is what made the offline window real.
 
-`d1dc268` changes the shim to `Run(..., 0, True)` + `WScript.Quit rc`, so `wscript.exe` now stays
+`fc5b2af` changes the shim to `Run(..., 0, True)` + `WScript.Quit rc`, so `wscript.exe` now stays
 alive as the relay's parent for the task's lifetime. **`Stop-ScheduledTask` should therefore be
-effective from `d1dc268` onward — but that has not been re-measured on machine-b**, which was still
+effective from `fc5b2af` onward — but that has not been re-measured on machine-b**, which was still
 running the old shim when this was written. Do not treat it as verified until someone stops the task
 and confirms the pid is gone. Until then `Stop-Process -Name agent-msg-bus` remains the lever known
 to work.
@@ -1331,8 +1331,8 @@ running. A third instance should be caught by reading this paragraph, not by the
 - **Killing the relay ends the session's Monitor subscription** and nothing re-arms it automatically.
   The close is visible (`1006`), not silent, so it is actionable — but until the skill acts on it,
   recovery is a human step. The relay absorbs upstream outages; it cannot absorb its own restart.
-- **`Stop-ScheduledTask` did not stop the relay before `d1dc268`** (detached `wscript` shim — see
-  Phase 7). Any runbook that used it to simulate an outage was testing nothing. `d1dc268` makes the
+- **`Stop-ScheduledTask` did not stop the relay before `fc5b2af`** (detached `wscript` shim — see
+  Phase 7). Any runbook that used it to simulate an outage was testing nothing. `fc5b2af` makes the
   shim wait, which should fix this; **not yet re-measured on machine-b**, so `Stop-Process` stays the
   lever known to work until someone confirms.
 - **`wss://` from Monitor is untested** — and moot for now, since the private-IP guard blocks the

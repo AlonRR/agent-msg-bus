@@ -24,6 +24,14 @@ explicitly not part of it and can change in a patch.
 
 ### Fixed
 
+- **`docs/plan.md`'s commit references resolve again.** Six ids in the phase table and the
+  relay-supervision notes had stopped resolving in an earlier history change, before the 25 Sep
+  rewrite. Each is now the commit that actually did the work, identified by what it contains, not
+  by a matching subject. The scaffold commit is the one that added `.gitattributes`. The store
+  commit adds the three tables and exactly the 12 tests the table cites. The broker commit adds the
+  routes, `/sub` replay and token auth. The relay and hook commits each add their file. For the
+  supervision fix the evidence is doubled: its diff carries the `Run(..., 0, True)` + `WScript.Quit
+  rc` change the notes describe, and a later commit's message names it.
 - **The repo's first public CI run was red, on a lint the development machine could not see.**
   clippy's `result_large_err` rejected `watch::bind` returning the large `tungstenite::Error` by
   value. CI's `stable` was rustc 1.98.1 and the development machine's was 1.95.0, whose clippy does
