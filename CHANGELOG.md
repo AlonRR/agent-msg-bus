@@ -22,6 +22,14 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`docs/usage.md` no longer warns about a sweeper bug fixed in v0.2.0.** It said a single
+  broadcast to `machine/*` made every address on that machine unsweepable. That stopped being true
+  when being addressed by a wildcard came to count as delivery rather than participation. The
+  warning now says what a broadcast still does: it reaches every matching address, including
+  abandoned ones, and stays unread in each until acked.
+
 ## [0.4.23] — 2026-10-01
 
 ### Added

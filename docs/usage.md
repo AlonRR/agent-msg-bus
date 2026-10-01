@@ -244,9 +244,11 @@ see rather than a quiet rename.
 rather than re-derived — the name actually **bound**. If those last two differ from the first, this
 session fell back and its peers need telling.
 
-⚠️ **A wildcard in a *sent* message is not the same as a wildcard registration.** One historical
-broadcast to `machine/*` can make every address on that machine unsweepable, because the sweeper
-cannot distinguish "was addressed" from "participated". Prefer explicit recipients.
+⚠️ **A wildcard in a *sent* message is not the same as a wildcard registration.** It reaches every
+address that matches, including mailboxes nobody reads any more, and stays unread in each one until
+that address acks it. Prefer explicit recipients. (Before v0.2.0 a single broadcast also made every
+address it matched permanently unsweepable. That is fixed: being addressed by a wildcard is
+delivery, not participation.)
 
 ---
 
