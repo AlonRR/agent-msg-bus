@@ -146,18 +146,23 @@ wake — nobody is interrupted the moment a message lands.
 So the routine is:
 
 ```
-agent-msg-bus read <your-address>          # the stored log: sent and received, acked or not
-agent-msg-bus ack  <your-address> <id>     # after you have handled it
+agent-msg-bus read <your-address> --unread # what is waiting, oldest first (broker 0.4.23+)
+agent-msg-bus ack  <your-address> <id>     # after you have handled it, up to the last id shown
 ```
 
 The SessionStart banner tells you your address and how many messages are unread, so a session that
-just started already knows whether to look.
+just started already knows whether to look. It offers `--unread` only when the broker serves it.
 
-⚠️ **`read` is a log, not an unread view.** It prints the address's stored messages, your own sent
-ones included, whatever their ack state, so after an ack it still shows the acked mail. Re-reading
-is no way to check that an ack worked: `peers` shows the unread count. To list only what came after
-your last ack, pass that id: `read <your-address> --since <the id you last acked>`. Your own later
-sends appear too.
+`--unread` lists the oldest unread messages first, because an ack covers everything up to its id. A
+newest-first page would let you ack past mail you never saw. When more are waiting than `--limit`
+shows, it says so: ack up to the last one shown and read again. Against a broker older than 0.4.23
+it refuses and says why, rather than printing the full log as if it were unread.
+
+⚠️ **Plain `read` is a log, not an unread view.** It prints the address's stored messages, your own
+sent ones included, whatever their ack state, so after an ack it still shows the acked mail.
+Re-reading is no way to check that an ack worked. On an older broker, `peers` shows the unread
+count, and `read <your-address> --since <the id you last acked>` lists what came after it, with
+your own later sends too.
 
 **If you genuinely want push** — an agent that must react within seconds — `agent-msg-bus whoami`
 still prints the exact `Monitor` line, and the `watch` command is unchanged and supported. You are

@@ -415,6 +415,46 @@ async fn a_session_that_registers_and_only_polls_survives_the_sweeper() {
     );
 }
 
+/// `read` is the stored log, so a polling session had no way to list just what is waiting: it
+/// re-read acked mail and could not tell it from new. `--unread` asks the broker for exactly what
+/// the cursor says is pending, OLDEST first - acks are cumulative, so showing the newest N and
+/// acking the last of them would skip the older ones nobody saw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_unread_lists_only_pending_mail_oldest_first() {
+    let h = start().await;
+    let c = h.client();
+    let (m1, m2, m3) = blocking(move || {
+        c.register("machine-a/inbox", "s1", "machine-a", "r", "/x", 1).unwrap();
+        c.register("machine-a/peer", "s2", "machine-a", "r", "/x", 2).unwrap();
+        let m1 = c.send("machine-a/peer", "machine-a/inbox", "fyi", "one", "", "").unwrap();
+        let m2 = c.send("machine-a/peer", "machine-a/inbox", "fyi", "two", "", "").unwrap();
+        let m3 = c.send("machine-a/peer", "machine-a/inbox", "fyi", "three", "", "").unwrap();
+        // The inbox's own send is in its log but is never its unread mail.
+        c.send("machine-a/inbox", "machine-a/peer", "fyi", "mine", "", "").unwrap();
+        c.ack("machine-a/inbox", &m1).unwrap();
+        (m1, m2, m3)
+    })
+    .await;
+
+    let c = h.client();
+    let (first, total) = blocking(move || c.read_unread("machine-a/inbox", 1).unwrap()).await;
+    assert_eq!(total, 2, "total unread should count what is pending, not what is shown");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id, m2, "the OLDEST unread must come first, so acking it skips nothing");
+
+    let c = h.client();
+    let (all, _) = blocking(move || c.read_unread("machine-a/inbox", 20).unwrap()).await;
+    let ids: Vec<&str> = all.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec![m2.as_str(), m3.as_str()], "acked or own mail leaked into --unread");
+    assert!(!ids.contains(&m1.as_str()));
+
+    // An address nothing answers to has no cursor; its "unread" would be every message it ever
+    // matched. That must be refused, not printed.
+    let c = h.client();
+    let err = blocking(move || c.read_unread("machine-a/nobody", 20).map(|_| ())).await;
+    assert!(err.is_err(), "--unread for an unknown address was answered");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sender_never_receives_its_own_broadcast() {
     let h = start().await;

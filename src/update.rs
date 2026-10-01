@@ -187,7 +187,7 @@ pub fn decide(source_version: Option<&str>, installed: Option<&str>) -> SelfUpda
 /// comparison wrong in both directions at exactly the versions this project is at. Anything that is
 /// not three plain integers — a git describe, a nightly tag, a `-dirty` suffix — returns `None`, and
 /// every caller treats that as "cannot say" rather than as a verdict.
-fn version_triple(v: &str) -> Option<(u64, u64, u64)> {
+pub(crate) fn version_triple(v: &str) -> Option<(u64, u64, u64)> {
     let mut parts = v.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;

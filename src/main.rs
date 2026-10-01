@@ -138,8 +138,9 @@ enum Cmd {
     /// or move the cursor.
     ///
     /// It is a log, not an unread view. After an `ack` it still prints the acked mail, so
-    /// re-reading cannot show whether an ack worked; `peers` shows the unread count. To list only
-    /// what came after your last ack, pass that id as `--since` (your own later sends appear too).
+    /// re-reading cannot show whether an ack worked. `--unread` lists exactly what is waiting
+    /// (broker 0.4.23 or later). On an older broker, `peers` shows the unread count, and `--since
+    /// <the id you last acked>` lists what came after it (your own later sends appear too).
     ///
     /// It also recovers a message that arrived truncated in a notification. Delivery is
     /// push-only, so without this the full text of a long message was unrecoverable once acked.
@@ -152,6 +153,11 @@ enum Cmd {
         /// not an id is refused rather than accepted.
         #[arg(long)]
         since: Option<String>,
+        /// Only what is waiting: the mail the cursor says is unread, OLDEST first, so acking up to
+        /// the last id shown skips nothing. Needs broker 0.4.23 or later; an older one is refused
+        /// rather than having its full log printed as unread.
+        #[arg(long, conflicts_with = "since")]
+        unread: bool,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
@@ -473,6 +479,17 @@ fn send_confirmation(id: &str, from: &str, to: &str) -> String {
     format!("sent {id}  {from}  ->  {to}")
 }
 
+/// One stored message, in the layout `read` has always printed.
+fn print_message(m: &agent_msg_bus::store::Message) {
+    println!("{}", "=".repeat(76));
+    println!("id      : {}", m.id);
+    println!("from    : {}  ->  {}   [{}]", m.from, m.to, m.kind);
+    println!("ts      : {}", m.ts);
+    println!("subject : {}", m.subject);
+    println!("{}", "-".repeat(76));
+    println!("{}", m.body);
+}
+
 fn whoami(cli: &Cli) {
     let Some(cfg) = agent_msg_bus::hook::load_config() else {
         eprintln!(
@@ -767,7 +784,29 @@ fn run_client(cli: &Cli) {
         }
         // Refused before the request goes out, so the caller is corrected rather than handed the
         // whole history in the shape of a filtered read.
-        Cmd::Read { addr, since, limit } => {
+        Cmd::Read { addr, unread: true, limit, .. } => c
+            .read_unread(addr, *limit)
+            .map(|(msgs, total)| {
+                if msgs.is_empty() {
+                    println!("nothing unread for {addr}");
+                }
+                let last = msgs.last().map(|m| m.id.clone());
+                let shown = msgs.len();
+                for m in msgs {
+                    print_message(&m);
+                }
+                if let Some(last) = last {
+                    println!("{}", "=".repeat(76));
+                    if total > shown {
+                        println!("showing the oldest {shown} of {total} unread. Ack up to the last id shown, then read again:");
+                    } else {
+                        println!("{total} unread. Once handled:");
+                    }
+                    println!("  agent-msg-bus ack {addr} {last}");
+                }
+            })
+            .map_err(Into::into),
+        Cmd::Read { addr, since, limit, .. } => {
             match since.as_deref().and_then(agent_msg_bus::store::since_refusal) {
                 Some(why) => Err(why.into()),
                 None => c
@@ -777,13 +816,7 @@ fn run_client(cli: &Cli) {
                             println!("no stored messages for {addr}");
                         }
                         for m in msgs {
-                            println!("{}", "=".repeat(76));
-                            println!("id      : {}", m.id);
-                            println!("from    : {}  ->  {}   [{}]", m.from, m.to, m.kind);
-                            println!("ts      : {}", m.ts);
-                            println!("subject : {}", m.subject);
-                            println!("{}", "-".repeat(76));
-                            println!("{}", m.body);
+                            print_message(&m);
                         }
                     })
                     .map_err(Into::into),

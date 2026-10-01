@@ -22,6 +22,29 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.23] — 2026-10-01
+
+### Added
+
+- **`read --unread` lists exactly what is waiting.** Under the polling model `read` is how a
+  session gets its mail, but plain `read` is the stored log, so there was no way to see only the
+  unread mail. `--unread` asks the broker for what the cursor says is pending: oldest first, and
+  never your own sends.
+  - **Oldest first is deliberate.** An ack covers everything up to its id, so a newest-first page
+    would let a session ack past mail it never saw. When more is waiting than `--limit` shows, the
+    output says so and gives the ack command for the last id shown.
+  - **Broker side:** `/messages?unread=1` answers with `"unread": true` and the total. A broker
+    older than 0.4.23 ignores the parameter and returns the log. The client refuses that reply,
+    exits non-zero and says why, instead of printing the log as unread. Verified against a live
+    0.4.15 broker.
+  - **Refusals:** an address nothing answers to gets a 404, because it has no cursor and every
+    message it ever matched would come back as unread. `--unread` with `--since` is refused too.
+  - **Banner:** the SessionStart banner hands sessions `read --unread` when the broker is 0.4.23
+    or later, and the plain form with its caveat otherwise.
+
+  This is an additive parameter and field, so it is a patch release: old clients and old brokers
+  keep working with the new ones.
+
 ### Fixed
 
 - **The banner and the docs no longer present `read` as the inbox.** `read` prints an address's

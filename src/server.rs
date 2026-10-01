@@ -360,6 +360,40 @@ async fn messages(
     }
     let since = q.get("since").map(|s| s.as_str());
     let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+
+    // `unread=1`: what the cursor says is pending, rather than the stored log. OLDEST first,
+    // because acks are cumulative: showing the newest `limit` and acking the last of them would
+    // skip the older ones nobody saw. `"unread": true` in the reply is how a client knows the flag
+    // was honoured. An older broker ignores the parameter and returns the log, and the client
+    // refuses that rather than printing it as unread.
+    if matches!(q.get("unread").map(|s| s.as_str()), Some("1") | Some("true")) {
+        if since.is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "unread and since are exclusive: unread already starts at the cursor"})),
+            )
+                .into_response();
+        }
+        let store = st.store.lock().unwrap();
+        // No registration means no cursor, and a missing cursor reads as the beginning, so every
+        // message the name ever matched would come back labelled unread.
+        match store.unknown_mailbox_refusal(addr) {
+            Ok(Some(why)) => {
+                return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": why}))).into_response()
+            }
+            Ok(None) => {}
+            Err(e) => return server_error(e),
+        }
+        return match store.pending_for(addr) {
+            Ok(mut v) => {
+                let total = v.len();
+                v.truncate(limit);
+                Json(serde_json::json!({"messages": v, "unread": true, "total": total})).into_response()
+            }
+            Err(e) => server_error(e),
+        };
+    }
+
     match st.store.lock().unwrap().history(addr, since, limit) {
         Ok(v) => Json(serde_json::json!({"messages": v})).into_response(),
         Err(e) => server_error(e),

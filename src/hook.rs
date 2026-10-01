@@ -373,6 +373,7 @@ pub fn run() -> ! {
         Some(v) => Seen::Version(v),
         None => Seen::NoVersion,
     };
+    let unread_view = broker_serves_unread(&broker_seen);
     let stale = version_advice(crate::VERSION, broker_seen, relay_seen, &me);
     if let Err(e) =
         client.register(&addr, &payload.session_id, &cfg.machine, "", &payload.cwd, pid)
@@ -423,7 +424,7 @@ pub fn run() -> ! {
         .ok()
         .and_then(|p| p.known.into_iter().find(|k| k.addr == mine).map(|k| k.pending));
 
-    let subscribe = inbox_instructions(&me, &mine, &watch_cmd, unread);
+    let subscribe = inbox_instructions(&me, &mine, &watch_cmd, unread, unread_view);
     emit(&format!(
         "{stale}agent-msg-bus is available. This session's address is `{addr}` and it is registered \
          with the broker at {}.\n\
@@ -477,6 +478,16 @@ fn monitor_watch_command(me: &str, addr: &str, fallback: Option<&str>) -> String
     }
 }
 
+/// Does this broker serve `read --unread` (`/messages?unread=1`)? From 0.4.23. Anything that cannot
+/// be shown to be at least that - no answer, no version, an unparseable one - counts as no, so the
+/// banner never hands a session a command its broker will refuse.
+pub fn broker_serves_unread(seen: &Seen) -> bool {
+    match seen {
+        Seen::Version(v) => crate::update::version_triple(v).is_some_and(|t| t >= (0, 4, 23)),
+        Seen::NoVersion | Seen::Unreachable => false,
+    }
+}
+
 /// What the banner says about receiving mail.
 ///
 /// Kept apart from `run` so its claims are pinned by tests. It used to hand the session a
@@ -492,11 +503,32 @@ fn monitor_watch_command(me: &str, addr: &str, fallback: Option<&str>) -> String
 /// The paste-ready call is deliberately absent. Push still works and is still documented, but
 /// someone who wants it has to go and get it, because a line a session can paste without deciding
 /// anything is how the old cost came back on every restart.
-fn inbox_instructions(me: &str, addr: &str, watch_cmd: &str, unread: Option<usize>) -> String {
+fn inbox_instructions(
+    me: &str,
+    addr: &str,
+    watch_cmd: &str,
+    unread: Option<usize>,
+    unread_view: bool,
+) -> String {
+    // The command that lists what is waiting. `--unread` only when the broker serves it: an older
+    // one returns the full log, and the client refuses that rather than print it as unread.
+    let read_cmd =
+        if unread_view { format!("{me} read {addr} --unread") } else { format!("{me} read {addr}") };
+    let read_note = if unread_view {
+        "`read --unread` lists what is waiting, oldest first; ack up to the last id it shows. Plain \
+         `read` prints the stored log instead: mail sent and received, acked or not, so after an \
+         ack it still shows the acked mail, and that does not mean the ack failed.\n"
+    } else {
+        "`read` prints this address's stored log, newest last: mail sent and received, acked or \
+         not. It is not an unread view, so after an ack it still shows the acked mail, and that \
+         does not mean the ack failed. The count above is the unread figure. To list only what came \
+         after your last ack, add `--since <the id you last acked>` (your own later sends appear \
+         too).\n"
+    };
     let waiting = match unread {
         Some(0) => "Nothing is waiting for this address.\n".to_string(),
         Some(n) => format!(
-            "**{n} message{} waiting for this address, unacked.** Read {} now:  {me} read {addr}\n",
+            "**{n} message{} waiting for this address, unacked.** Read {} now:  {read_cmd}\n",
             if n == 1 { " is" } else { "s are" },
             if n == 1 { "it" } else { "them" }
         ),
@@ -521,13 +553,9 @@ fn inbox_instructions(me: &str, addr: &str, watch_cmd: &str, unread: Option<usiz
          only the interruption.\n\
          \n\
          So: read at the start of a session, and after handling anything,\n\
-             {me} read {addr}\n\
+             {read_cmd}\n\
              {me} ack {addr} <last-message-id>\n\
-         `read` prints this address's stored log, newest last: mail sent and received, acked or \
-         not. It is not an unread view, so after an ack it still shows the acked mail, and that \
-         does not mean the ack failed. The count above is the unread figure. To list only what came \
-         after your last ack, add `--since <the id you last acked>` (your own later sends appear \
-         too).\n\
+         {read_note}\
          \n\
          If push is genuinely needed — an agent that must react within seconds — the `watch` command \
          is unchanged and supported:  {watch_cmd}\n\
@@ -546,8 +574,43 @@ mod inbox_instruction_tests {
     const ME: &str = "'x'";
     const ADDR: &str = "machine-a/repo";
 
+    /// The banner against a broker that predates `read --unread`.
     fn banner(unread: Option<usize>) -> String {
-        inbox_instructions(ME, ADDR, CMD, unread)
+        inbox_instructions(ME, ADDR, CMD, unread, false)
+    }
+
+    /// The banner against a broker that serves `read --unread`.
+    fn banner_unread(unread: Option<usize>) -> String {
+        inbox_instructions(ME, ADDR, CMD, unread, true)
+    }
+
+    /// With a broker that can list exactly what is waiting, that is the command to hand over:
+    /// plain `read` is the log, and a polling session that uses it as its inbox re-reads acked
+    /// mail and cannot tell it from new.
+    #[test]
+    fn the_banner_hands_over_read_unread_when_the_broker_serves_it() {
+        let s = banner_unread(Some(2));
+        assert!(s.contains(&format!("{ME} read {ADDR} --unread")), "no --unread command: {s}");
+        assert!(s.contains("acked or not"), "no longer says what plain read prints: {s}");
+    }
+
+    /// ...and never against a broker that would refuse it.
+    #[test]
+    fn the_banner_never_offers_read_unread_to_a_broker_that_lacks_it() {
+        let s = banner(Some(2));
+        assert!(!s.contains("--unread"), "offered a flag this broker will refuse: {s}");
+    }
+
+    #[test]
+    fn read_unread_is_offered_from_broker_0_4_23() {
+        use super::{broker_serves_unread, Seen};
+        assert!(broker_serves_unread(&Seen::Version("0.4.23")));
+        assert!(broker_serves_unread(&Seen::Version("0.5.0")));
+        assert!(!broker_serves_unread(&Seen::Version("0.4.22")));
+        assert!(!broker_serves_unread(&Seen::Version("0.4.15")));
+        assert!(!broker_serves_unread(&Seen::Version("garbage")));
+        assert!(!broker_serves_unread(&Seen::NoVersion));
+        assert!(!broker_serves_unread(&Seen::Unreachable));
     }
 
     /// ⛔ THE ONE THAT MATTERS. The banner used to carry a ready-to-paste

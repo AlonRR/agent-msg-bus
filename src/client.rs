@@ -167,6 +167,19 @@ impl Client {
             .map_err(|e| ClientError::Http(e.to_string()))
     }
 
+    /// What the cursor says is pending, oldest first, and how many are pending in total.
+    ///
+    /// Refuses a reply that does not confirm the flag was honoured: a broker older than 0.4.23
+    /// ignores `unread=1` and returns the full log, which is exactly what this exists to avoid.
+    pub fn read_unread(
+        &self,
+        addr: &str,
+        limit: usize,
+    ) -> Result<(Vec<crate::store::Message>, usize), ClientError> {
+        let v = self.get(&format!("/messages?addr={}&limit={}&unread=1", urlencode(addr), limit))?;
+        unread_reply(&v).map_err(ClientError::Http)
+    }
+
     pub fn prune(
         &self,
         days: i64,
@@ -235,6 +248,21 @@ impl Client {
     }
 }
 
+/// Accept a `/messages?unread=1` reply only if the broker says it honoured the flag.
+fn unread_reply(v: &serde_json::Value) -> Result<(Vec<crate::store::Message>, usize), String> {
+    if v.get("unread").and_then(|x| x.as_bool()) != Some(true) {
+        return Err("this broker does not serve --unread (it needs 0.4.23 or later) and returned \
+                    the full log instead, which would be printed as unread. `peers` shows the \
+                    unread count; `read <addr> --since <the id you last acked>` lists what came \
+                    after it."
+            .to_string());
+    }
+    let msgs = serde_json::from_value(v.get("messages").cloned().unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    Ok((msgs, total))
+}
+
 pub fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -246,4 +274,28 @@ pub fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod unread_reply_tests {
+    use super::unread_reply;
+
+    /// A broker older than 0.4.23 does not know `unread=1` and answers with the address's whole
+    /// log. Printing that as "unread" would be the exact confusion `--unread` exists to remove,
+    /// so the client refuses unless the broker says it honoured the flag.
+    #[test]
+    fn a_reply_that_did_not_honour_unread_is_refused_not_printed() {
+        let old = serde_json::json!({"messages": []});
+        let err = unread_reply(&old).unwrap_err();
+        assert!(err.contains("--unread"), "does not name the flag: {err}");
+        assert!(err.contains("full log"), "does not say what the broker returned instead: {err}");
+    }
+
+    #[test]
+    fn an_honoured_reply_yields_the_messages_and_the_total() {
+        let new = serde_json::json!({"messages": [], "unread": true, "total": 7});
+        let (msgs, total) = unread_reply(&new).unwrap();
+        assert!(msgs.is_empty());
+        assert_eq!(total, 7);
+    }
 }
