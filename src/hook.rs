@@ -523,6 +523,11 @@ fn inbox_instructions(me: &str, addr: &str, watch_cmd: &str, unread: Option<usiz
          So: read at the start of a session, and after handling anything,\n\
              {me} read {addr}\n\
              {me} ack {addr} <last-message-id>\n\
+         `read` prints this address's stored log, newest last: mail sent and received, acked or \
+         not. It is not an unread view, so after an ack it still shows the acked mail, and that \
+         does not mean the ack failed. The count above is the unread figure. To list only what came \
+         after your last ack, add `--since <the id you last acked>` (your own later sends appear \
+         too).\n\
          \n\
          If push is genuinely needed — an agent that must react within seconds — the `watch` command \
          is unchanged and supported:  {watch_cmd}\n\
@@ -575,6 +580,18 @@ mod inbox_instruction_tests {
         let s = banner(Some(2));
         assert!(s.contains(&format!("{ME} read {ADDR}")), "no read command: {s}");
         assert!(s.contains(&format!("{ME} ack {ADDR}")), "no ack command: {s}");
+    }
+
+    /// Reported 1 Oct 2026: a session acked, re-ran `read` to check, saw the same mail and concluded
+    /// the ack had failed. `read` is the stored log - sent and received, acked or not - and the
+    /// banner sent every session to it as if it were the inbox. It has to say which it is, and how
+    /// to narrow it.
+    #[test]
+    fn the_banner_does_not_present_read_as_an_unread_view() {
+        let s = banner(Some(2));
+        assert!(s.contains("acked or not"), "does not say read shows acked mail too: {s}");
+        assert!(s.contains("not an unread view"), "presents read as the inbox: {s}");
+        assert!(s.contains("--since"), "gives no way to narrow the log to what is new: {s}");
     }
 
     #[test]

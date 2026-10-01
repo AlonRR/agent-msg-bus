@@ -109,6 +109,11 @@ enum Cmd {
     /// Use when a session ended and its successor has a different derived address, so mail queued
     /// for the dead one would otherwise be stranded. Existing messages are not rewritten — the
     /// alias is resolved at delivery time, so history stays true.
+    ///
+    /// "Unread" afterwards is measured against the merged mailbox's ONE cursor, which becomes the
+    /// older of the two, so a migration can never skip mail. The price is duplicates: mail <from>
+    /// had already acked past that point is pending again under <to>. Nothing is lost. Check it
+    /// and ack it again.
     Migrate { from: String, to: String },
     /// Pin this session's address so it stops being derived from the session id.
     ///
@@ -129,9 +134,14 @@ enum Cmd {
         #[arg(long)]
         delete: Option<String>,
     },
-    /// Read stored messages for an address. Does NOT consume them or move the cursor.
+    /// Print the stored log for an address: sent and received, acked or not. Does NOT consume them
+    /// or move the cursor.
     ///
-    /// Use this to recover a message that arrived truncated in a notification — delivery is
+    /// It is a log, not an unread view. After an `ack` it still prints the acked mail, so
+    /// re-reading cannot show whether an ack worked; `peers` shows the unread count. To list only
+    /// what came after your last ack, pass that id as `--since` (your own later sends appear too).
+    ///
+    /// It also recovers a message that arrived truncated in a notification. Delivery is
     /// push-only, so without this the full text of a long message was unrecoverable once acked.
     Read {
         addr: String,
@@ -811,6 +821,10 @@ fn run_client(cli: &Cli) {
                 if pending == 0 {
                     println!("  note: nothing was waiting for {from} — the migration is still in");
                     println!("        effect for anything sent to that name from now on.");
+                } else {
+                    println!("  note: pending is counted from ONE cursor, the older of the two, so");
+                    println!("        mail already acked under {from} may be pending again here.");
+                    println!("        Nothing was lost; check it and ack it again.");
                 }
                 println!("{to} is now a registered address. Mail for it queues in the broker; read");
                 println!("it with `read {to}`. Nothing needs arming.");

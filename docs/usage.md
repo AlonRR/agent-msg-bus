@@ -146,12 +146,18 @@ wake — nobody is interrupted the moment a message lands.
 So the routine is:
 
 ```
-agent-msg-bus read <your-address>          # what is waiting, whether or not it was ever delivered
+agent-msg-bus read <your-address>          # the stored log: sent and received, acked or not
 agent-msg-bus ack  <your-address> <id>     # after you have handled it
 ```
 
 The SessionStart banner tells you your address and how many messages are unread, so a session that
 just started already knows whether to look.
+
+⚠️ **`read` is a log, not an unread view.** It prints the address's stored messages, your own sent
+ones included, whatever their ack state, so after an ack it still shows the acked mail. Re-reading
+is no way to check that an ack worked: `peers` shows the unread count. To list only what came after
+your last ack, pass that id: `read <your-address> --since <the id you last acked>`. Your own later
+sends appear too.
 
 **If you genuinely want push** — an agent that must react within seconds — `agent-msg-bus whoami`
 still prints the exact `Monitor` line, and the `watch` command is unchanged and supported. You are

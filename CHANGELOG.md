@@ -22,6 +22,21 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The banner and the docs no longer present `read` as the inbox.** `read` prints an address's
+  stored log: sent and received, acked or not. The 0.4.18 banner told every session to read its mail
+  with it, and `docs/usage.md` described it as *"what is waiting"*. So a session that acked, then
+  re-read to check, saw the same mail and concluded the ack had failed. That was reported on
+  1 Oct.
+  - The banner, `read --help` and the usage doc now say it is a log.
+  - They point to `peers` for the unread count, and to `--since <the id you last acked>` to list
+    only what is new.
+- **`migrate` says what "inherits its unread mail" costs.** The merged mailbox has one cursor, the
+  older of the two, so a migration can never skip mail. In exchange, mail the old name had already
+  acked past that point counts as pending again. One migration on 1 Oct took a mailbox from 0 to 8
+  pending, which read like a bug. Its help and output now say so, and that nothing was lost.
+
 ## [0.4.22] — 2026-10-01
 
 ### Fixed
