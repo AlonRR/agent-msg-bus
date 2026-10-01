@@ -208,12 +208,14 @@ impl Store {
         )?;
 
         // `provisional` separates "this address exists and can receive" from "this address has ever
-        // joined the bus". Conflating those is what made every alternative uncomfortable: registering
-        // eagerly fills `peers` with sessions that never join, but registering lazily breaks
-        // send-before-subscribe, where mail sent to a live session that has not yet armed its
-        // subscription must still queue. A provisional row does both - it is a valid send target from
-        // the moment a session starts, and it stays out of `peers` until the address actually
-        // subscribes.
+        // joined the bus". It was introduced when every session minted its own address and most never
+        // subscribed, so a registered-but-unsubscribed row was churn and the sweeper expired it.
+        //
+        // That premise is gone. Addresses are repo-scoped, and since 0.4.18 sessions poll rather
+        // than subscribe, so "never subscribed" describes a working mailbox. `register` therefore
+        // writes a joined row (see its doc). A provisional row now comes only from `ensure_registered`
+        // (a subscribe with no registration, promoted straight after), or from an older broker. The
+        // sweeper still expires those.
         //
         // Added by ALTER rather than in the CREATE so existing databases migrate in place. Existing
         // rows default to provisional and self-correct: anything that subscribes is promoted at once,
@@ -285,17 +287,24 @@ impl Store {
     /// Claim an address. A **new** address starts its cursor at the current head, so it does not
     /// receive history; a **returning** address keeps its existing cursor, so a session that
     /// crashed still gets the mail it never read.
+    ///
+    /// **Registering is joining.** It used to insert a provisional row that only a subscription
+    /// promoted. Since sessions stopped subscribing by default (0.4.18), nothing promoted it, and the
+    /// sweeper forgot every quiet repo mailbox about six hours after its session started, while
+    /// the session's banner still said it was registered. Under the polling model a registration
+    /// is the only claim a session makes on its address, so it is the one that has to count.
+    ///
+    /// It also promotes on conflict, because rows already written provisional by an older broker
+    /// are repaired only by the next registration. It never demotes.
     pub fn register(&self, reg: &Registration) -> Result<()> {
         let (_, ts) = mint_id();
-        // Never demote: an address that has already joined stays joined even if a later session
-        // re-registers it. Otherwise a routine re-register would hide a live address from `peers`.
         self.conn.execute(
             "INSERT INTO registry
                (addr, session_id, machine, repo, cwd, pid, registered_at, provisional, version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
              ON CONFLICT(addr) DO UPDATE SET
                session_id = ?2, machine = ?3, repo = ?4, cwd = ?5, pid = ?6, registered_at = ?7,
-               version = ?8",
+               provisional = 0, version = ?8",
             params![
                 reg.addr,
                 reg.session_id,
@@ -658,8 +667,9 @@ impl Store {
 
     /// Addresses that have never joined the bus, older than `cutoff_ts`.
     ///
-    /// Expired far more aggressively than joined addresses (hours, not days): a session that started
-    /// and never subscribed genuinely is dead, and there is nothing to lose by forgetting it.
+    /// Expired far more aggressively than joined addresses (hours, not days). "Never joined" means
+    /// never registered and never subscribed. It used to mean only "never subscribed", which since
+    /// 0.4.18 describes every working mailbox; see `register`.
     pub fn stale_provisional(&self, cutoff_ts: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT addr FROM registry
@@ -1287,13 +1297,14 @@ mod tests {
 
     // ---- provisional registration ------------------------------------------
 
-    /// The whole point: a session that registers but never subscribes stays out of `peers`, while
-    /// remaining a valid send target so send-before-subscribe still queues.
+    /// A provisional row stays out of `peers` while remaining a valid send target. It used to be
+    /// what every registration produced; since registering became joining (see `register`), only
+    /// `ensure_registered` and older brokers write one, so that is how these fixtures make it.
     #[test]
-    fn a_registered_but_never_subscribed_address_is_hidden_from_peers_yet_still_receives() {
+    fn a_provisional_row_is_hidden_from_peers_yet_still_receives() {
         let s = store();
         s.register(&reg("machine-a/sender")).unwrap();
-        s.register(&reg("machine-a/never-joined")).unwrap();
+        s.ensure_registered("machine-a/never-joined", "machine-a").unwrap();
 
         assert!(
             !s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/never-joined"),
@@ -1312,7 +1323,7 @@ mod tests {
     #[test]
     fn subscribing_promotes_an_address_into_peers() {
         let s = store();
-        s.register(&reg("machine-a/joins")).unwrap();
+        s.ensure_registered("machine-a/joins", "machine-a").unwrap();
         assert!(!s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/joins"));
         s.promote("machine-a/joins").unwrap();
         assert!(s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/joins"));
@@ -1336,11 +1347,61 @@ mod tests {
         let s = store();
         s.register(&reg("machine-a/joined")).unwrap();
         s.promote("machine-a/joined").unwrap();
-        s.register(&reg("machine-a/never")).unwrap();
+        s.ensure_registered("machine-a/never", "machine-a").unwrap();
 
         let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
         assert!(stale.contains(&"machine-a/never".to_string()));
         assert!(!stale.contains(&"machine-a/joined".to_string()), "a joined address was short-expired");
+    }
+
+    /// Reported 1 Oct 2026: SessionStart banners said "registered with the broker" while `whoami`,
+    /// hours later, said NOT REGISTERED. Registering left the row provisional, only a subscription
+    /// promoted it, and since sessions stopped subscribing by default (0.4.18) nothing ever did - so
+    /// the sweeper forgot every quiet repo mailbox about six hours after its session started, and
+    /// mail sent to it afterwards went to no registration at all.
+    ///
+    /// A registration is an explicit claim on an address. Under the polling model it is the only
+    /// claim a session makes, so it has to be durable on its own.
+    #[test]
+    fn a_registered_address_is_never_short_expired_even_if_it_never_subscribes() {
+        let s = store();
+        s.register(&reg("machine-a/polls-only")).unwrap();
+        let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
+        assert!(
+            !stale.contains(&"machine-a/polls-only".to_string()),
+            "a registered address that only polls was offered up for sweeping: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn a_registered_address_is_listed_in_peers_without_subscribing() {
+        let s = store();
+        s.register(&reg("machine-a/polls-only")).unwrap();
+        assert!(
+            s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/polls-only"),
+            "a registered address was hidden from peers because it never subscribed"
+        );
+    }
+
+    /// The rows already on a deployed broker were written provisional. Re-registering - which every
+    /// session start does - has to repair them, or the fix only reaches addresses created after it.
+    #[test]
+    fn re_registering_promotes_a_row_that_was_left_provisional() {
+        let s = store();
+        s.ensure_registered("machine-a/legacy", "machine-a").unwrap(); // a provisional row
+        assert!(s
+            .stale_provisional("2999-01-01T00:00:00.000Z")
+            .unwrap()
+            .contains(&"machine-a/legacy".to_string()));
+
+        s.register(&reg("machine-a/legacy")).unwrap();
+        assert!(
+            !s.stale_provisional("2999-01-01T00:00:00.000Z")
+                .unwrap()
+                .contains(&"machine-a/legacy".to_string()),
+            "re-registering left the row sweepable"
+        );
+        assert!(s.peers(false).unwrap().iter().any(|p| p.addr == "machine-a/legacy"));
     }
 
     // ---- orphaned mail -----------------------------------------------------
@@ -1395,8 +1456,8 @@ mod tests {
     #[test]
     fn an_address_with_traffic_is_never_swept_however_old_or_provisional() {
         let s = store();
-        s.register(&reg("machine-a/participant")).unwrap();
-        s.register(&reg("machine-a/genuine-churn")).unwrap();
+        s.ensure_registered("machine-a/participant", "machine-a").unwrap();
+        s.ensure_registered("machine-a/genuine-churn", "machine-a").unwrap();
         // Traffic, but never promoted — exactly the pre-migration shape.
         s.send(&msg("machine-a/participant", "machine-a/somewhere", "I did things")).unwrap();
 
@@ -1422,7 +1483,7 @@ mod tests {
         // protect every address that machine will ever have, forever. Retention asks a different
         // question than delivery: did THIS address take part?
         let s = store();
-        s.register(&reg("machine-a/only-broadcast")).unwrap();
+        s.ensure_registered("machine-a/only-broadcast", "machine-a").unwrap();
         let id = s.send(&msg("machine-a/sender", "machine-a/*", "broadcast")).unwrap();
         s.ack("machine-a/only-broadcast", &id).unwrap();
 
@@ -1439,7 +1500,7 @@ mod tests {
         // in the candidate query. Narrowing participation without adding this would trade an
         // over-broad guard for stranded mail.
         let s = store();
-        s.register(&reg("machine-a/unread-broadcast")).unwrap();
+        s.ensure_registered("machine-a/unread-broadcast", "machine-a").unwrap();
         s.send(&msg("machine-a/sender", "machine-a/*", "broadcast")).unwrap();
 
         let stale = s.stale_provisional("2999-01-01T00:00:00.000Z").unwrap();
@@ -1480,7 +1541,7 @@ mod tests {
         // deserves now comes from pending mail, which is the narrower true reason.
         let s = store();
         s.register(&reg("machine-a/sender")).unwrap();
-        s.register(&reg("machine-a/quiet-receiver")).unwrap();
+        s.ensure_registered("machine-a/quiet-receiver", "machine-a").unwrap();
         s.send(&msg("machine-a/sender", "machine-a/*", "broadcast")).unwrap();
 
         assert!(
@@ -1697,8 +1758,8 @@ mod tests {
     #[test]
     fn an_alias_row_is_prunable_even_while_the_mailbox_holds_mail() {
         let s = store();
-        s.register(&reg("machine-a/old")).unwrap();
-        s.register(&reg("machine-a/new")).unwrap();
+        s.ensure_registered("machine-a/old", "machine-a").unwrap();
+        s.ensure_registered("machine-a/new", "machine-a").unwrap();
         s.migrate("machine-a/old", "machine-a/new").unwrap();
         s.send(&msg("machine-a/sender", "machine-a/new", "for the mailbox")).unwrap();
 

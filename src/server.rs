@@ -547,8 +547,8 @@ async fn prune(
         cutoff.second()
     );
 
-    // Provisional addresses - started, never subscribed - expire in hours rather than days. There is
-    // nothing to lose by forgetting a session that never joined, and this is where the churn lives.
+    // Provisional addresses - rows nothing has registered (see `Store::register`) - expire in hours
+    // rather than days. Nothing claimed them, so there is nothing to lose by forgetting them.
     let pcut = time::OffsetDateTime::now_utc() - time::Duration::hours(b.provisional_hours);
     let provisional_cutoff = format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
@@ -842,8 +842,8 @@ async fn sub(
                 .into_response()
         }
     };
-    // Subscribing is what makes an address real. Until now it was provisional: a valid send target
-    // so send-before-subscribe keeps working, but absent from `peers`, which answers "who is here".
+    // Subscribing makes an address real, as registering does. A row this path creates is
+    // provisional until the promote below, so a subscribe that never registered still joins.
     //
     // `ensure_registered` before `promote`, because promote is an UPDATE and does nothing without a
     // row. An address that subscribes having never registered had neither a row nor a CURSOR, and a

@@ -22,8 +22,32 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.22] — 2026-10-01
+
 ### Fixed
 
+- **A session's address no longer disappears from the broker about six hours after it starts.**
+  The SessionStart banner said *"registered with the broker"*, and it was true when printed. Hours
+  later `whoami` said **NOT REGISTERED**. Two sessions reported this on the same day. The cause:
+  - `register` stored the address as *provisional*, and only a subscription promoted it.
+  - Since 0.4.18 sessions poll instead of subscribing, so nothing ever promoted it.
+  - The broker's sweeper expires provisional rows that have no traffic after `--provisional-hours`
+    (default 6).
+
+  So every quiet repo mailbox was forgotten. Mail sent to it afterwards was stored with a warning
+  and no owner. When the session registered again, it got a fresh cursor at the head, so that mail
+  was never counted as unread. Addresses that had subscribed before 0.4.18 were promoted back then,
+  which is why the defect only showed on newer ones.
+
+  **Registering is now joining:**
+  - `register` writes a joined row, and promotes an existing provisional row on conflict, so the
+    next session start repairs what an older broker wrote.
+  - It still never demotes.
+  - The sweeper and the age-based prune are unchanged. They now apply only to rows nothing has
+    registered.
+
+  The fix is in the broker, so it takes effect when the broker runs this build. The client
+  version does not matter.
 - **`docs/plan.md`'s commit references resolve again.** Six ids in the phase table and the
   relay-supervision notes had stopped resolving in an earlier history change, before the 25 Sep
   rewrite. Each is now the commit that actually did the work, identified by what it contains, not
@@ -49,6 +73,10 @@ explicitly not part of it and can change in a patch.
 
 ### Changed
 
+- **`peers` now lists every registered address, not only those that have subscribed.** This
+  follows from the fix: a registration is a claim on a mailbox, so the roster shows it. `peers
+  --all` adds only provisional rows, which a current broker writes only for a subscription with no
+  registration (promoted at once) and which older brokers left behind.
 - **CI and release run `actions/checkout@v7` and `actions/cache@v6`**, up from `@v4`, which GitHub
   flagged as targeting the deprecated Node 20 runtime. Both new majors run on Node 24. Their
   breaking changes were read, not assumed, and none touches these workflows. checkout v6 moved

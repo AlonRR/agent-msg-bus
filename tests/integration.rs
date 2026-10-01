@@ -360,14 +360,18 @@ async fn a_send_that_pushed_to_nobody_explains_why() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_sweeper_forgets_aged_provisional_entries_but_never_a_live_one() {
     let h = start().await;
-    let c = h.client();
-    blocking(move || {
-        c.register("machine-a/aged", "s1", "machine-a", "r", "/x", 1).unwrap();
-        c.register("machine-a/aged-but-live", "s2", "machine-a", "r", "/x", 2).unwrap();
-    })
-    .await;
+    // Provisional rows are made in the store directly: `register` writes a joined row, so no
+    // client call produces a lasting provisional one any more. Older brokers left such rows behind,
+    // and those are what the sweeper still exists for.
+    {
+        let store = h.state.store.lock().unwrap();
+        store.ensure_registered("machine-a/aged", "machine-a").unwrap();
+        store.ensure_registered("machine-a/aged-but-live", "machine-a").unwrap();
+    }
 
-    // Hold a socket on one of them. A live socket must outrank any clock.
+    // Hold a socket on one of them. A live socket must outrank any clock. Caveat: subscribing also
+    // promotes, so this half cannot fail even without the `is_live` guard - it is kept as the
+    // statement of intent, not as proof of the guard.
     let _sock = connect(&h, "machine-a/aged-but-live").await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -383,6 +387,32 @@ async fn the_sweeper_forgets_aged_provisional_entries_but_never_a_live_one() {
     let c2 = h.client();
     let p = blocking(move || c2.peers(true).unwrap()).await;
     assert!(!p.known.iter().any(|k| k.addr == "machine-a/aged"), "swept entry still in the registry");
+}
+
+/// The 1 Oct 2026 report, end to end through the broker: a session that registers - as the
+/// SessionStart hook does - and then only polls, never subscribing, must still be registered after
+/// the sweeper has run. It was forgotten instead, about six hours after its session started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_that_registers_and_only_polls_survives_the_sweeper() {
+    let h = start().await;
+    let c = h.client();
+    blocking(move || c.register("machine-a/polls-only", "s1", "machine-a", "r", "/x", 1).unwrap())
+        .await;
+
+    // -1h cutoff => the registration is already past the provisional clock.
+    let removed = agent_msg_bus::server::sweep_provisional(&h.state, -1);
+    assert!(
+        !removed.contains(&"machine-a/polls-only".to_string()),
+        "the sweeper forgot a registered address that only polls: {removed:?}"
+    );
+
+    let c2 = h.client();
+    let p = blocking(move || c2.peers(false).unwrap()).await;
+    assert!(
+        p.known.iter().any(|k| k.addr == "machine-a/polls-only"),
+        "a registered address is missing from peers: {:?}",
+        p.known.iter().map(|k| &k.addr).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

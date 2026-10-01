@@ -100,7 +100,7 @@ enum Cmd {
     Ack { addr: String, up_to_id: String },
     /// Who is on the bus (addresses that have actually joined).
     Peers {
-        /// Include provisional addresses: sessions that registered but never subscribed.
+        /// Include provisional addresses: rows nothing has registered, mostly left by older brokers.
         #[arg(long)]
         all: bool,
     },
