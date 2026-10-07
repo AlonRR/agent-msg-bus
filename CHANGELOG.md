@@ -22,13 +22,39 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.24] — 2026-10-07
+
 ### Fixed
 
+- **The SessionStart hook no longer hangs on a broker that accepts the connection and never
+  answers.** None of its three broker calls had a deadline; only the relay check did. A stalled
+  broker therefore held the hook until Claude Code killed it at the hook's 15 s limit, and the
+  session started with no banner at all. Reported from a machine that recorded two such
+  timeouts, both during mass restarts.
+  - **Before:** measured against a listener that accepts and stays silent, the 0.4.23 hook was
+    still waiting when a 20 s cap killed it, and had printed nothing.
+  - **Now:** every client call has a deadline. CLI commands get 30 s, and each of the hook's
+    broker calls gets 3 s, so the worst case is 2 s + 3 x 3 s = 11 s. A compile-time assertion
+    keeps that inside the 15 s limit, with 2 s spare.
+  - **Unconfirmed, not failed:** the same stalled broker now gets a banner in about 6 s.
+    `ClientError::Timeout` is a separate error, because a register that timed out may still have
+    landed. So the banner says the registration is UNCONFIRMED and points to `whoami`, rather than
+    claiming the session is not registered.
 - **`docs/usage.md` no longer warns about a sweeper bug fixed in v0.2.0.** It said a single
   broadcast to `machine/*` made every address on that machine unsweepable. That stopped being true
   when being addressed by a wildcard came to count as delivery rather than participation. The
   warning now says what a broadcast still does: it reaches every matching address, including
   abandoned ones, and stays unread in each until acked.
+
+### Added
+
+- **The banner ends with a one-line timing of the hook's own steps**, for example `hook timing
+  (in-process, ms): relay 2, broker 1, register 0, peers 24, total 29`.
+  - Claude Code records its own `durationMs` for the hook in the same transcript, so the difference
+    between the two is the time spent outside this binary.
+  - Measured on 7 Oct, that is most of it. The whole hook runs in about 0.13 s wall-clock and
+    25-58 ms in-process, against a recorded median of 3.4 s.
+  - The line lets that be attributed run by run before anything is optimised.
 
 ## [0.4.23] — 2026-10-01
 

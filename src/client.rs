@@ -4,16 +4,26 @@
 //! one command at a time from a shell.
 
 use serde::Deserialize;
+use std::time::Duration;
+
+/// The deadline on every call unless a caller asks for a shorter one. Generous, because a CLI
+/// command reading a long history is allowed to take a while; what it must never do is hang.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Client {
     base: String,
     token: String,
+    agent: ureq::Agent,
+    timeout: Duration,
 }
 
 #[derive(Debug)]
 pub enum ClientError {
     Http(String),
     Status(u16, String),
+    /// No answer within the deadline. Kept apart from `Http` because a timed-out request may still
+    /// have taken effect at the broker, which a refusal or a dead connection has not.
+    Timeout(Duration),
 }
 
 impl std::fmt::Display for ClientError {
@@ -24,8 +34,24 @@ impl std::fmt::Display for ClientError {
             // look like an idle bus - that indistinguishability is what let the old system sit
             // broken for five days.
             ClientError::Status(c, b) => write!(f, "HTTP {c}: {b}"),
+            ClientError::Timeout(t) => write!(f, "no answer within {} ms (timed out)", t.as_millis()),
         }
     }
+}
+
+/// Was this a deadline expiring, rather than a refusal or a broken connection? ureq reports a
+/// timeout as an I/O error somewhere in the source chain, so walk it.
+fn is_timeout(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur = Some(e);
+    while let Some(err) = cur {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            if matches!(io.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) {
+                return true;
+            }
+        }
+        cur = err.source();
+    }
+    false
 }
 
 impl std::error::Error for ClientError {}
@@ -52,32 +78,63 @@ pub struct KnownPeer {
 
 impl Client {
     pub fn new(base: &str, token: &str) -> Client {
-        Client { base: base.trim_end_matches('/').to_string(), token: token.to_string() }
+        Client::with_timeout(base, token, DEFAULT_TIMEOUT)
     }
 
-    fn post(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value, ClientError> {
-        match ureq::post(&format!("{}{}", self.base, path))
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .send_json(body)
-        {
-            Ok(r) => r.into_json().map_err(|e| ClientError::Http(e.to_string())),
-            Err(ureq::Error::Status(code, r)) => {
-                Err(ClientError::Status(code, r.into_string().unwrap_or_default()))
-            }
-            Err(e) => Err(ClientError::Http(e.to_string())),
+    /// A client whose every call gives up after `timeout`: connecting, sending and reading the
+    /// reply together. The SessionStart hook uses a short one, because Claude Code kills the hook
+    /// outright at its own limit and the session then starts with no banner at all.
+    pub fn with_timeout(base: &str, token: &str, timeout: Duration) -> Client {
+        Client {
+            base: base.trim_end_matches('/').to_string(),
+            token: token.to_string(),
+            agent: ureq::AgentBuilder::new().timeout(timeout).build(),
+            timeout,
         }
     }
 
-    fn get(&self, path: &str) -> Result<serde_json::Value, ClientError> {
-        match ureq::get(&format!("{}{}", self.base, path))
+    fn post(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value, ClientError> {
+        let r = self
+            .agent
+            .post(&format!("{}{}", self.base, path))
             .set("Authorization", &format!("Bearer {}", self.token))
-            .call()
-        {
-            Ok(r) => r.into_json().map_err(|e| ClientError::Http(e.to_string())),
+            .send_json(body);
+        self.finish(r)
+    }
+
+    fn get(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        let r = self
+            .agent
+            .get(&format!("{}{}", self.base, path))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .call();
+        self.finish(r)
+    }
+
+    /// One place that turns ureq's outcome into ours, so a timeout is recognised on every route,
+    /// including one that expires while the body is still being read.
+    fn finish(
+        &self,
+        r: Result<ureq::Response, ureq::Error>,
+    ) -> Result<serde_json::Value, ClientError> {
+        match r {
+            Ok(r) => r.into_json().map_err(|e| {
+                if is_timeout(&e) {
+                    ClientError::Timeout(self.timeout)
+                } else {
+                    ClientError::Http(e.to_string())
+                }
+            }),
             Err(ureq::Error::Status(code, r)) => {
                 Err(ClientError::Status(code, r.into_string().unwrap_or_default()))
             }
-            Err(e) => Err(ClientError::Http(e.to_string())),
+            Err(ureq::Error::Transport(t)) => {
+                if is_timeout(&t) {
+                    Err(ClientError::Timeout(self.timeout))
+                } else {
+                    Err(ClientError::Http(t.to_string()))
+                }
+            }
         }
     }
 
@@ -297,5 +354,33 @@ mod unread_reply_tests {
         let (msgs, total) = unread_reply(&new).unwrap();
         assert!(msgs.is_empty());
         assert_eq!(total, 7);
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::{Client, ClientError};
+    use std::time::{Duration, Instant};
+
+    /// Reported 7 Oct 2026: the SessionStart hook's broker calls had no deadline, so a broker that
+    /// accepted the connection and then stalled held the hook until Claude Code killed it at 15 s,
+    /// and the session started with no banner at all. A stall has to come back as a timeout, fast,
+    /// and be distinguishable from a refusal - a timed-out register may still have landed.
+    #[test]
+    fn a_broker_that_accepts_and_never_answers_is_a_timeout_not_a_hang() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            // Accept and hold every connection, never writing a byte.
+            let mut held = Vec::new();
+            for s in listener.incoming() {
+                held.push(s);
+            }
+        });
+        let c = Client::with_timeout(&format!("http://{addr}"), "", Duration::from_millis(300));
+        let t0 = Instant::now();
+        let err = c.register("machine-a/x", "", "machine-a", "", "", 0).unwrap_err();
+        assert!(t0.elapsed() < Duration::from_secs(3), "the stall was not cut short: {:?}", t0.elapsed());
+        assert!(matches!(err, ClientError::Timeout(_)), "a stall was not reported as a timeout: {err}");
     }
 }
