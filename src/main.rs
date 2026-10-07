@@ -316,6 +316,32 @@ async fn watch(relay: &str, addr: &str, fallback: Option<String>) -> ! {
     agent_msg_bus::watch::run(relay, addr, fallback.as_deref()).await
 }
 
+/// Say what `tidy` did to the replaced builds. Silent when there was nothing to do.
+fn print_tidy(t: &agent_msg_bus::update::Tidy, dry_run: bool) {
+    let verb = if dry_run { "would " } else { "" };
+    if !t.moved.is_empty() {
+        println!("old builds: {verb}move {} into the old/ folder beside the binary", t.moved.len());
+    }
+    if !t.removed.is_empty() {
+        let kept: Vec<String> = t
+            .kept
+            .iter()
+            .filter_map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+            .collect();
+        println!(
+            "old builds: {verb}remove {}, keeping the newest {}: {}",
+            t.removed.len(),
+            t.kept.len(),
+            kept.join(", ")
+        );
+    }
+    // Usually a build some process is still running, which Windows will not delete. It is left
+    // alone, and the next tidy tries again.
+    for (p, why) in &t.failed {
+        println!("old builds: left {} ({why})", p.display());
+    }
+}
+
 /// Swap the installed binary. Reports what stays on the old build; never restarts anything.
 fn update(from: Option<&str>, to: Option<&str>, dry_run: bool, force: bool) {
     use agent_msg_bus::update as up;
@@ -338,7 +364,10 @@ fn update(from: Option<&str>, to: Option<&str>, dry_run: bool, force: bool) {
     );
 
     if plan.already_current() {
-        println!("\nalready on {}; nothing to do.", plan.from_version);
+        println!("\nalready on {}; nothing to install.", plan.from_version);
+        // Still tidy: this is how a machine cleans up the builds earlier releases left lying
+        // around, without having to wait for a newer one.
+        print_tidy(&up::tidy(&to, up::KEEP_OLD, dry_run), dry_run);
         return;
     }
     // Before --dry-run, deliberately: a dry run of a refused update should report the refusal, not
@@ -356,6 +385,7 @@ fn update(from: Option<&str>, to: Option<&str>, dry_run: bool, force: bool) {
     }
     if dry_run {
         println!("\n--dry-run: would move the installed binary to {}", plan.backup.display());
+        print_tidy(&up::tidy_with(&to, up::KEEP_OLD, true, Some(&plan.backup)), true);
         return;
     }
 
@@ -365,6 +395,7 @@ fn update(from: Option<&str>, to: Option<&str>, dry_run: bool, force: bool) {
     }
     println!("\ninstalled {} at {}", plan.from_version, plan.to.display());
     println!("previous build kept at {}", plan.backup.display());
+    print_tidy(&up::tidy(&to, up::KEEP_OLD, false), false);
 
     // The whole point of the rename-swap is that these are STILL RUNNING. Saying so is not a
     // warning about a failure; it is the completion report. An update that silently left a relay on
@@ -446,6 +477,7 @@ fn self_update(from: Option<&str>, to: Option<&str>, dry_run: bool) {
                 Ok(p) => {
                     println!("self-update: installed {version} at {}", p.to.display());
                     println!("self-update: previous build kept at {}", p.backup.display());
+                    print_tidy(&up::tidy(&p.to, up::KEEP_OLD, false), false);
                     let holders = up::processes_still_on_the_old_build();
                     if !holders.is_empty() {
                         println!(

@@ -68,9 +68,9 @@ banner. Nothing updates itself: replacing a binary changes a machine, and on thi
 decision for a person.
 
 `agent-msg-bus update` is the safe way to act on it. A running executable cannot be overwritten but
-*can be renamed*, so the installed binary is moved aside — its version kept in the filename — and
-the new one copied into the freed path. **Nothing is killed and nothing is restarted.** Processes
-already running carry on with the old file, undisturbed:
+*can be renamed*, so the installed binary is moved aside into an `old/` folder beside it, with its
+version kept in the filename, and the new one copied into the freed path. **Nothing is killed and
+nothing is restarted.** Processes already running carry on with the old file, undisturbed:
 
 - a session picks the new build up at its **next start**, when the SessionStart hook runs the
   installed binary (a `watch`, if one was deliberately started, keeps its build until restarted);
@@ -79,6 +79,12 @@ already running carry on with the old file, undisturbed:
 That last one is a decision, not a step. Restarting the relay makes every session on the machine
 briefly deaf, and if its supervisor cannot relaunch it they stay deaf — so check that the supervisor
 actually works *before* stopping it. See the relay note at the top of this page.
+
+`update` keeps the **three newest** replaced builds in `old/`, compared as versions, which is enough
+to roll back by hand, and removes the rest. A build some process is still running cannot be removed
+on Windows; it is left, and the next update tries again. Releases before 0.4.25 left every replaced
+build loose beside the binary instead. Any `update` gathers those into `old/` and prunes them too,
+including one that finds nothing newer to install.
 
 ⚠️ **`update` is not the installer.** `scripts/install-windows.ps1` kills every `agent-msg-bus.exe`
 before copying, which is right for a first install and wrong for an update: it ends every session's

@@ -22,7 +22,26 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
-## [0.4.24] — 2026-10-07
+## [0.4.25] — 2026-10-07
+
+### Fixed
+
+- **`update` no longer piles every replaced build up beside the live binary.** It renamed the
+  installed binary aside as `<name>.<version>.old` in the same folder and never removed one. On
+  7 Oct one machine had 23 of them, 0.4.0 through 0.4.23 plus one `.unknown.old`, 162 MB in all.
+  Reported from that machine.
+  - Replaced builds now go into an `old/` folder beside the binary.
+  - After every swap, `update` and `self-update` keep the three newest builds and remove the rest.
+    Versions are compared as numbers, so 0.4.10 counts as newer than 0.4.9, and a label that is not
+    a version counts as oldest.
+  - Loose builds left by earlier releases are gathered into the folder first.
+  - A build some process is still running cannot be deleted on Windows. It is left in place,
+    reported, and tried again next time.
+  - Nothing except `<name>.*.old` files is touched.
+  - **`update` tidies even when it finds nothing newer to install,** so a machine can clean up
+    without waiting for a release. `--dry-run` reports what it would move and remove.
+
+ — 2026-10-07
 
 ### Fixed
 

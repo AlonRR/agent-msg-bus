@@ -224,16 +224,125 @@ pub fn plan(from: &Path, to: &Path) -> Result<Plan, String> {
     // that a still-running process is executing — which on Windows would fail — and so the file
     // itself says what it is if someone has to roll back by hand.
     let label = to_version.clone().unwrap_or_else(|| "unknown".into());
-    let mut backup = to.as_os_str().to_os_string();
-    backup.push(format!(".{label}.old"));
 
     Ok(Plan {
         from: from.to_path_buf(),
         to: to.to_path_buf(),
         from_version,
         to_version,
-        backup: PathBuf::from(backup),
+        backup: backup_path(to, &label),
     })
+}
+
+/// How many replaced builds `tidy` keeps: enough to roll back a few releases by hand.
+pub const KEEP_OLD: usize = 3;
+
+/// Where the replaced binary goes: `<dir>/old/<name>.<version>.old`.
+///
+/// One folder for the set, not a sibling per release. Until 0.4.25 every update left its backup
+/// beside the live binary, and on 7 Oct 2026 one machine had 23 of them there, 162 MB.
+pub fn backup_path(to: &Path, label: &str) -> PathBuf {
+    let dir = to.parent().map(Path::to_path_buf).unwrap_or_default();
+    let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    dir.join("old").join(format!("{name}.{label}.old"))
+}
+
+/// What `tidy` did, or with `dry_run`, would do.
+#[derive(Debug, Default)]
+pub struct Tidy {
+    /// Loose old builds moved from beside the binary into `old/` (their new paths).
+    pub moved: Vec<PathBuf>,
+    /// Old builds deleted, oldest versions first out.
+    pub removed: Vec<PathBuf>,
+    /// Old builds kept: the newest `keep`.
+    pub kept: Vec<PathBuf>,
+    /// Files that could not be moved or deleted, with why. On Windows a build some process is
+    /// still running cannot be deleted; it is left alone, and the next tidy tries again.
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// Gather the replaced builds into `old/` and keep only the newest `keep` of them.
+///
+/// Fixes what earlier releases left behind as well as what this one would: loose
+/// `<name>.<version>.old` siblings are moved into the folder first. Versions are compared as
+/// numbers, so 0.4.10 is newer than 0.4.9, and a label that is not a version (`unknown`) counts as
+/// oldest. Nothing but `<name>.*.old` files is touched, and the live binary never is.
+pub fn tidy(to: &Path, keep: usize, dry_run: bool) -> Tidy {
+    tidy_with(to, keep, dry_run, None)
+}
+
+/// `tidy`, counting one more build that is not on disk yet: in a dry run of an update, the
+/// installed binary the swap would set aside. Without it the dry run describes a different
+/// outcome from the run it stands in for.
+pub fn tidy_with(to: &Path, keep: usize, dry_run: bool, incoming: Option<&Path>) -> Tidy {
+    let mut report = Tidy::default();
+    let Some(name) = to.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return report;
+    };
+    let dir = to.parent().map(Path::to_path_buf).unwrap_or_default();
+    let old = dir.join("old");
+    let prefix = format!("{name}.");
+    let label_of = |file: &str| -> Option<String> {
+        let rest = file.strip_prefix(&prefix)?.strip_suffix(".old")?;
+        (!rest.is_empty()).then(|| rest.to_string())
+    };
+    let old_builds_in = |d: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(d)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                    .filter(|e| label_of(&e.file_name().to_string_lossy()).is_some())
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // 1. Gather what earlier releases left beside the binary.
+    let mut builds = old_builds_in(&old);
+    for loose in old_builds_in(&dir) {
+        let dest = old.join(loose.file_name().unwrap_or_default());
+        if dry_run {
+            report.moved.push(dest.clone());
+            builds.push(dest);
+            continue;
+        }
+        let moved = std::fs::create_dir_all(&old).and_then(|()| std::fs::rename(&loose, &dest));
+        match moved {
+            Ok(()) => {
+                report.moved.push(dest.clone());
+                builds.push(dest);
+            }
+            Err(e) => report.failed.push((loose, e.to_string())),
+        }
+    }
+
+    if let Some(p) = incoming {
+        if !builds.iter().any(|b| b == p) {
+            builds.push(p.to_path_buf());
+        }
+    }
+
+    // 2. Newest first, by version; anything unparseable sorts last, by name for a stable order.
+    let version = |p: &PathBuf| {
+        p.file_name().and_then(|f| label_of(&f.to_string_lossy())).and_then(|l| version_triple(&l))
+    };
+    builds.sort_by(|a, b| version(b).cmp(&version(a)).then_with(|| a.cmp(b)));
+
+    // 3. Keep the newest `keep`; delete the rest, leaving anything still in use.
+    for (i, p) in builds.into_iter().enumerate() {
+        if i < keep {
+            report.kept.push(p);
+        } else if dry_run {
+            report.removed.push(p);
+        } else {
+            match std::fs::remove_file(&p) {
+                Ok(()) => report.removed.push(p),
+                Err(e) => report.failed.push((p, e.to_string())),
+            }
+        }
+    }
+    report
 }
 
 /// Rename the installed binary aside and copy the new one into its place.
@@ -250,6 +359,10 @@ pub fn apply(plan: &Plan) -> Result<(), String> {
         // carries the version it holds. Only a same-version leftover collides, and removing that is
         // safe to attempt and safe to fail.
         let _ = std::fs::remove_file(&plan.backup);
+        if let Some(old) = plan.backup.parent() {
+            std::fs::create_dir_all(old)
+                .map_err(|e| format!("cannot create {}: {e}", old.display()))?;
+        }
         std::fs::rename(&plan.to, &plan.backup).map_err(|e| {
             format!(
                 "cannot move {} aside to {}: {e}",
@@ -331,7 +444,8 @@ mod tests {
             to: to.clone(),
             from_version: "9.9.9".into(),
             to_version: Some("1.1.1".into()),
-            backup: PathBuf::from(format!("{}.1.1.1.old", to.display())),
+            // Into `old/`, which does not exist yet: `apply` has to create it.
+            backup: backup_path(&to, "1.1.1"),
         };
         apply(&plan).unwrap();
 
@@ -585,5 +699,107 @@ mod tests {
     #[test]
     fn identical_unparseable_versions_are_already_current() {
         assert_eq!(decide(Some("nightly-abc"), Some("nightly-abc")), SelfUpdate::AlreadyCurrent("nightly-abc".into()));
+    }
+}
+
+#[cfg(test)]
+mod tidy_tests {
+    use super::{backup_path, tidy};
+    use std::path::{Path, PathBuf};
+
+    fn fresh(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("amb-tidy-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// Reported 7 Oct 2026: `update` had left 23 `agent-msg-bus.exe.<version>.old` files, 162 MB,
+    /// beside the live binary on one machine. The replaced build now goes into one `old` folder.
+    #[test]
+    fn the_replaced_binary_goes_into_an_old_folder_not_beside_the_live_one() {
+        let to = PathBuf::from("bin").join("agent-msg-bus.exe");
+        assert_eq!(
+            backup_path(&to, "0.4.24"),
+            PathBuf::from("bin").join("old").join("agent-msg-bus.exe.0.4.24.old")
+        );
+    }
+
+    /// The producer is fixed, and so is what it already scattered: old siblings are moved into the
+    /// folder, and only the newest few are kept - compared as versions, so 0.4.10 is newer than
+    /// 0.4.9 - which is enough to roll back. Nothing that is not an old build is touched.
+    #[test]
+    fn tidy_gathers_old_builds_into_one_folder_and_keeps_only_the_newest() {
+        let d = fresh("gather");
+        let to = d.join("amb.exe");
+        std::fs::write(&to, b"LIVE").unwrap();
+        for v in ["0.4.1", "0.4.2", "0.4.9", "0.4.10", "unknown"] {
+            std::fs::write(d.join(format!("amb.exe.{v}.old")), v).unwrap();
+        }
+        std::fs::create_dir_all(d.join("old")).unwrap();
+        std::fs::write(d.join("old").join("amb.exe.0.4.8.old"), b"0.4.8").unwrap();
+        std::fs::write(d.join("notes.txt"), b"not ours").unwrap();
+
+        let report = tidy(&to, 3, false);
+
+        assert_eq!(
+            names(&d.join("old")),
+            vec!["amb.exe.0.4.10.old", "amb.exe.0.4.8.old", "amb.exe.0.4.9.old"],
+            "kept the wrong builds"
+        );
+        assert_eq!(names(&d), vec!["amb.exe", "notes.txt", "old"], "something old is still loose");
+        assert_eq!(std::fs::read(&to).unwrap(), b"LIVE", "the live binary was touched");
+        assert_eq!(report.removed.len(), 3, "0.4.1, 0.4.2 and unknown should go: {report:?}");
+    }
+
+    #[test]
+    fn a_dry_run_tidy_changes_nothing_and_says_what_it_would_do() {
+        let d = fresh("dry");
+        let to = d.join("amb.exe");
+        std::fs::write(&to, b"LIVE").unwrap();
+        for v in ["0.4.1", "0.4.2", "0.4.3", "0.4.4"] {
+            std::fs::write(d.join(format!("amb.exe.{v}.old")), v).unwrap();
+        }
+        let before = names(&d);
+
+        let report = tidy(&to, 3, true);
+
+        assert_eq!(names(&d), before, "a dry run changed the folder");
+        assert_eq!(report.removed.len(), 1, "should report 0.4.1 as the one to remove: {report:?}");
+    }
+}
+
+#[cfg(test)]
+mod tidy_dry_run_tests {
+    use super::{backup_path, tidy_with};
+
+    /// A dry run of an update has to describe the run it stands in for, and that run first sets
+    /// the installed binary aside. Found 7 Oct 2026 on a sandbox copy: the dry run said it would
+    /// keep 0.4.23, 0.4.22 and 0.4.21; the real run kept 0.4.24, 0.4.23 and 0.4.22.
+    #[test]
+    fn a_dry_run_counts_the_build_the_swap_itself_would_set_aside() {
+        let d = std::env::temp_dir().join(format!("amb-tidy-{}-incoming", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let to = d.join("amb.exe");
+        std::fs::write(&to, b"LIVE 0.4.24").unwrap();
+        for v in ["0.4.21", "0.4.22", "0.4.23"] {
+            std::fs::write(d.join(format!("amb.exe.{v}.old")), v).unwrap();
+        }
+        let incoming = backup_path(&to, "0.4.24");
+
+        let report = tidy_with(&to, 3, true, Some(&incoming));
+
+        assert!(report.kept.contains(&incoming), "the build being set aside was not counted: {report:?}");
+        assert_eq!(report.removed.len(), 1, "0.4.21 is the one that would go: {report:?}");
+        assert!(!incoming.exists(), "a dry run created a file");
     }
 }
