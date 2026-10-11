@@ -104,7 +104,13 @@ const CONFIRM_NOT_LIVE: u32 = 2;
 /// `/health` reported the address subscribed, and `peers` alone said offline.
 fn broker_thinks_live(addr: &str) -> Option<bool> {
     let cfg = crate::hook::load_config()?;
-    let client = crate::client::Client::new(&cfg.url, &cfg.token);
+    let client = crate::client::Client::configured(
+        &cfg.url,
+        &cfg.token,
+        crate::client::DEFAULT_TIMEOUT,
+        &cfg.ca_file,
+    )
+    .ok()?;
     let out = client.peers(true).ok()?;
     Some(out.known.iter().any(|k| k.addr == addr && k.live))
 }
@@ -224,7 +230,18 @@ fn register_bound(addr: &str) {
     let Some(cfg) = crate::hook::load_config() else { return };
     let cwd = std::env::current_dir().unwrap_or_default().to_string_lossy().to_string();
     let repo = addr.rsplit('/').next().unwrap_or_default().split('.').next().unwrap_or_default();
-    let client = crate::client::Client::new(&cfg.url, &cfg.token);
+    let client = match crate::client::Client::configured(
+        &cfg.url,
+        &cfg.token,
+        crate::client::DEFAULT_TIMEOUT,
+        &cfg.ca_file,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("watch: bound {addr} but could not register it ({e})");
+            return;
+        }
+    };
     if let Err(e) = client.register(
         addr,
         &std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default(),

@@ -3,7 +3,7 @@ name = "agent-msg-bus"
 # THE SINGLE SOURCE OF TRUTH FOR THE VERSION. `--version` reads it via clap's `version` attribute,
 # and the release tag is `v` + this string. A test asserts the first of those two, so the only way
 # they can drift is a tag that does not match — see CHANGELOG.md for the release steps.
-version = "0.4.25"
+version = "0.4.26"
 edition = "2021"
 description = "Push-delivery message bus that lets separately-started Claude Code sessions message each other, and have the message acted on when it arrives."
 readme = "README.md"
@@ -28,10 +28,21 @@ clap = { version = "4", features = ["derive", "env"] }
 # blocking HTTP for the CLI half. Deliberately not reqwest: the client path needs no
 # async runtime, and ureq keeps the single binary small.
 ureq = { version = "2", features = ["json"] }
-# WebSocket *client*, for the relay's upstream leg. Also used by the integration tests.
-tokio-tungstenite = "0.24"
+# WebSocket *client*, for the relay's upstream leg. Also used by the integration tests. The rustls
+# feature is what lets the relay reach a broker behind a TLS front (`wss://`); the relay passes its
+# own client config, so the webpki-roots the feature names are not what decides trust.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# TLS for both legs, built once in src/tls.rs and handed to ureq and to the relay. The same rustls
+# ureq already uses. No default features, and the ring provider named explicitly: the defaults pull
+# aws-lc-rs, which needs cmake and NASM to build and would break the Windows and Linux builds alike.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki-roots = "1"
 
 [dev-dependencies]
 # test-util: a paused clock, so a test can make time jump the way a suspended laptop does and then
 # watch what the heartbeat timer does on "waking". No new crate - a feature of the one above.
 tokio = { version = "1", features = ["test-util"] }
+# tests/tls.rs: a throwaway CA and server certificate, and a TLS front in front of a real broker.
+rcgen = "0.13"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }

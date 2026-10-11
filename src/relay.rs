@@ -95,6 +95,8 @@ pub struct RelayState {
     /// Addresses currently held by a local subscriber, mirroring the broker's one-socket-per-address
     /// rule so two sessions cannot quietly share one mailbox.
     pub busy: Arc<Mutex<HashSet<String>>>,
+    /// Trust for an `https://` broker's TLS front. See `crate::tls`.
+    pub tls: Arc<rustls::ClientConfig>,
 }
 
 #[derive(Deserialize)]
@@ -171,7 +173,6 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
     let release = |st: &RelayState| {
         st.busy.lock().unwrap().remove(&addr);
     };
-    let upstream = upstream_url(&st.broker, &addr, &st.token);
     let (mut ltx, mut lrx) = local.split();
     let mut backoff: u64 = 1;
     let mut announced_down = false;
@@ -189,17 +190,22 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
         let attempt_started = std::time::Instant::now();
         // Bounded, so that no attempt which was genuinely running can exceed CONNECT_TIMEOUT on any
         // OS. That bound is what lets `booked_attempt` treat a longer measurement as suspension.
-        let attempt = match tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async(upstream.as_str()),
-        )
-        .await
-        {
-            Ok(result) => result.map_err(|e| e.to_string()),
-            Err(_) => Err(format!("connect timed out after {}s", CONNECT_TIMEOUT.as_secs())),
+        // Built per attempt: a request is consumed by the connect and cannot be cloned.
+        let attempt = match upstream_request(&st.broker, &addr, &st.token) {
+            Err(e) => Err(e),
+            Ok(req) => {
+                match tokio::time::timeout(CONNECT_TIMEOUT, connect_upstream(req, st.tls.clone()))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        Err(format!("connect timed out after {}s", CONNECT_TIMEOUT.as_secs()))
+                    }
+                }
+            }
         };
         match attempt {
-            Ok((upstream, _)) => {
+            Ok(upstream) => {
                 log_event(&addr, "upstream connected");
                 if announced_down {
                     let _ = ltx
@@ -314,18 +320,61 @@ async fn pump(local: WebSocket, st: RelayState, addr: String) {
 }
 
 /// Build the upstream `/sub` URL. Kept here so the token is assembled in one place.
+///
+/// An `https://` broker is reached over `wss://`, and its URL carries no token: the TLS front in
+/// front of such a broker usually logs every request URL, so the token goes only in the
+/// `Authorization` header (see `upstream_request`). A plain `http://` broker keeps the query token
+/// as well, because brokers before 0.4.26 read the token on `/sub` only from the query, and a relay
+/// upgraded ahead of its broker must still connect.
 pub fn upstream_url(broker_base: &str, addr: &str, token: &str) -> String {
-    let host = broker_base
-        .strip_prefix("http://")
-        .or_else(|| broker_base.strip_prefix("https://"))
-        .unwrap_or(broker_base)
-        .trim_end_matches('/');
-    format!(
-        "ws://{}/sub?addr={}&token={}",
-        host,
-        crate::client::urlencode(addr),
-        crate::client::urlencode(token)
+    let (scheme, host) = match broker_base.strip_prefix("https://") {
+        Some(rest) => ("wss", rest),
+        None => ("ws", broker_base.strip_prefix("http://").unwrap_or(broker_base)),
+    };
+    let host = host.trim_end_matches('/');
+    let addr = crate::client::urlencode(addr);
+    if scheme == "wss" {
+        format!("wss://{host}/sub?addr={addr}")
+    } else {
+        format!("ws://{host}/sub?addr={addr}&token={}", crate::client::urlencode(token))
+    }
+}
+
+/// The upstream subscribe request: `upstream_url`, plus the token as `Authorization: Bearer`.
+pub fn upstream_request(
+    broker_base: &str,
+    addr: &str,
+    token: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = upstream_url(broker_base, addr, token);
+    let mut req = url.into_client_request().map_err(|e| format!("bad broker URL: {e}"))?;
+    let bearer = format!("Bearer {token}")
+        .parse()
+        .map_err(|_| "the token cannot be sent as an HTTP header".to_string())?;
+    req.headers_mut().insert("Authorization", bearer);
+    Ok(req)
+}
+
+pub type Upstream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Open the upstream socket. `tls` decides what a `wss://` broker's certificate must chain to; a
+/// `ws://` request does not use it. An untrusted certificate comes back with the setting that
+/// fixes it, because that error reaches the session as a status frame and is all it has to go on.
+pub async fn connect_upstream(
+    req: tokio_tungstenite::tungstenite::handshake::client::Request,
+    tls: Arc<rustls::ClientConfig>,
+) -> Result<Upstream, String> {
+    tokio_tungstenite::connect_async_tls_with_config(
+        req,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(tls)),
     )
+    .await
+    .map(|(s, _)| s)
+    .map_err(|e| crate::tls::with_hint(e.to_string()))
 }
 
 /// How often a still-unreachable upstream repeats itself. Long enough not to be chatter at a 30s
@@ -399,6 +448,31 @@ fn human(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn auth_header(r: &tokio_tungstenite::tungstenite::handshake::client::Request) -> String {
+        r.headers().get("authorization").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default()
+    }
+
+    /// Behind a TLS front the request URL is written to the proxy's access log, so the token must
+    /// travel in the header and nowhere in the URL. Before this the relay always built `ws://`, so
+    /// an `https://` broker could not be reached at all.
+    #[test]
+    fn an_https_broker_is_reached_over_wss_with_the_token_only_in_the_header() {
+        let r = upstream_request("https://bus.example:9450/", "m/repo", "s3cret").unwrap();
+        assert_eq!(r.uri().to_string(), "wss://bus.example:9450/sub?addr=m%2Frepo");
+        assert!(!r.uri().to_string().contains("s3cret"), "the token is in the URL: {}", r.uri());
+        assert_eq!(auth_header(&r), "Bearer s3cret");
+    }
+
+    /// A plain-HTTP broker keeps the query token as well, because brokers before 0.4.26 read the
+    /// token only from the query on `/sub`; a relay upgraded ahead of its broker must still connect.
+    #[test]
+    fn a_plain_http_broker_still_gets_the_query_token_that_older_brokers_need() {
+        let r = upstream_request("http://192.0.2.10:9450", "m/repo", "s3cret").unwrap();
+        let expected = "ws://192.0.2.10:9450/sub?addr=m%2Frepo&token=s3cret"; // secret-gate: allow
+        assert_eq!(r.uri().to_string(), expected);
+        assert_eq!(auth_header(&r), "Bearer s3cret");
+    }
 
     /// The defect: a long outage said one thing and then went quiet, which from inside a session is
     /// byte-identical to a broker that is never coming back. The relay knows the difference — it is

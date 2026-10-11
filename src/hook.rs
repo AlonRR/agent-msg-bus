@@ -38,6 +38,11 @@ pub struct Config {
     /// builds come from.
     #[serde(default)]
     pub update_source: String,
+    /// A PEM file of extra roots to trust for an `https://` broker, alongside the public roots.
+    /// Empty means the public roots only. Optional, so a config written before it existed still
+    /// loads: a config that fails to parse reads as no config at all.
+    #[serde(default)]
+    pub ca_file: String,
 }
 
 fn default_relay() -> String {
@@ -409,7 +414,21 @@ pub fn run() -> ! {
 
     // Every broker call has a deadline. Without one, a broker that accepted the connection and then
     // stalled held this hook until Claude Code killed it, and the session started with no banner.
-    let client = crate::client::Client::with_timeout(&cfg.url, &cfg.token, BROKER_CALL_TIMEOUT);
+    let client = match crate::client::Client::configured(
+        &cfg.url,
+        &cfg.token,
+        BROKER_CALL_TIMEOUT,
+        &cfg.ca_file,
+    ) {
+        Ok(c) => c,
+        Err(e) => emit(&format!(
+            "agent-msg-bus: THIS SESSION IS NOT CONNECTED TO THE BUS: {e}.\n\
+             Nothing was registered, and messages from other Claude Code sessions will not reach \
+             this session until `ca_file` in {} names a readable PEM file, or is removed.\n\n{}",
+            config_path().display(),
+            timing_line(&steps, started.elapsed().as_millis())
+        )),
+    };
     let pid = std::process::id() as i64;
 
     // THIS IS HOW A SESSION THAT WAS NOT RUNNING LEARNS IT IS BEHIND. A live session is told by its
@@ -796,6 +815,25 @@ mod monitor_command_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `load_config` treats a config that fails to parse as no config at all. A new field that is
+    /// not optional would therefore turn every existing machine's config into "unconfigured" on
+    /// upgrade, and the hook would go quiet everywhere at once.
+    #[test]
+    fn a_config_written_before_ca_file_existed_still_loads() {
+        let old = r#"{"url":"http://192.0.2.10:9450","machine":"m","token":"t"}"#;
+        let cfg: Config = serde_json::from_str(old).expect("an existing config no longer parses");
+        assert_eq!(cfg.ca_file, "", "an unset ca_file must mean the public roots only");
+    }
+
+    #[test]
+    fn ca_file_is_read_from_the_config() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"url":"https://bus.example:9450","machine":"m","token":"t","ca_file":"C:/x/ca.pem"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ca_file, "C:/x/ca.pem");
+    }
 
     /// The pure derivations are tested rather than `derive_address`, deliberately: that one consults
     /// the pin, which reads `CLAUDE_CODE_SESSION_ID` and a real file — and `cargo test` inherits the

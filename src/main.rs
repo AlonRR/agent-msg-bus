@@ -31,6 +31,11 @@ struct Cli {
     #[arg(long, global = true, env = "AMB_TOKEN", default_value = "")]
     token: String,
 
+    /// PEM file of a private root to trust for an https:// broker, alongside the public roots.
+    /// Env: AMB_CA_FILE. Falls back to `ca_file` in the config file.
+    #[arg(long, global = true, env = "AMB_CA_FILE", default_value = "")]
+    ca_file: String,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -261,12 +266,13 @@ enum Cmd {
     },
 }
 
-/// Resolve broker URL and token: explicit flag/env first, then `~/.agent-msg-bus/config.json`.
+/// Resolve broker URL, token and CA file: explicit flag/env first, then
+/// `~/.agent-msg-bus/config.json`.
 ///
 /// The config fallback is what lets the relay run as a Scheduled Task or systemd unit without a
 /// token on its command line or in a unit file - the two places a secret is most likely to be read
 /// by something that should not have it.
-fn resolve_conn(cli: &Cli) -> (String, String) {
+fn resolve_conn(cli: &Cli) -> (String, String, String) {
     let default_url = "http://127.0.0.1:9450";
     let cfg = agent_msg_bus::hook::load_config();
     let url = if cli.url != default_url {
@@ -279,7 +285,23 @@ fn resolve_conn(cli: &Cli) -> (String, String) {
     } else {
         cfg.as_ref().map(|c| c.token.clone()).unwrap_or_default()
     };
-    (url, token)
+    let ca_file = if !cli.ca_file.is_empty() {
+        cli.ca_file.clone()
+    } else {
+        cfg.as_ref().map(|c| c.ca_file.clone()).unwrap_or_default()
+    };
+    (url, token, ca_file)
+}
+
+/// The client for a CLI command. An unusable `ca_file` ends the command here, naming the file,
+/// rather than surfacing later as a certificate error that names nothing.
+fn cli_client(url: &str, token: &str, ca_file: &str) -> Client {
+    Client::configured(url, token, agent_msg_bus::client::DEFAULT_TIMEOUT, ca_file).unwrap_or_else(
+        |e| {
+            eprintln!("agent-msg-bus: {e}");
+            std::process::exit(1);
+        },
+    )
 }
 
 fn main() {
@@ -290,8 +312,8 @@ fn main() {
         }
         Cmd::Relay { ref listen } => {
             let listen = listen.clone();
-            let (url, token) = resolve_conn(&cli);
-            relay(&listen, &url, &token)
+            let (url, token, ca_file) = resolve_conn(&cli);
+            relay(&listen, &url, &token, &ca_file)
         }
         Cmd::SessionStart => agent_msg_bus::hook::run(),
         Cmd::Watch { ref addr, ref relay, ref fallback } => {
@@ -567,8 +589,8 @@ fn whoami(cli: &Cli) {
     // `peers` reports it live, and nothing is ever sent there because nobody knows the address.
     // Use the RESOLVED connection, not cfg directly - otherwise --url is silently ignored here
     // while working everywhere else, which is its own small version of this bug.
-    let (url, token) = resolve_conn(cli);
-    let peers = agent_msg_bus::client::Client::new(&url, &token)
+    let (url, token, ca_file) = resolve_conn(cli);
+    let peers = cli_client(&url, &token, &ca_file)
         .peers(true)
         .map_err(|e| e.to_string());
     let status = agent_msg_bus::identity::classify(&addr, &peers);
@@ -645,15 +667,27 @@ fn whoami(cli: &Cli) {
 }
 
 #[tokio::main]
-async fn relay(listen: &str, broker: &str, token: &str) {
+async fn relay(listen: &str, broker: &str, token: &str, ca_file: &str) {
     if token.is_empty() {
         eprintln!("agent-msg-bus: no token. Pass --token or set AMB_TOKEN.");
         std::process::exit(1);
     }
+    // Checked at start, not at the first connect: a relay that starts and then fails every attempt
+    // on an unreadable CA file reports it only to a session that subscribes, and only after the
+    // backoff has grown.
+    let ca = (!ca_file.is_empty()).then(|| std::path::Path::new(ca_file));
+    let tls = match agent_msg_bus::tls::client_config(ca) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("agent-msg-bus: {e}");
+            std::process::exit(1);
+        }
+    };
     let state = agent_msg_bus::relay::RelayState {
         broker: Arc::new(broker.to_string()),
         token: Arc::new(token.to_string()),
         busy: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        tls,
     };
 
     let listener = match tokio::net::TcpListener::bind(listen).await {
@@ -674,6 +708,9 @@ async fn relay(listen: &str, broker: &str, token: &str) {
     // gets printed, and the URL below is what a session copies into a Monitor call. The token stays
     // on the relay's upstream leg and never reaches the session.
     println!("relay listening on {listen} -> broker {broker}");
+    if let Some(ca) = ca {
+        println!("trusting {} for the broker's TLS, alongside the public roots", ca.display());
+    }
     println!("subscribe with: ws://{listen}/sub?addr=<your-address>");
     if let Err(e) = axum::serve(listener, agent_msg_bus::relay::app(state)).await {
         eprintln!("agent-msg-bus: relay error: {e}");
@@ -759,8 +796,8 @@ async fn serve(
 }
 
 fn run_client(cli: &Cli) {
-    let (url, token) = resolve_conn(cli);
-    let c = Client::new(&url, &token);
+    let (url, token, ca_file) = resolve_conn(cli);
+    let c = cli_client(&url, &token, &ca_file);
     let result: Result<(), Box<dyn std::error::Error>> = match &cli.cmd {
         Cmd::Register { addr, session_id, machine, repo, cwd, pid } => c
             .register(addr, session_id, machine, repo, cwd, *pid)

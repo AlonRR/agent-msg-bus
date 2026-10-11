@@ -859,3 +859,40 @@ async fn acking_an_unknown_mailbox_is_404_not_a_cheerful_ok() {
     .await;
     assert!(ok, "the real address was refused alongside the typo");
 }
+
+/// A subscribe request built the way the relay builds one for an `https://` broker: the token in
+/// an `Authorization` header and nowhere in the URL.
+fn header_only_sub(h: &Harness, addr: &str, token: &str) -> tungstenite::handshake::client::Request {
+    use tungstenite::client::IntoClientRequest;
+    let host = h.base.strip_prefix("http://").unwrap();
+    let mut req = format!("ws://{host}/sub?addr={}", agent_msg_bus::client::urlencode(addr))
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    req
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscribe_can_carry_its_token_in_a_header_instead_of_the_url() {
+    // Behind a TLS front, every request URL lands in the proxy's access log, so a `?token=` there
+    // is a credential in a log file. The HTTP routes always took the header; `/sub` read only the
+    // query, which left the relay no way to subscribe without writing the token into that log.
+    let h = start().await;
+    let c = h.client();
+    blocking(move || c.register("machine-a/a", "s1", "machine-a", "homelab", "/x", 1).unwrap()).await;
+
+    let (mut sock, _) = tokio_tungstenite::connect_async(header_only_sub(&h, "machine-a/a", TOKEN))
+        .await
+        .expect("a subscribe with the token only in the Authorization header was refused");
+
+    let c = h.client();
+    blocking(move || c.send("machine-b/x", "machine-a/a", "fyi", "via header", "b", "").unwrap())
+        .await;
+    let got = next_text(&mut sock, Duration::from_secs(3)).await.expect("nothing delivered");
+    assert_eq!(got["subject"], "via header");
+
+    // The header is checked, not merely tolerated.
+    let res =
+        tokio_tungstenite::connect_async(header_only_sub(&h, "machine-a/b", "not-the-token")).await;
+    assert!(res.is_err(), "a bad token in the header was accepted");
+}

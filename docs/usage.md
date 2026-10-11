@@ -307,6 +307,13 @@ delivery, not participation.)
 
 - **A new token does not work** — the token file is read at startup only. Restart the service.
 
+- **"the broker's TLS certificate is not trusted"** (rustls calls it `UnknownIssuer`) — the machine
+  reaches the broker through a TLS front whose certificate comes from a private root. Save that
+  root's PEM to a file, and set `ca_file` in `~/.agent-msg-bus/config.json` to its path. The operating
+  system's certificate store is not consulted, so installing the root there does not help. Then
+  restart the relay, which reads the file at start. See *A TLS front* in
+  [operations.md](operations.md).
+
 ---
 
 ## ⛔ Re-read `--to` before every send. It is the field nobody checks.

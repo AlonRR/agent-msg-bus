@@ -9,5 +9,6 @@ pub mod hub;
 pub mod relay;
 pub mod server;
 pub mod store;
+pub mod tls;
 pub mod update;
 pub mod watch;

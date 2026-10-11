@@ -22,6 +22,37 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.26] — 2026-10-11
+
+### Added
+
+- **A machine can reach the broker through a TLS front.** This is for a laptop that is away from the
+  broker's network and comes in through a reverse proxy that terminates TLS. Before this, the relay
+  always built a `ws://` URL, and the WebSocket client had no TLS at all, so an `https://` broker
+  could not be reached on the relay leg.
+  - The relay now connects to an `https://` broker over `wss://`. The CLI and the hook already spoke
+    `https://`, and now share the relay's trust settings.
+  - **`ca_file`** (config key; `--ca-file` / `AMB_CA_FILE` override it) names a PEM file of
+    private roots to trust alongside the public web roots. Both legs use it. The operating system's
+    certificate store is not consulted.
+  - A `ca_file` that cannot be read, or holds no certificate, is an error at once that names the
+    file: the relay will not start, a CLI command exits 1, and the hook says so in the banner.
+    Trusting nothing extra while looking configured is the failure this avoids.
+  - An untrusted certificate is reported with the setting that fixes it, not as a bare
+    `UnknownIssuer`. The hint reaches the session through the relay's status frame.
+- **The broker's `/sub` accepts the token in an `Authorization: Bearer` header**, as every other
+  route already did. Before this it read only `?token=`, so subscribing meant writing the token into
+  any proxy access log on the way.
+
+### Changed
+
+- **The relay sends its token as `Authorization: Bearer` on every upstream connect.** For an
+  `https://` broker it sends it **only** there, and the URL carries no token. For a plain `http://`
+  broker it sends the query token as well, because older brokers need it.
+- **Deploy order: broker first.** A broker older than 0.4.26 refuses a relay pointed at an
+  `https://` URL with 401. A relay on `http://` is unaffected, so this release can reach clients in
+  any order until a machine's `url` changes to `https://`.
+
 ## [0.4.25] — 2026-10-07
 
 ### Fixed

@@ -97,7 +97,46 @@ auth of its own.
 
 A vhost in front of the broker is fine for opening `/health` or `/peers` in a browser. **Sessions
 cannot subscribe through it**: the proxy resolves to a private address too, so `Monitor` rejects it
-exactly as it rejects the broker. Do not present a vhost as the client endpoint.
+exactly as it rejects the broker. Do not present a vhost as the client endpoint for a *session*.
+A machine's *relay* can use one, which is what the next section is for.
+
+### A TLS front, for machines away from the broker's network
+
+The broker speaks plain HTTP and never TLS. A machine that has to reach it from outside its network
+(a laptop on a VPN or an overlay network, say) goes through a reverse proxy that terminates TLS and
+forwards to `9450`. From 0.4.26 both client legs use it: the CLI and hook over `https://`, and the
+relay over `wss://`. Sessions are unaffected: they still subscribe to their own machine's relay on
+loopback.
+
+On the client machine:
+
+```json
+{ "url": "https://<FRONT_HOST>:<PORT>", "machine": "<machine-name>", "token": "<this machine's token>",
+  "ca_file": "<path to the private root's PEM>" }
+```
+
+- **`ca_file`** is needed only when the front's certificate comes from a private root. It names one
+  PEM file, which is trusted *alongside* the public web roots. **The operating system's certificate
+  store is not consulted**, so installing the root into the Windows store does not make this tool
+  trust it. `--ca-file` and `AMB_CA_FILE` override the config, as `--url` and `AMB_URL` do.
+  - A `ca_file` that is unreadable or holds no certificate is an error at once, naming the file. The
+    relay refuses to start; a CLI command exits 1; the hook says so in the session's banner.
+  - An untrusted certificate is reported with the setting that fixes it, rather than as a bare
+    `UnknownIssuer`.
+- **The proxy must pass WebSocket upgrades through** on `/sub`. Most do by default.
+- **The token never appears in a URL.** A front usually writes every request URL to its access log.
+  The CLI has always sent the token as `Authorization: Bearer`. From 0.4.26 the relay does too, and
+  for an `https://` broker it sends it *only* there. The log still shows addresses (`/sub?addr=…`),
+  which are not secret.
+
+> 🔴 **Upgrade the broker first.** Brokers before 0.4.26 read the token on `/sub` only from the
+> query string. They refuse a relay that sends it only in the header, which is exactly what a relay
+> pointed at an `https://` URL does. A relay on plain `http://` still sends the query token as well,
+> so upgrading a relay ahead of its broker breaks nothing until its `url` changes to `https://`.
+
+> ⚠️ **The SessionStart hook gives each broker call 3 s.** TLS plus every proxy hop has to fit in
+> that. If it does not, the session still starts, with a banner saying registration is UNCONFIRMED.
+> Time a `/health` through the front before relying on it.
 
 ---
 
@@ -110,7 +149,9 @@ service.**
 { "url": "http://<BROKER_HOST>:9450", "machine": "<machine-name>", "token": "<this machine's token>" }
 ```
 
-at `~/.agent-msg-bus/config.json`, **mode 600 / owner-only ACL**.
+at `~/.agent-msg-bus/config.json`, **mode 600 / owner-only ACL**. A machine that reaches the broker
+through a TLS front uses an `https://` URL and may need `ca_file` (see
+[A TLS front](#a-tls-front-for-machines-away-from-the-brokers-network)).
 
 Then the relay — `agent-msg-bus relay --listen 127.0.0.1:9451` — as a **service**:
 

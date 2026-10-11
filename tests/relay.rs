@@ -46,6 +46,7 @@ async fn start() -> Rig {
         broker: Arc::new(format!("http://127.0.0.1:{bport}")),
         token: Arc::new(TOKEN.to_string()),
         busy: Arc::new(Mutex::new(HashSet::new())),
+        tls: agent_msg_bus::tls::client_config(None).unwrap(),
     };
     let rl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rport = rl.local_addr().unwrap().port();

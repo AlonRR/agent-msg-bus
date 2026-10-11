@@ -856,10 +856,18 @@ pub struct SubParams {
 
 async fn sub(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Query(p): Query<SubParams>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !st.auth.check(p.token.as_deref()) {
+    // The header first, as on every other route. A relay reaching this broker through a TLS front
+    // sends the token only there, so that it stays out of the front's access log; the query is
+    // still read for relays older than 0.4.26.
+    let mut q = HashMap::new();
+    if let Some(t) = &p.token {
+        q.insert("token".to_string(), t.clone());
+    }
+    if !st.auth.check(token_from(&headers, &q).as_deref()) {
         return unauthorized();
     }
     let force = matches!(p.force.as_deref(), Some("1") | Some("true"));

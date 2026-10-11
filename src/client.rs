@@ -93,6 +93,33 @@ impl Client {
         }
     }
 
+    /// A client that trusts what `tls` trusts. See `crate::tls` and `Client::configured`.
+    pub fn with_tls(
+        base: &str,
+        token: &str,
+        timeout: Duration,
+        tls: std::sync::Arc<rustls::ClientConfig>,
+    ) -> Client {
+        Client {
+            base: base.trim_end_matches('/').to_string(),
+            token: token.to_string(),
+            agent: ureq::AgentBuilder::new().timeout(timeout).tls_config(tls).build(),
+            timeout,
+        }
+    }
+
+    /// The client every command uses: `ca_file`, when set, is trusted alongside the public roots.
+    /// An unusable `ca_file` is an error here, before any request, naming the file.
+    pub fn configured(
+        base: &str,
+        token: &str,
+        timeout: Duration,
+        ca_file: &str,
+    ) -> Result<Client, String> {
+        let ca = (!ca_file.is_empty()).then(|| std::path::Path::new(ca_file));
+        Ok(Client::with_tls(base, token, timeout, crate::tls::client_config(ca)?))
+    }
+
     fn post(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value, ClientError> {
         let r = self
             .agent
@@ -132,7 +159,7 @@ impl Client {
                 if is_timeout(&t) {
                     Err(ClientError::Timeout(self.timeout))
                 } else {
-                    Err(ClientError::Http(t.to_string()))
+                    Err(ClientError::Http(crate::tls::with_hint(t.to_string())))
                 }
             }
         }
