@@ -226,3 +226,52 @@ is supposed to point at a committed artefact rather than live in a message body.
 > ⚠️ If you do back up `bus.db`, it is **SQLite in WAL mode**. A plain file copy captures the main
 > database without recent commits and **does not look corrupt — it looks like an older, plausible
 > history.** Use the online `.backup()` API, or checkpoint first.
+
+---
+
+## 7. Upgrading the broker
+
+`scripts/swap-broker.sh` swaps a new build into a running broker, on the broker's own host, and
+keeps a way back. Carry the checksum from the build host (section 1) and pass it in:
+
+```bash
+sudo scripts/swap-broker.sh ./agent-msg-bus <sha256 from the build host>
+```
+
+It stops at the first step that fails:
+
+1. **The build is the one you built, and it runs here.** The checksum is checked in the directory the
+   binary will run from. `--version` doubles as the glibc check, so a build this host cannot load
+   is refused while the old broker is still serving.
+2. **No rollback name for this version is taken yet:** `<bin>.pre-<version>`,
+   `<bin>.failed-<version>` and `<data>/backup-pre-<version>`. An earlier attempt left them, and a
+   person should look before they are reused.
+3. **The service stops, and all three database files are copied** while it is stopped, each copy
+   hash-checked. A cold copy of `bus.db`, `-wal` and `-shm` together is consistent; `bus.db` alone is
+   the plausible older history section 6 warns about. No `sqlite3` is needed.
+4. **The old binary is renamed aside** and the new one takes its place. Then the service starts.
+5. **`/health` must report the new version.** `systemctl is-active` is not enough: a unit can be
+   active while its process has not bound the port yet, or has already died. If `/health` does not
+   report the new version in time, the old binary goes back and is started again.
+
+| Exit | Meaning |
+|---|---|
+| `0` | Swapped, and `/health` reports the new version. |
+| `1` | Refused before anything changed, or rolled back with the old build healthy again. |
+| `2` | Rolled back, but `/health` does not answer. A person has to look. |
+
+> ⚠️ **A rollback restores the binary, not the database.** The new build may already have written to
+> it, and restoring the copy would drop whatever it accepted. On exit `2` the script prints the
+> restore command instead. That command deletes `bus.db-wal` and `bus.db-shm` before copying the
+> backup back, because a WAL left next to a restored `bus.db` is replayed into it.
+
+Settings come from the environment and default to the layout in section 2: `AMB_BIN`, `AMB_DATA`,
+`AMB_UNIT`, `AMB_HEALTH` (the `host:port` to ask), `AMB_WAIT` (seconds) and `SYSTEMCTL`. It needs
+`bash`, `sha256sum` and `timeout`, and nothing else; `curl` is not required.
+
+Relays drop their upstream socket while the broker restarts. They reconnect and re-subscribe their
+addresses by themselves, so no client machine needs touching. Upgrade the broker before any client
+that depends on a newer broker (see the 🔴 note in section 3).
+
+The script's tests (`scripts/test-swap-broker.sh`) run under `cargo test` on Linux. They use fake
+builds that answer `/health` and a fake `systemctl`, and cover every row of the exit table.

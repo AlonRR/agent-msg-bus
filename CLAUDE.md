@@ -61,7 +61,11 @@ this machine can get its relay back.
 - `cargo test` is the baseline — run it unchanged first, and compare against the count it prints
   rather than a number written down here, which goes stale within a release or two. Four groups:
   store/hook/update unit tests, CLI argument tests, integration tests that drive a real broker over
-  a real socket, and relay tests that cover the fallback path through a real 409.
+  a real socket, and relay tests that cover the fallback path through a real 409. **On Linux only**,
+  `tests/swap_broker.rs` also runs `scripts/test-swap-broker.sh`, so a Windows `cargo test` does
+  not exercise the broker swap script. From Windows, run that script under WSL, from the repo root:
+  `wsl.exe -e bash scripts/test-swap-broker.sh`. Keep the path relative: Git Bash rewrites an
+  absolute `/mnt/c/...` path unless `MSYS_NO_PATHCONV=1` is set.
 - **Behaviour change → write the failing test first.** Every fix in this repo's history has one, and
   the commit messages say what the symptom was. Keep that.
 - `cargo clippy --all-targets -- -D warnings` must stay clean; CI gates on it.

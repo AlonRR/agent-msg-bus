@@ -24,6 +24,19 @@ explicitly not part of it and can change in a patch.
 
 ### Added
 
+- **`scripts/swap-broker.sh` upgrades a running broker and keeps a way back.** It runs on the
+  broker's host and works through these steps:
+  - checks the build's sha256, and that it runs on this host, which is also the glibc check;
+  - stops the service and cold-copies all three database files, hash-checking each copy;
+  - renames the old binary aside, puts the new one in place and starts the service;
+  - accepts the swap only when `/health` reports the new version.
+
+  Otherwise it puts the old binary back and starts it. It never restores the database by itself.
+  When the old build does not come back either, it prints the restore command, which removes the
+  WAL first. Its tests run under `cargo test` on Linux, with fake builds and a fake `systemctl`.
+  It is the procedure that upgraded a real broker to 0.4.26, rewritten to name no deployment.
+  `docs/operations.md` section 7 describes it.
+
 - **`docs/operations.md` says to check a private root before naming it in `ca_file`.** A root
   downloaded over plain HTTP can be swapped on the way, and the token then goes to whoever holds the
   swapped root. Compare its SHA-256 fingerprint with one read on the host that holds the root. The
