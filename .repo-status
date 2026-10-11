@@ -1,6 +1,6 @@
 # The publish decision, where tooling can read it.
 # Convention: repo-secret-scan templates/publish-status.example
 
-publish: not-yet
-reason:  built to be publishable; the decision to publish has not been made
+publish: public
+reason:  already published on GitHub, after the history rewrite of 25 Sep 2026
 review:  2026-10-11
