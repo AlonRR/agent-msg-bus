@@ -252,7 +252,10 @@ It stops at the first step that fails:
 4. **The old binary is renamed aside** and the new one takes its place. Then the service starts.
 5. **`/health` must report the new version.** `systemctl is-active` is not enough: a unit can be
    active while its process has not bound the port yet, or has already died. If `/health` does not
-   report the new version in time, the old binary goes back and is started again.
+   report the new version in time, the old binary goes back and is started again. Before that start,
+   the unit's start limit is cleared (`reset-failed`). A unit with `Restart=` can exhaust that limit
+   while a broken build crashes in a loop, and systemd then refuses the start that would bring the
+   old build back.
 
 | Exit | Meaning |
 |---|---|

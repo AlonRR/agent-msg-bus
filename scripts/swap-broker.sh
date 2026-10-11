@@ -151,6 +151,9 @@ say "The new build did not report $V on /health within ${WAIT}s (last seen: $LAS
   "Rolling back to ${OLDV:-the previous build}."
 "$SYSTEMCTL" stop "$UNIT"
 mv "$BIN" "$BIN.failed-$V" && mv "$BIN.pre-$V" "$BIN"
+# A unit with Restart= may have hit its start limit while the new build crashed in a loop. It then
+# refuses this start ("start request repeated too quickly") until the counter is cleared.
+"$SYSTEMCTL" reset-failed "$UNIT" 2> /dev/null || true
 "$SYSTEMCTL" start "$UNIT"
 LAST_SEEN="no answer"
 if wait_health "$OLDV"; then

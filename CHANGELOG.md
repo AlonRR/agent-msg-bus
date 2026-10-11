@@ -31,9 +31,11 @@ explicitly not part of it and can change in a patch.
   - renames the old binary aside, puts the new one in place and starts the service;
   - accepts the swap only when `/health` reports the new version.
 
-  Otherwise it puts the old binary back and starts it. It never restores the database by itself.
-  When the old build does not come back either, it prints the restore command, which removes the
-  WAL first. Its tests run under `cargo test` on Linux, with fake builds and a fake `systemctl`.
+  Otherwise it puts the old binary back, clears the unit's start limit and starts it. It never
+  restores the database by itself. When the old build does not come back either, it prints the
+  restore command, which removes the WAL first. Its tests run under `cargo test` on Linux, with fake
+  builds and a fake `systemctl`. One case swaps the real broker binary, because only the real broker
+  shows whether the script's `/health` probe gets a reply it can read.
   It is the procedure that upgraded a real broker to 0.4.26, rewritten to name no deployment.
   `docs/operations.md` section 7 describes it.
 

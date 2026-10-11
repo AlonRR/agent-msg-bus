@@ -68,6 +68,7 @@ case "\$1" in
         rm -f "\$pidf"
         exit 0 ;;
   is-active) running ;;
+  reset-failed) exit 0 ;;
   *) exit 1 ;;
 esac
 EOF
@@ -99,6 +100,20 @@ case "\$1" in
 esac
 EOF
   chmod +x "$path"
+}
+
+# make_real_build <path>: a build that IS the real broker (AMB_REAL_BIN), serving on the test port.
+# The fakes above speak Python's HTTP; this is the only case that checks the script's own /health
+# probe against what the broker actually sends.
+make_real_build() {
+  cat > "$1" << EOF
+#!/usr/bin/env bash
+case "\$1" in
+  --version) exec "$AMB_REAL_BIN" --version ;;
+  serve) exec "$AMB_REAL_BIN" serve --listen "127.0.0.1:$PORT" --db "$T/data/bus.db" --insecure-no-auth ;;
+esac
+EOF
+  chmod +x "$1"
 }
 
 # The host before a swap: 0.0.1 installed and serving.
@@ -208,6 +223,8 @@ check "the failed build is kept" is "$(version_of "$AMB_BIN.failed-0.0.2")" 0.0.
 check "the rollback name is free again" test ! -e "$AMB_BIN.pre-0.0.2"
 check "the database copy is kept" test -e "$AMB_DATA/backup-pre-0.0.2/bus.db"
 check "says ROLLED BACK" has "$OUT" "ROLLED BACK"
+check "the start limit is cleared just before the old build starts" \
+  is "$(grep -A1 '^reset-failed' "$T/systemctl.log" | sed -n 2p | cut -d' ' -f1)" start
 done_host
 
 echo "a build that answers with another version is rolled back"
@@ -230,6 +247,25 @@ check "0.0.1 is back in place" is "$(version_of "$AMB_BIN")" 0.0.1
 check "says NEEDS A PERSON" has "$OUT" "NEEDS A PERSON"
 check "the restore removes the WAL first" has "$OUT" "rm -f $AMB_DATA/bus.db-wal $AMB_DATA/bus.db-shm && cp -a $AMB_DATA/backup-pre-0.0.2/. $AMB_DATA/"
 done_host
+
+if [ -n "${AMB_REAL_BIN:-}" ]; then
+  echo "the real broker: the script reads its /health, and copies the database it wrote"
+  new_host
+  rm -f "$AMB_DATA"/bus.db*
+  make_real_build "$AMB_BIN"
+  "$SYSTEMCTL" start "$AMB_UNIT"
+  REAL_V=$(version_of "$AMB_REAL_BIN")
+  wait_for_version "$REAL_V" || echo "  SETUP: the real broker never came up"
+  : > "$T/systemctl.log"
+  make_real_build "$T/incoming/agent-msg-bus"
+  swap "$T/incoming/agent-msg-bus"
+  check "exit 0 ($OUT)" is "$RC" 0
+  check "the real broker serves again" is "$(served_version)" "$REAL_V"
+  check "the database it wrote was copied" test -s "$AMB_DATA/backup-pre-$REAL_V/bus.db"
+  done_host
+else
+  echo "SKIPPED the real-broker case: AMB_REAL_BIN is not set (cargo test sets it)"
+fi
 
 echo
 echo "$((PASS + FAIL)) checks, $PASS passed, $FAIL failed"
