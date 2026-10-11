@@ -22,6 +22,13 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Added
+
+- **`docs/operations.md` says to check a private root before naming it in `ca_file`.** A root
+  downloaded over plain HTTP can be swapped on the way, and the token then goes to whoever holds the
+  swapped root. Compare its SHA-256 fingerprint with one read on the host that holds the root. The
+  first rollout of 0.4.26 skipped this step, and the receiving machine's session caught it.
+
 ## [0.4.26] — 2026-10-11
 
 ### Added

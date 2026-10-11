@@ -119,6 +119,10 @@ On the client machine:
   PEM file, which is trusted *alongside* the public web roots. **The operating system's certificate
   store is not consulted**, so installing the root into the Windows store does not make this tool
   trust it. `--ca-file` and `AMB_CA_FILE` override the config, as `--url` and `AMB_URL` do.
+  - **Check the root before naming it.** A root downloaded over plain HTTP can be swapped by anyone
+    on the path, and whoever holds the swapped one can then read the token. Compare its SHA-256
+    fingerprint (`openssl x509 -noout -fingerprint -sha256 -in <file>`) with one read on the host
+    that holds the root, obtained over a channel you already trust.
   - A `ca_file` that is unreadable or holds no certificate is an error at once, naming the file. The
     relay refuses to start; a CLI command exits 1; the hook says so in the session's banner.
   - An untrusted certificate is reported with the setting that fixes it, rather than as a bare
