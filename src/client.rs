@@ -320,15 +320,24 @@ impl Client {
         serde_json::from_value(v).map_err(|e| ClientError::Http(e.to_string()))
     }
 
-    /// The URL a session hands to `Monitor({ws: …})`.
+    /// The URL a session hands to `Monitor({ws: …})`, for a broker reached over plain http.
     ///
-    /// `ws://`, not `wss://`: this is a LAN-only service in v1, and whether Monitor's WS client
-    /// accepts a certificate from the homelab's internal CA is **untested**. Do not switch this to
-    /// `wss://` on the assumption that it works.
-    pub fn sub_url(&self, addr: &str) -> String {
+    /// Refused for an https broker. Its `/sub` takes the token in an `Authorization` header, which
+    /// a URL cannot carry, and a URL with the token in its query lands in the TLS front's access
+    /// log: the leak 0.4.26 removed from the relay. A `ws://` URL to a TLS port would not connect
+    /// either. `watch` reaches an https broker through the relay, with the token in the header.
+    pub fn sub_url(&self, addr: &str) -> Result<String, String> {
+        if self.base.starts_with("https://") {
+            return Err(format!(
+                "sub-url has no URL to give for an https broker ({}). Its /sub takes the token in an \
+                 Authorization header, which a URL cannot carry, and a token in the URL would be \
+                 written to the TLS front's access log. Use `agent-msg-bus watch {addr}`, which \
+                 goes through this machine's relay.",
+                self.base
+            ));
+        }
         let host = self.base.strip_prefix("http://").unwrap_or(&self.base);
-        let host = host.strip_prefix("https://").unwrap_or(host);
-        format!("ws://{}/sub?addr={}&token={}", host, urlencode(addr), urlencode(&self.token))
+        Ok(format!("ws://{}/sub?addr={}&token={}", host, urlencode(addr), urlencode(&self.token)))
     }
 }
 

@@ -179,7 +179,7 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Print the ws:// URL to hand to Monitor.
+    /// Print the ws:// URL to hand to Monitor. Plain-http brokers only; for https, use `watch`.
     SubUrl { addr: String },
     /// Hold the broker connection on this machine and re-serve it on loopback.
     ///
@@ -1029,10 +1029,7 @@ fn run_client(cli: &Cli) {
                 }
             })
             .map_err(Into::into),
-        Cmd::SubUrl { addr } => {
-            println!("{}", c.sub_url(addr));
-            Ok(())
-        }
+        Cmd::SubUrl { addr } => c.sub_url(addr).map(|u| println!("{u}")).map_err(Into::into),
         Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami
         | Cmd::Watch { .. } | Cmd::Update { .. } | Cmd::SelfUpdate { .. } => {
             unreachable!("handled in main")

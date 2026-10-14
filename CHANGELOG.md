@@ -44,6 +44,15 @@ explicitly not part of it and can change in a patch.
   swapped root. Compare its SHA-256 fingerprint with one read on the host that holds the root. The
   first rollout of 0.4.26 skipped this step, and the receiving machine's session caught it.
 
+### Fixed
+
+- **`sub-url` no longer prints the token in a URL for an https broker.** It used to print a plain
+  `ws://` URL with the token in its query whatever the broker's scheme. That URL could not connect
+  to a TLS port. Had anyone used it, the token would have landed in the TLS front's access log,
+  the leak 0.4.26 removed from the relay. For an `https://` broker it now exits 1 and points at
+  `watch`, which goes through the relay with the token in a header. Plain-http brokers get the same
+  URL as before. A peer found this on 0.4.26 by reading the code.
+
 ## [0.4.26] — 2026-10-11
 
 ### Added
