@@ -806,7 +806,7 @@ does not change.
 
 Proposed by the user. **Built the same day as a prototype**, in [`claude-code-mod/`](../claude-code-mod/README.md),
 with `whoami --json` and `read --unread --json` added to the CLI for it. It shows the count to the
-person and wakes nothing; the wake option below is not built. It passes its tests under
+person and wakes nothing; the wake option below was decided against. It passes its tests under
 `claude plugin test` and has not run in a live session. The mod API below is relayed from the API
 types shipped with Claude Code 2.1.296. The bus facts are measured from this repo's source.
 
@@ -835,6 +835,14 @@ types shipped with Claude Code 2.1.296. The bus facts are measured from this rep
 - **A second way to wake, found while building:** `$.prompt.submit` queues a prompt that starts a
   turn once the session is idle. It is documented for exactly this, background work waking a quiet
   session, so it may suit better than a session messaging itself. Neither is built.
+- **Decided by the user, 14 Oct 2026:**
+  - **Show only.** The mod tells the person and never wakes the session, by either route above.
+    Sessions keep using the bus as they do now: mail is reported at session start, and a session
+    reads and acks its inbox itself.
+  - **`poll` stays the default.** `watch` mode stays opt-in, because it subscribes the address.
+    A minute's delay is acceptable.
+  - **The CLI half ships as 0.4.27**, and the mod is installed for every session on the user's
+    machine after a live trial.
 
 ---
 
