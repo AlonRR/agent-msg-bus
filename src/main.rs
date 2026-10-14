@@ -163,6 +163,10 @@ enum Cmd {
         /// rather than having its full log printed as unread.
         #[arg(long, conflicts_with = "since")]
         unread: bool,
+        /// With --unread: one JSON object, {addr, total, messages}, for a program to read. `total`
+        /// counts everything waiting, shown or not, so `--limit 0` asks for the count alone.
+        #[arg(long, requires = "unread")]
+        json: bool,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
@@ -193,7 +197,13 @@ enum Cmd {
     /// Claude Code SessionStart hook. Reads the hook payload on stdin, emits hook JSON on stdout.
     SessionStart,
     /// Print this session's derived address and its Monitor subscribe URL.
-    Whoami,
+    Whoami {
+        /// One JSON object for a program to read: address, pinned, fallback, bound, inbox (the
+        /// address whose mail is this session's), registered (null when the broker cannot say),
+        /// broker and relay.
+        #[arg(long)]
+        json: bool,
+    },
     /// Replace the installed binary with a newer one, WITHOUT stopping anything.
     ///
     /// A running executable cannot be overwritten but can be renamed, so the installed binary is
@@ -322,7 +332,7 @@ fn main() {
             }).unwrap_or_else(|| "127.0.0.1:9451".to_string());
             watch(&relay, addr, fallback.clone())
         }
-        Cmd::Whoami => whoami(&cli),
+        Cmd::Whoami { json } => whoami(&cli, json),
         Cmd::Update { ref from, ref to, dry_run, force } => {
             update(from.as_deref(), to.as_deref(), dry_run, force)
         }
@@ -544,7 +554,7 @@ fn print_message(m: &agent_msg_bus::store::Message) {
     println!("{}", m.body);
 }
 
-fn whoami(cli: &Cli) {
+fn whoami(cli: &Cli, json: bool) {
     let Some(cfg) = agent_msg_bus::hook::load_config() else {
         eprintln!(
             "agent-msg-bus: no config at {}",
@@ -594,6 +604,30 @@ fn whoami(cli: &Cli) {
         .peers(true)
         .map_err(|e| e.to_string());
     let status = agent_msg_bus::identity::classify(&addr, &peers);
+
+    if json {
+        // `inbox` is the one field a program should read mail from: the name actually bound on the
+        // relay when there is one, which may be the fallback, else the derived address. `registered`
+        // is null, not false, when the broker could not be asked: absence is not a finding.
+        use agent_msg_bus::identity::RegStatus;
+        let registered = match &status {
+            RegStatus::Registered => serde_json::Value::Bool(true),
+            RegStatus::Unregistered { .. } => serde_json::Value::Bool(false),
+            RegStatus::Unverified(_) => serde_json::Value::Null,
+        };
+        let v = serde_json::json!({
+            "address": addr,
+            "pinned": pinned,
+            "fallback": fallback,
+            "bound": bound,
+            "inbox": bound.clone().unwrap_or_else(|| addr.clone()),
+            "registered": registered,
+            "broker": url,
+            "relay": cfg.relay,
+        });
+        println!("{v}");
+        return;
+    }
 
     println!("address : {addr}{}", if pinned { "   (pinned)" } else { "   (from the repo)" });
     if let Some(f) = &fallback {
@@ -853,10 +887,19 @@ fn run_client(cli: &Cli) {
         }
         // Refused before the request goes out, so the caller is corrected rather than handed the
         // whole history in the shape of a filtered read.
+        Cmd::Read { addr, unread: true, json: true, limit, .. } => c
+            .read_unread(addr, *limit)
+            .map(|(msgs, total)| {
+                println!("{}", serde_json::json!({"addr": addr, "total": total, "messages": msgs}));
+            })
+            .map_err(Into::into),
         Cmd::Read { addr, unread: true, limit, .. } => c
             .read_unread(addr, *limit)
             .map(|(msgs, total)| {
-                if msgs.is_empty() {
+                // "Nothing shown" is not "nothing waiting": `--limit 0` shows nothing whatever waits.
+                if msgs.is_empty() && total > 0 {
+                    println!("{total} unread for {addr}, none shown (--limit {limit})");
+                } else if msgs.is_empty() {
                     println!("nothing unread for {addr}");
                 }
                 let last = msgs.last().map(|m| m.id.clone());
@@ -1030,7 +1073,7 @@ fn run_client(cli: &Cli) {
             })
             .map_err(Into::into),
         Cmd::SubUrl { addr } => c.sub_url(addr).map(|u| println!("{u}")).map_err(Into::into),
-        Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami
+        Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami { .. }
         | Cmd::Watch { .. } | Cmd::Update { .. } | Cmd::SelfUpdate { .. } => {
             unreachable!("handled in main")
         }

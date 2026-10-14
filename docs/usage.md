@@ -52,6 +52,8 @@ agent-msg-bus send --from <me> --to <them> --kind fyi|request|blocking \
                    --subject "..." --body-file <path>
 agent-msg-bus ack <me> <last-message-id>
 agent-msg-bus read <addr>   # read stored messages WITHOUT consuming them
+agent-msg-bus read <addr> --unread         # only what is waiting, oldest first
+agent-msg-bus read <addr> --unread --json  # the same for a program: {addr, total, messages}
 agent-msg-bus forget <addr> # retire a stale address
 agent-msg-bus update        # swap this machine's binary WITHOUT stopping anything
 ```
@@ -249,6 +251,10 @@ see rather than a quiet rename.
 `agent-msg-bus whoami` prints the address, the fallback if there is one, and — read from the relay
 rather than re-derived — the name actually **bound**. If those last two differ from the first, this
 session fell back and its peers need telling.
+
+`agent-msg-bus whoami --json` gives the same as one JSON object, for a program such as a status-line
+notifier. Read mail from its `inbox` field: the bound name when there is one, else the address.
+`registered` is `null`, not `false`, when the broker could not be asked.
 
 ⚠️ **A wildcard in a *sent* message is not the same as a wildcard registration.** It reaches every
 address that matches, including mailboxes nobody reads any more, and stays unread in each one until

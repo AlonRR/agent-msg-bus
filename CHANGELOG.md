@@ -44,7 +44,17 @@ explicitly not part of it and can change in a patch.
   swapped root. Compare its SHA-256 fingerprint with one read on the host that holds the root. The
   first rollout of 0.4.26 skipped this step, and the receiving machine's session caught it.
 
+- **JSON output for a program watching a session's inbox.** `read <addr> --unread --json` prints
+  `{addr, total, messages}`; `total` counts everything waiting, so `--limit 0` is a count alone.
+  `whoami --json` prints the address, the pin, the fallback, the name bound on the relay, and
+  `inbox`, the one to read mail from. `registered` is `null`, not `false`, when the broker could not
+  be asked. Both are formatting in the client; the broker is unchanged. Written for a status-line
+  notifier, so it parses no text meant for a person.
+
 ### Fixed
+
+- **`read --unread --limit 0` no longer says "nothing unread" while mail is waiting.** It printed
+  that whenever nothing was shown, and `--limit 0` shows nothing. It now gives the count.
 
 - **`sub-url` no longer prints the token in a URL for an https broker.** It used to print a plain
   `ws://` URL with the token in its query whatever the broker's scheme. That URL could not connect
