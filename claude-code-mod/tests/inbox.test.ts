@@ -22,6 +22,10 @@ type Header = { id: string; from: string; kind: string; subject: string }
 /** What the stand-in binary knows, and everything the mod did to the screen. */
 type World = {
   whoami: string | null
+  /** How whoami fails instead of answering: killed at the timeout, or no bus config. */
+  whoamiFails: '' | 'killed' | 'no config'
+  /** How long whoami takes on the mocked clock before it answers. */
+  whoamiTakesMs: number
   waiting: Header[]
   readFails: boolean
   runs: string[][]
@@ -39,6 +43,8 @@ function header(n: number, extra: Partial<Header> = {}): Header {
 function world(on: On): World {
   const w: World = {
     whoami: JSON.stringify(ME),
+    whoamiFails: '',
+    whoamiTakesMs: 0,
     waiting: [],
     readFails: false,
     runs: [],
@@ -52,13 +58,17 @@ function world(on: On): World {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   // A call on `$` is answered with `{ value }`, a void one with `{ value: undefined }`.
   on('session.id', () => ({ value: '0123abcd-0000-0000-0000-000000000000' }))
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     w.runs.push([...e.argv])
     w.envs.push({ ...(e.init?.env ?? {}) })
     const answer = (exitCode: number, stdout: string, stderr = '') => ({
       value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
     })
     if (e.argv[1] === 'whoami') {
+      if (w.whoamiTakesMs > 0) await w.clock.sleep(w.whoamiTakesMs)
+      // A `{ deny }` rejects the caller, as a child still running at the timeout does.
+      if (w.whoamiFails === 'killed') return { deny: 'the command was still running at its timeout' }
+      if (w.whoamiFails === 'no config') return answer(1, '', 'agent-msg-bus: no config at C:\\h\\.agent-msg-bus\\config.json\n')
       return w.whoami === null ? answer(2, '', "error: unexpected argument '--json' found\n") : answer(0, w.whoami)
     }
     if (e.argv[1] === 'read') {
@@ -84,16 +94,19 @@ function world(on: On): World {
   return w
 }
 
-async function start($: Engine): Promise<void> {
+/** Starts the session, then lets the mod's own start-up run as far as it can without the clock. */
+async function start($: Engine, w: World): Promise<void> {
   await $.session.start({ cwd: 'C:\\w\\repo', surface: 'terminal', isInteractive: true })
+  await w.clock.advance(0)
 }
 
 const reads = (w: World) => w.runs.filter(r => r[1] === 'read').length
+const whoamis = (w: World) => w.runs.filter(r => r[1] === 'whoami').length
 
 describe('finding the inbox', () => {
   test('asks the binary for the address, with the session id, and reads the inbox it names', async ($, on) => {
     const w = world(on)
-    await start($)
+    await start($, w)
     expect(w.runs[0]).toEqual(['C:\\L\\agent-msg-bus\\agent-msg-bus.exe', 'whoami', '--json'])
     expect(w.envs[0]).toEqual({ CLAUDE_CODE_SESSION_ID: '0123abcd-0000-0000-0000-000000000000' })
     expect(w.runs[1]).toEqual(['C:\\L\\agent-msg-bus\\agent-msg-bus.exe', 'read', 'machine-a/repo', '--unread', '--json', '--limit', '20'])
@@ -102,32 +115,67 @@ describe('finding the inbox', () => {
   test('reads the bound name when the session fell back', async ($, on) => {
     const w = world(on)
     w.whoami = JSON.stringify({ ...ME, bound: 'machine-a/repo.0123abcd', inbox: 'machine-a/repo.0123abcd' })
-    await start($)
+    await start($, w)
     expect(w.runs[1]?.[2]).toBe('machine-a/repo.0123abcd')
   })
 
   test('a binary option replaces the default path', { options: { binary: '/opt/amb/agent-msg-bus' } }, async ($, on) => {
     const w = world(on)
-    await start($)
+    await start($, w)
     expect(w.runs[0]?.[0]).toBe('/opt/amb/agent-msg-bus')
   })
 
   test('an old binary without --json: one dim line saying why, then nothing', async ($, on) => {
     const w = world(on)
     w.whoami = null
-    await start($)
+    await start($, w)
     await w.clock.advance(10 * 60_000)
     expect(w.logs.length).toBe(1)
     expect(w.logs[0]).toContain('0.4.27')
+    expect(whoamis(w)).toBe(1)
     expect(reads(w)).toBe(0)
     expect(w.toasts).toEqual([])
+  })
+
+  test('no bus config: one dim line saying so, then nothing', async ($, on) => {
+    const w = world(on)
+    w.whoamiFails = 'no config'
+    await start($, w)
+    await w.clock.advance(10 * 60_000)
+    expect(w.logs.length).toBe(1)
+    expect(w.logs[0]).toContain('no config')
+    expect(whoamis(w)).toBe(1)
+  })
+
+  test('a slow whoami does not hold up the start of the session', async ($, on) => {
+    const w = world(on)
+    w.whoamiTakesMs = 15_000
+    await start($, w)
+    expect(reads(w)).toBe(0)
+    await w.clock.advance(15_000)
+    expect(reads(w)).toBe(1)
+  })
+
+  test('a whoami killed at its timeout is no reason to give up: no log line, and it asks again', async ($, on) => {
+    const w = world(on)
+    w.whoamiFails = 'killed'
+    await start($, w)
+    await w.clock.advance(0)
+    expect(w.logs).toEqual([])
+    expect(w.statuses.at(-1)).toBe('bus: unreachable')
+
+    w.whoamiFails = ''
+    w.waiting = [header(1)]
+    await w.clock.advance(60_000)
+    expect(whoamis(w)).toBe(2)
+    expect(w.statuses.at(-1)).toBe('bus: 1 unread')
   })
 })
 
 describe('what the person sees', () => {
   test('nothing waiting: no status line and no toast', async ($, on) => {
     const w = world(on)
-    await start($)
+    await start($, w)
     expect(w.statuses).toEqual([undefined])
     expect(w.toasts).toEqual([])
   })
@@ -135,7 +183,7 @@ describe('what the person sees', () => {
   test('mail waiting at the start: the count, and one toast naming the newest', async ($, on) => {
     const w = world(on)
     w.waiting = [header(1), header(2, { kind: 'request', from: 'machine-b/other', subject: 'please check' })]
-    await start($)
+    await start($, w)
     expect(w.statuses.at(-1)).toBe('bus: 2 unread')
     expect(w.toasts).toEqual(['bus: 2 unread for machine-a/repo · newest: [request] machine-b/other: please check'])
   })
@@ -143,7 +191,7 @@ describe('what the person sees', () => {
   test('a toast only when the count rises, and the status clears when it falls to 0', async ($, on) => {
     const w = world(on)
     w.waiting = [header(1)]
-    await start($)
+    await start($, w)
     expect(w.toasts.length).toBe(1)
 
     await w.clock.advance(60_000)
@@ -163,14 +211,14 @@ describe('what the person sees', () => {
   test('more waiting than shown: the toast gives the count and does not guess the newest', async ($, on) => {
     const w = world(on)
     w.waiting = Array.from({ length: 25 }, (_, i) => header(i))
-    await start($)
+    await start($, w)
     expect(w.toasts).toEqual(['bus: 25 unread for machine-a/repo'])
   })
 
   test('a subject cannot put a second line or a control sequence on screen', async ($, on) => {
     const w = world(on)
     w.waiting = [header(1, { subject: 'line one\nline two\u001b[2J' + 'x'.repeat(300) })]
-    await start($)
+    await start($, w)
     const toast = w.toasts[0] ?? ''
     expect(toast).not.toContain('\n')
     expect(toast).not.toContain('\u001b')
@@ -180,7 +228,7 @@ describe('what the person sees', () => {
   test('an unreachable broker: said once in the status line, never as a toast', async ($, on) => {
     const w = world(on)
     w.readFails = true
-    await start($)
+    await start($, w)
     await w.clock.advance(5 * 60_000)
     expect(w.statuses.filter(s => s === 'bus: unreachable').length).toBe(1)
     expect(w.toasts).toEqual([])
@@ -195,7 +243,7 @@ describe('what the person sees', () => {
 describe('timing', () => {
   test('poll mode reads once a minute by default', async ($, on) => {
     const w = world(on)
-    await start($)
+    await start($, w)
     expect(reads(w)).toBe(1)
     await w.clock.advance(59_000)
     expect(reads(w)).toBe(1)
@@ -207,7 +255,7 @@ describe('timing', () => {
 
   test('an interval below 15 seconds is raised to 15', { options: { intervalSeconds: 1 } }, async ($, on) => {
     const w = world(on)
-    await start($)
+    await start($, w)
     await w.clock.advance(14_000)
     expect(reads(w)).toBe(1)
     await w.clock.advance(1_000)
@@ -219,7 +267,7 @@ describe('after the session runs the bus CLI', () => {
   test('an ack reads again at once, so the count clears without waiting a minute', async ($, on) => {
     const w = world(on)
     w.waiting = [header(1)]
-    await start($)
+    await start($, w)
     w.waiting = []
     await $.tool.call({ tool: 'Bash', command: 'agent-msg-bus ack machine-a/repo 20261014T12000001-000000001' })
     await w.clock.advance(0)
@@ -229,7 +277,7 @@ describe('after the session runs the bus CLI', () => {
 
   test('PowerShell and the .exe name count too', async ($, on) => {
     const w = world(on)
-    await start($)
+    await start($, w)
     await $.tool.call({ tool: 'PowerShell', command: '& "C:\\L\\agent-msg-bus\\agent-msg-bus.exe" ack machine-a/repo x' })
     await w.clock.advance(0)
     expect(reads(w)).toBe(2)
@@ -237,7 +285,7 @@ describe('after the session runs the bus CLI', () => {
 
   test('other commands read nothing', async ($, on) => {
     const w = world(on)
-    await start($)
+    await start($, w)
     await $.tool.call({ tool: 'Bash', command: 'git status' })
     await $.tool.call({ tool: 'Bash', command: 'agent-msg-bus --version' })
     await w.clock.advance(0)
@@ -246,7 +294,7 @@ describe('after the session runs the bus CLI', () => {
 
   test('a pin asks for the address again before reading', async ($, on) => {
     const w = world(on)
-    await start($)
+    await start($, w)
     w.whoami = JSON.stringify({ ...ME, address: 'machine-a/repo.review', inbox: 'machine-a/repo.review', pinned: true, fallback: null })
     await $.tool.call({ tool: 'Bash', command: 'agent-msg-bus pin machine-a/repo.review' })
     await w.clock.advance(0)
@@ -254,9 +302,19 @@ describe('after the session runs the bus CLI', () => {
     expect(w.runs.at(-1)?.[2]).toBe('machine-a/repo.review')
   })
 
+  test('a pin does not hold up its own command while whoami runs', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    w.whoamiTakesMs = 10_000
+    await $.tool.call({ tool: 'Bash', command: 'agent-msg-bus pin machine-a/repo.review' })
+    expect(whoamis(w)).toBe(2)
+    await w.clock.advance(10_000)
+    expect(reads(w)).toBe(2)
+  })
+
   test('the tool result comes back unchanged', async ($, on) => {
-    world(on)
-    await start($)
+    const w = world(on)
+    await start($, w)
     const result = await $.tool.call({ tool: 'Bash', command: 'agent-msg-bus ack machine-a/repo x' })
     expect(result).toEqual({ result: { stdout: '', stderr: '' } })
   })
@@ -265,12 +323,13 @@ describe('after the session runs the bus CLI', () => {
 describe('watch mode', () => {
   type Spawned = { argv: string[]; out: string[] }
 
-  /** Each spawn of `watch` prints the next script's pieces, then exits. */
-  function watching(on: On, scripts: string[][]): Spawned[] {
+  /** Each spawn of `watch` waits a second on the mocked clock, prints the next script's pieces, then exits. */
+  function watching(on: On, w: World, scripts: string[][]): Spawned[] {
     const spawned: Spawned[] = []
     on('process.spawn', async function* ($, e) {
       const out = scripts[spawned.length] ?? []
       spawned.push({ argv: [...e.argv], out })
+      await w.clock.sleep(1_000)
       for (const text of out) yield { stream: 'stdout' as const, text }
       return { value: { code: 0, signal: null } }
     })
@@ -285,8 +344,8 @@ describe('watch mode', () => {
 
   test('runs watch on the address, with the fallback name', WATCH, async ($, on) => {
     const w = world(on)
-    const spawned = watching(on, [[]])
-    await start($)
+    const spawned = watching(on, w, [[]])
+    await start($, w)
     await w.clock.advance(0)
     expect(spawned[0]?.argv).toEqual(['C:\\L\\agent-msg-bus\\agent-msg-bus.exe', 'watch', 'machine-a/repo', '--fallback', 'machine-a/repo.0123abcd'])
   })
@@ -294,8 +353,8 @@ describe('watch mode', () => {
   test('a pinned address gets no fallback', WATCH, async ($, on) => {
     const w = world(on)
     w.whoami = JSON.stringify({ ...ME, pinned: true, fallback: null })
-    const spawned = watching(on, [[]])
-    await start($)
+    const spawned = watching(on, w, [[]])
+    await start($, w)
     await w.clock.advance(0)
     expect(spawned[0]?.argv).toEqual(['C:\\L\\agent-msg-bus\\agent-msg-bus.exe', 'watch', 'machine-a/repo'])
   })
@@ -303,32 +362,35 @@ describe('watch mode', () => {
   test('a message line reads the inbox again, even split across pieces', WATCH, async ($, on) => {
     const w = world(on)
     const line = message(1)
-    watching(on, [[line.slice(0, 10), line.slice(10)]])
-    await start($)
+    watching(on, w, [[line.slice(0, 10), line.slice(10)]])
+    await start($, w)
+    expect(reads(w)).toBe(1)
     w.waiting = [header(1)]
-    await w.clock.advance(0)
+    await w.clock.advance(1_000)
     expect(reads(w)).toBe(2)
     expect(w.toasts.length).toBe(1)
   })
 
   test('connected asks for the address again, since it may have bound the fallback', WATCH, async ($, on) => {
     const w = world(on)
-    watching(on, [[connected('machine-a/repo.0123abcd')]])
-    await start($)
+    watching(on, w, [[connected('machine-a/repo.0123abcd')]])
+    await start($, w)
     w.whoami = JSON.stringify({ ...ME, bound: 'machine-a/repo.0123abcd', inbox: 'machine-a/repo.0123abcd' })
-    await w.clock.advance(0)
+    await w.clock.advance(1_000)
     expect(w.runs.filter(r => r[1] === 'whoami').length).toBe(2)
     expect(w.runs.at(-1)?.[2]).toBe('machine-a/repo.0123abcd')
   })
 
   test('a watch that ends is said in the status line and started again after 30 s', WATCH, async ($, on) => {
     const w = world(on)
-    const spawned = watching(on, [[], []])
-    await start($)
-    await w.clock.advance(0)
+    const spawned = watching(on, w, [[], []])
+    await start($, w)
+    await w.clock.advance(1_000)
     expect(w.statuses.at(-1)).toBe('bus: watch stopped; restarting')
     expect(spawned.length).toBe(1)
-    await w.clock.advance(30_000)
+    await w.clock.advance(29_000)
+    expect(spawned.length).toBe(1)
+    await w.clock.advance(1_000)
     expect(spawned.length).toBe(2)
   })
 })

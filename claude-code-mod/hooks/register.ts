@@ -16,13 +16,17 @@ import type { EngineInterface, Register } from 'claude-code'
 type Header = { id: string; from: string; kind: string; subject: string }
 type Inbox = { addr: string; total: number; messages: Header[] }
 type Me = { address: string; inbox: string; pinned: boolean; fallback: string | null }
-type Ran = { ok: boolean; stdout: string; why: string }
+type Ran = { ok: boolean; code: number | undefined; stdout: string; why: string }
 
 /** What one load of the module knows. A reload starts it over, and `session.start` fires again. */
 type State = {
   bin: string
   session: string
+  mode: 'poll' | 'watch'
   me: Me | undefined
+  /** No inbox will ever be found by this load: a binary too old for --json, or no bus config. */
+  gaveUp: boolean
+  watching: boolean
   /** The count last shown; undefined until the first read, so a first read that finds mail toasts. */
   last: number | undefined
   busy: boolean
@@ -83,10 +87,21 @@ async function run($: EngineInterface, s: State, args: string[]): Promise<Ran> {
       timeoutMs: RUN_TIMEOUT_MS,
     })
     const why = r.stderr.trim().split('\n')[0] ?? ''
-    return { ok: r.exitCode === 0, stdout: r.stdout, why: why || `exit ${r.exitCode}` }
+    return { ok: r.exitCode === 0, code: r.exitCode, stdout: r.stdout, why: why || `exit ${r.exitCode}` }
   } catch (err) {
-    return { ok: false, stdout: '', why: err instanceof Error ? err.message : String(err) }
+    // Could not start, or still running at the timeout.
+    return { ok: false, code: undefined, stdout: '', why: err instanceof Error ? err.message : String(err) }
   }
+}
+
+/**
+ * Whether a failed `whoami --json` will fail the same way every time. Exit 2 is a usage error: a
+ * binary that predates --json. Output that is not the JSON expected is a binary that disagrees with
+ * this module. No config means no bus on this machine. Anything else, a timeout above all, is a
+ * broker or network that may come back.
+ */
+function isPermanent(r: Ran): boolean {
+  return r.ok || r.code === 2 || /no config/i.test(r.why)
 }
 
 /** Once per load, a dim transcript line the model does not read, saying why nothing shows. */
@@ -101,9 +116,16 @@ async function identify($: EngineInterface, s: State): Promise<boolean> {
   const v = r.ok ? parse(r.stdout) : undefined
   if (!isMe(v)) {
     s.me = undefined
-    $.ui.status(undefined)
-    const why = clip(r.ok ? 'its output was not the JSON expected' : r.why)
-    explain($, s, `no inbox to show: \`${s.bin} whoami --json\` failed (${why}). It needs agent-msg-bus 0.4.27 or later and a bus config on this machine.`)
+    if (isPermanent(r)) {
+      s.gaveUp = true
+      $.ui.status(undefined)
+      const why = clip(r.ok ? 'its output was not the JSON expected' : r.why)
+      explain($, s, `no inbox to show: \`${s.bin} whoami --json\` failed (${why}). It needs agent-msg-bus 0.4.27 or later and a bus config on this machine.`)
+    } else {
+      // Asked again on the next tick: a laptop off the network is the normal case.
+      if (!s.down) $.ui.status('bus: unreachable')
+      s.down = true
+    }
     return false
   }
   if (s.me?.inbox !== v.inbox) s.last = undefined
@@ -184,45 +206,53 @@ async function watchOnce($: EngineInterface, s: State): Promise<void> {
 
 /** `watch` reconnects by itself, so its ending means it gave up or was stopped: start another. */
 function startWatch($: EngineInterface, s: State): void {
+  s.watching = true
   void watchOnce($, s).then(() => {
     $.ui.status('bus: watch stopped; restarting')
     $.clock.after(WATCH_RESTART_MS, () => startWatch($, s))
   })
 }
 
-async function begin($: EngineInterface, s: State, binary: unknown, mode: string, intervalMs: number): Promise<void> {
+/** Find the inbox if it is not known yet, start the watch if one is wanted, then read. */
+async function tick($: EngineInterface, s: State): Promise<void> {
+  if (s.gaveUp) return
+  if (s.me === undefined && !(await identify($, s))) return
+  if (s.mode === 'watch' && !s.watching) startWatch($, s)
+  await refresh($, s)
+}
+
+async function begin($: EngineInterface, s: State, binary: unknown, intervalMs: number): Promise<void> {
   if (typeof binary === 'string' && binary !== '') s.bin = binary
   else {
     const local = await $.env.get('LOCALAPPDATA')
     if (local) s.bin = `${local}\\agent-msg-bus\\agent-msg-bus.exe`
   }
   s.session = await $.session.id()
-  if (!(await identify($, s))) return
-  await refresh($, s)
-  if (mode === 'watch') {
-    startWatch($, s)
-    $.clock.every(WATCH_CHECK_MS, () => void refresh($, s))
-  } else {
-    $.clock.every(intervalMs, () => void refresh($, s))
-  }
+  await tick($, s)
+  if (s.gaveUp) return
+  // The same tick retries `whoami` until it answers, so a session started off the network finds
+  // its inbox once the network is back. Watch mode reads on its own; its tick is a check.
+  $.clock.every(s.mode === 'watch' ? WATCH_CHECK_MS : intervalMs, () => void tick($, s))
 }
 
 /** After a shell command that ran the bus CLI, read again: an `ack` should clear the count now. */
-async function afterCommand($: EngineInterface, s: State, tool: string, command: unknown): Promise<void> {
+function afterCommand($: EngineInterface, s: State, tool: string, command: unknown): void {
   if (tool !== 'Bash' && tool !== 'PowerShell') return
   if (typeof command !== 'string' || !BUS_COMMAND.test(command) || !CHANGES_INBOX.test(command)) return
-  if (CHANGES_ADDRESS.test(command)) await identify($, s)
-  void refresh($, s)
+  if (CHANGES_ADDRESS.test(command)) void reidentify($, s)
+  else void refresh($, s)
 }
 
 export const register: Register = (on, options) => {
-  const mode = options.mode === 'watch' ? 'watch' : 'poll'
   const seconds = Number(options.intervalSeconds)
   const intervalMs = Math.max(MIN_INTERVAL_S, Number.isFinite(seconds) ? seconds : 60) * 1000
   const s: State = {
     bin: 'agent-msg-bus',
     session: '',
+    mode: options.mode === 'watch' ? 'watch' : 'poll',
     me: undefined,
+    gaveUp: false,
+    watching: false,
     last: undefined,
     busy: false,
     again: false,
@@ -230,17 +260,19 @@ export const register: Register = (on, options) => {
     explained: false,
   }
 
+  // Started, not awaited: a `whoami` that waits on an unreachable broker must not hold up the
+  // session's first prompt. The timers it sets run until the module reloads.
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await begin($, s, options.binary, mode, intervalMs)
+    void begin($, s, options.binary, intervalMs)
     return started
   })
 
-  // It never blocks or changes the call: the result goes back as it came, and a failure here is
-  // skipped rather than turned into a refusal.
+  // It never blocks or changes the call: the result goes back as it came, the reads it starts run
+  // after, and a failure here is skipped rather than turned into a refusal.
   on('tool.call', async ($, e, next) => {
     const result = await next(e)
-    await afterCommand($, s, e.tool, (e as { command?: unknown }).command)
+    afterCommand($, s, e.tool, (e as { command?: unknown }).command)
     return result
   }).catch(($, e, next) => next(e))
 }

@@ -33,8 +33,13 @@ outside the model, which costs no turns at all.
    it asks `whoami` again first.
 
 An unreachable broker is shown once in the status line, `bus: unreachable`, and never as a toast:
-a laptop off the network is the normal case. A binary too old for `--json`, or a machine with no
-bus config, gets one dim transcript line saying why, and nothing more.
+a laptop off the network is the normal case. Nothing waits on the broker: the session's first
+prompt is never held up, the reads run beside the session, and a `whoami` that cannot finish is
+asked again on the next tick, so a session started off the network finds its inbox once the
+network is back. In `watch` mode that tick comes every 5 minutes.
+
+Only two things stop it for good, each with one dim transcript line saying why: a binary too old
+for `--json`, and a machine with no bus config.
 
 ## What it never does
 
@@ -78,15 +83,16 @@ claude plugin install agent-msg-bus-inbox@agent-msg-bus
 ```
 
 A marketplace that is a folder is read from that folder, so a `git pull` and `/reload-plugins`
-update the mod with no reinstall. To try it in one session only:
+update the mod with no reinstall. That cuts both ways: every session runs whatever the folder
+holds, uncommitted edits included, so install from a clone nobody edits in. To try it in one session only:
 `claude --plugin-dir <path to the clone>/claude-code-mod`.
 
 ## What has been checked
 
 - `claude plugin validate`: passes.
-- `claude plugin test`: 22 tests, against a stand-in for the CLI. They cover finding the inbox, what
+- `claude plugin test`: 26 tests, against a stand-in for the CLI. They cover finding the inbox, what
   is shown and when, the timer, re-reading after a bus command, and watch mode.
-- 14 defects were seeded one at a time; the tests caught all 14.
+- 19 defects were seeded one at a time; the tests caught all 19.
 - `tsc` with the API's own declarations: no errors. A deliberate type error was caught.
 
 Not checked yet:
