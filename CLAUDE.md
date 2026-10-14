@@ -66,6 +66,10 @@ this machine can get its relay back.
   not exercise the broker swap script. From Windows, run that script under WSL, from the repo root:
   `wsl.exe -e bash scripts/test-swap-broker.sh`. Keep the path relative: Git Bash rewrites an
   absolute `/mnt/c/...` path unless `MSYS_NO_PATHCONV=1` is set.
+- **`claude-code-mod/` has its own tests**, outside `cargo test`: `claude plugin test claude-code-mod`,
+  and `claude plugin validate claude-code-mod` (run it on the repo root too, for the marketplace
+  file). A change to the JSON from `whoami --json` or `read --unread --json` is a change to what
+  the mod reads: `tests/json_output.rs` pins the fields, and the mod's tests stand in for them.
 - **Behaviour change → write the failing test first.** Every fix in this repo's history has one, and
   the commit messages say what the symptom was. Keep that.
 - `cargo clippy --all-targets -- -D warnings` must stay clean; CI gates on it.

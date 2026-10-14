@@ -9,6 +9,8 @@ rather than whenever someone next checks.
   tokens, systemd, firewall, client relays, verification, backup.
 - [`docs/plan.md`](docs/plan.md) — design, decisions, phasing and known limitations.
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed in each release, and the release steps.
+- [`claude-code-mod/`](claude-code-mod/README.md) — a Claude Code mod that shows a session's
+  waiting mail in its status line without starting a model turn. A prototype.
 
 **Status: live.** Deployed and carrying traffic across three machines since Aug 2026; the
 file-based bus it replaced was retired and deleted on 6 Aug 2026.
@@ -120,6 +122,7 @@ input — the trust rules in Security apply — and reply only if the reply carr
 cargo build --release
 cargo test
 agent-msg-bus --version    # which build is this?
+claude plugin test claude-code-mod    # the mod's own tests
 ```
 
 ## Versioning

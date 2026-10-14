@@ -44,6 +44,14 @@ explicitly not part of it and can change in a patch.
   swapped root. Compare its SHA-256 fingerprint with one read on the host that holds the root. The
   first rollout of 0.4.26 skipped this step, and the receiving machine's session caught it.
 
+- **`claude-code-mod/`, a Claude Code mod that shows a session's waiting mail.** The count goes to
+  the status line, with a toast when it rises, and no model turn starts. It finds the inbox with
+  `whoami --json`, and reads it with `read --unread --json` once a minute and right after the
+  session runs the bus CLI. A `watch` mode is available, off by default because it subscribes
+  the address. It never acks, never shows a body, and never puts mail where the model reads it.
+  The repository root is now a marketplace that lists it. A prototype: 22 tests under
+  `claude plugin test`, and 14 seeded defects, all caught. It has not run in a live session yet.
+
 - **JSON output for a program watching a session's inbox.** `read <addr> --unread --json` prints
   `{addr, total, messages}`; `total` counts everything waiting, so `--limit 0` is a count alone.
   `whoami --json` prints the address, the pin, the fallback, the name bound on the relay, and

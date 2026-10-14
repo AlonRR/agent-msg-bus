@@ -1,1 +1,4 @@
 /target
+# Written by Claude Code into a mod folder it loads from: generated, per build.
+/claude-code-mod/.claude-plugin/types/
+/claude-code-mod/tsconfig.json

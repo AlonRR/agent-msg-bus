@@ -1,0 +1,14 @@
+{
+  "name": "agent-msg-bus",
+  "owner": {
+    "name": "AlonRR"
+  },
+  "description": "A Claude Code mod for agent-msg-bus: the session's waiting mail in the status line.",
+  "plugins": [
+    {
+      "name": "agent-msg-bus-inbox",
+      "source": "./claude-code-mod",
+      "description": "Shows how much agent-msg-bus mail is waiting for this session, without starting a model turn."
+    }
+  ]
+}

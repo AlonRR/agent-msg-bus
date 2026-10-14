@@ -804,8 +804,11 @@ does not change.
 
 #### Revisited 14 Oct 2026 — a Claude Code mod as the receiving end
 
-Proposed by the user, not built. The mod API below is relayed from the API types shipped with
-Claude Code 2.1.296; nothing was run. The bus facts are measured from this repo's source.
+Proposed by the user. **Built the same day as a prototype**, in [`claude-code-mod/`](../claude-code-mod/README.md),
+with `whoami --json` and `read --unread --json` added to the CLI for it. It shows the count to the
+person and wakes nothing; the wake option below is not built. It passes its tests under
+`claude plugin test` and has not run in a live session. The mod API below is relayed from the API
+types shipped with Claude Code 2.1.296. The bus facts are measured from this repo's source.
 
 - **A mod can hold the watch that Monitor could not keep.** `$.process.spawn` streams a child's
   output piece by piece for the session's life. `agent-msg-bus watch <addr> --fallback` already
@@ -827,8 +830,11 @@ Claude Code 2.1.296; nothing was run. The bus facts are measured from this repo'
     same repo binds the `.<8 hex>` name again, and `migrate` answers 409 while the watch is held.
     After `update`, the watch runs the old build until the mod reloads.
   - Loading a mod into every session is per-machine Claude Code configuration, not this repo's.
-- **This repo's part, if it is built:** JSON output from `whoami`, and a count-and-headers form of
-  `read --unread`, so the mod parses no human-readable text.
+- **This repo's part:** JSON output from `whoami`, and a JSON form of `read --unread`, so the mod
+  parses no human-readable text. Done.
+- **A second way to wake, found while building:** `$.prompt.submit` queues a prompt that starts a
+  turn once the session is idle. It is documented for exactly this, background work waking a quiet
+  session, so it may suit better than a session messaging itself. Neither is built.
 
 ---
 

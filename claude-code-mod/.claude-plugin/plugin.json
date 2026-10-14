@@ -1,0 +1,33 @@
+{
+  "name": "agent-msg-bus-inbox",
+  "version": "0.1.0",
+  "description": "Shows how much agent-msg-bus mail is waiting for this session, in the status line and a toast, without starting a model turn.",
+  "author": {
+    "name": "AlonRR"
+  },
+  "license": "MPL-2.0",
+  "userConfig": {
+    "binary": {
+      "type": "string",
+      "title": "agent-msg-bus binary",
+      "description": "Path to the agent-msg-bus binary. Empty: %LOCALAPPDATA%\\agent-msg-bus\\agent-msg-bus.exe where LOCALAPPDATA is set, otherwise agent-msg-bus on PATH.",
+      "default": ""
+    },
+    "mode": {
+      "type": "string",
+      "title": "How mail is noticed",
+      "description": "poll reads the inbox on a timer and holds nothing open. watch keeps `agent-msg-bus watch` running for the session, which subscribes the session's address: it shows as live in peers, and a second session in the same repo gets its own fallback address.",
+      "default": "poll",
+      "options": [
+        "poll",
+        "watch"
+      ]
+    },
+    "intervalSeconds": {
+      "type": "number",
+      "title": "Poll interval (seconds)",
+      "description": "How often poll mode reads the inbox; 15 at least. Watch mode re-reads every 5 minutes as well, as a check on the watch.",
+      "default": 60
+    }
+  }
+}
