@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.27] — 2026-10-14
+
 ### Added
 
 - **`scripts/swap-broker.sh` upgrades a running broker and keeps a way back.** It runs on the
@@ -50,7 +52,8 @@ explicitly not part of it and can change in a patch.
   session runs the bus CLI. A `watch` mode is available, off by default because it subscribes
   the address. It never acks, never shows a body, and never puts mail where the model reads it.
   The repository root is now a marketplace that lists it. A prototype: 26 tests under
-  `claude plugin test`, and 19 seeded defects, all caught. It has not run in a live session yet.
+  `claude plugin test`, and 19 seeded defects, all caught. It has not yet been seen working in a
+  live session.
 
 - **JSON output for a program watching a session's inbox.** `read <addr> --unread --json` prints
   `{addr, total, messages}`; `total` counts everything waiting, so `--limit 0` is a count alone.
