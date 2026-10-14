@@ -802,6 +802,34 @@ does not change.
    entirely. Recommend keeping it documented and off by default.
 5. **The optional `UserPromptSubmit` hook:** now or later. Recommend later.
 
+#### Revisited 14 Oct 2026 — a Claude Code mod as the receiving end
+
+Proposed by the user, not built. The mod API below is relayed from the API types shipped with
+Claude Code 2.1.296; nothing was run. The bus facts are measured from this repo's source.
+
+- **A mod can hold the watch that Monitor could not keep.** `$.process.spawn` streams a child's
+  output piece by piece for the session's life. `agent-msg-bus watch <addr> --fallback` already
+  prints one JSON line per message, reconnects by itself and never acks. No 30-minute expiry, and
+  no model turn per line.
+- **What the mod does with a line is the open choice:**
+  - Show it to the person only: a status-line count and a toast. No turn at all. The mod recounts
+    with `read --unread` after the session runs `ack`.
+  - Wake the session: `$.session.send` to the session's own id, with the pointer-only content of
+    decision 1. One turn per message, with no help from the sender. That removes the step this
+    design could not do from a process (*The CLI cannot send the nudge itself*, above). Untested,
+    including whether a session may message itself.
+- **`read --unread` is safe to poll.** The broker answers it with SELECTs only: no cursor move, no
+  registry write. It needs broker 0.4.23 or later and a registered address (404 otherwise).
+- **Limits:**
+  - The mod API marks `$.process` "CLI only". Whether that excludes sessions hosted by the desktop
+    app or driven over Remote Control is unverified.
+  - A held watch is a subscription. The session shows as live in `peers`, a second session in the
+    same repo binds the `.<8 hex>` name again, and `migrate` answers 409 while the watch is held.
+    After `update`, the watch runs the old build until the mod reloads.
+  - Loading a mod into every session is per-machine Claude Code configuration, not this repo's.
+- **This repo's part, if it is built:** JSON output from `whoami`, and a count-and-headers form of
+  `read --unread`, so the mod parses no human-readable text.
+
 ---
 
 ## Relay supervision on Windows — what actually recovers a dead relay
