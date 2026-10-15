@@ -304,7 +304,7 @@ words, never the user's.
 | 7 | machine-b, including the offline-queue test | Message sent while machine-b is off arrives on reconnect | ✅ **passed** — 2 messages queued while offline, both replayed in order on reconnect, none lost |
 | 8 | Retire old msgbus | Hooks removed, skill deprecated, data archived | ✅ **deprecated, not deleted** — see below |
 | 9 | Channels adapter | Delivery with no arming step | ⏸️ **superseded by Phase 10** — see below |
-| 10 | Delivery without Monitor: the bus keeps the record, built-in session messaging wakes | An idle session costs nothing and still gets its mail | 📝 **design for review — nothing built** |
+| 10 | Delivery without Monitor: the bus keeps the record, built-in session messaging wakes | An idle session costs nothing and still gets its mail | ✅ **show-only, by decision** — the [`claude-code-mod/`](../claude-code-mod/README.md) mod shows waiting mail to the person at no model cost, released with 0.4.27 and in use since 15 Oct 2026. Waking a session was decided against (14 Oct); see *Revisited 14 Oct 2026* below |
 
 Phases 1–4 build nothing user-visible on their own. That is deliberate: each increment is small enough
 that a killed session costs one step, per the standing session-limits policy.
