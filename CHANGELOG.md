@@ -22,6 +22,21 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The session-start banner no longer tells a session to update a client that is already the
+  newest build.** Any difference between this client and the broker or relay produced
+  `⚠ BUILD MISMATCH` and the `update` command. After a client-only release that is backwards: the
+  broker and relay are older on purpose, and `update` has nothing to install. After 0.4.27 every
+  session on the machine got that advice at every start. Now the direction decides:
+  - A build newer than this client keeps the warning and the `update` command.
+  - So does a version that is not three numbers, which cannot be put in order.
+  - A build older than this client gets a short note that this session has nothing to do. An
+    older broker is upgraded on its own host. An older relay runs the installed build once it is
+    restarted, and the note says to check its supervisor first.
+
+  Versions are compared as numbers, so 0.4.10 is newer than 0.4.9.
+
 ### Changed
 
 - **The mod's README gives the install that was tested**: a git URL with the release tag after

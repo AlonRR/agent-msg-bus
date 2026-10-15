@@ -247,9 +247,11 @@ pub enum Seen<'a> {
     Version(&'a str),
 }
 
-/// The banner's leading paragraph when this machine is not on the newest build it can see.
+/// The banner's leading paragraph when the builds this machine can see differ.
 ///
-/// Returns an empty string when there is nothing to say, so the common case costs no words. Pure,
+/// A warning with the update command when something is newer than this client, or cannot be put in
+/// order; a short note when this client is the newest. Returns an empty string when every build
+/// agrees, so the common case costs no words. Pure,
 /// so the interesting combinations are testable without a broker: the whole value of this function
 /// is in *which* skews it decides are worth interrupting a session for.
 ///
@@ -257,8 +259,21 @@ pub enum Seen<'a> {
 /// and the standing rule is that those go to the human — a hook that silently swapped the binary
 /// every session would be doing exactly what no message on this bus is allowed to authorise.
 pub fn version_advice(mine: &str, broker: Seen<'_>, relay: Seen<'_>, me: &str) -> String {
-    let mut lines: Vec<String> = Vec::new();
+    // Which way the skew runs decides the advice. A build NEWER than this client means this machine
+    // is behind, and `update` is the fix. A build OLDER than this client is not fixed by anything
+    // `update` can do: after a client-only release the broker and relay are older on purpose. Until
+    // 0.4.28 both got the update advice, so after 0.4.27 every session was told to update a binary
+    // that was already the newest. A version that cannot be put in order keeps the full warning.
+    let mine_t = crate::update::version_triple(mine);
+    let mut behind: Vec<String> = Vec::new();
+    let mut older: Vec<String> = Vec::new();
     for (what, seen) in [("broker", broker), ("relay on this machine", relay)] {
+        let then = if what == "broker" {
+            "A broker is upgraded on its own host, so there is nothing to do on this machine."
+        } else {
+            "It runs the installed build only once it is restarted, which is a decision about \
+             whether this machine can get its relay back: check its supervisor first."
+        };
         match seen {
             // Silence about something that could not be asked is the only honest answer. Guessing
             // here would cry wolf on every session started while the broker happens to be down,
@@ -267,19 +282,29 @@ pub fn version_advice(mine: &str, broker: Seen<'_>, relay: Seen<'_>, me: &str) -
             // But something that ANSWERS and reports no version is not unknown — it predates 0.2.0,
             // because `--version` is what 0.2.0 added. That makes it the single most likely thing
             // on this bus to be stale, and filing it under "unknown, probably fine" would hide it.
-            Seen::NoVersion => lines.push(format!(
+            Seen::NoVersion => older.push(format!(
                 "The {what} is too old to report a version, so it predates 0.2.0 — older than this \
-                 client ({mine})."
+                 client ({mine}). {then}"
             )),
-            Seen::Version(v) if v != mine => {
-                lines.push(format!("The {what} is {v}; this client is {mine}."))
-            }
-            Seen::Version(_) => {}
+            Seen::Version(v) if v == mine => {}
+            Seen::Version(v) => match (crate::update::version_triple(v), mine_t) {
+                (Some(theirs), Some(ours)) if theirs < ours => older
+                    .push(format!("The {what} is {v}, older than this client ({mine}). {then}")),
+                _ => behind.push(format!("The {what} is {v}; this client is {mine}.")),
+            },
         }
     }
-    if lines.is_empty() {
-        return String::new();
+    if behind.is_empty() {
+        if older.is_empty() {
+            return String::new();
+        }
+        return format!(
+            "agent-msg-bus: this client is the newest build in sight. Nothing for this session to \
+             do.\n{}\n\n",
+            older.join("\n")
+        );
     }
+    behind.extend(older);
     format!(
         "⚠ agent-msg-bus BUILD MISMATCH\n{}\n\
          Update this machine's binary with:  {me} update\n\
@@ -288,7 +313,7 @@ pub fn version_advice(mine: &str, broker: Seen<'_>, relay: Seen<'_>, me: &str) -
          next start, when the SessionStart hook runs the installed binary, and the relay only when \
          it is restarted — which is a decision about whether this machine can get its relay back, \
          so check its supervisor first.\n\n",
-        lines.join("\n")
+        behind.join("\n")
     )
 }
 
@@ -918,8 +943,66 @@ mod tests {
     /// once and fixed.
     #[test]
     fn the_advice_names_the_runnable_command() {
-        let out = version_advice("0.4.0", Seen::Version("0.3.1"), Seen::Version("0.3.1"), "C:/x/amb.exe");
+        let out = version_advice("0.3.1", Seen::Version("0.4.0"), Seen::Version("0.4.0"), "C:/x/amb.exe");
         assert!(out.contains("C:/x/amb.exe update"), "no runnable command in: {out}");
+    }
+
+    // ---- which way the skew runs -----------------------------------------------
+    //
+    // Until 0.4.28 every difference was a BUILD MISMATCH telling the session to update this
+    // machine's binary. After a client-only release that is backwards: the client IS the newest
+    // build, the broker and relay are older on purpose, and `update` has nothing to install. After
+    // 0.4.27 every session on the machine got that advice at every start.
+
+    /// The case that prompted it: 0.4.27 changed only the client.
+    #[test]
+    fn a_client_newer_than_everything_is_not_told_to_update() {
+        let out = version_advice("0.4.27", Seen::Version("0.4.26"), Seen::Version("0.4.26"), "amb");
+        assert!(!out.contains("amb update"), "a newer client was told to update: {out}");
+        assert!(!out.contains("MISMATCH"), "a newer client was warned: {out}");
+        assert!(out.contains("0.4.26") && out.contains("0.4.27"), "{out}");
+    }
+
+    /// A broker is upgraded on its own host, so nothing on this machine fixes an older one.
+    #[test]
+    fn an_older_broker_is_noted_as_not_this_machines_to_fix() {
+        let out = version_advice("0.4.27", Seen::Version("0.4.26"), Seen::Version("0.4.27"), "amb");
+        assert!(out.contains("broker is 0.4.26"), "{out}");
+        assert!(out.contains("nothing to do on this machine"), "{out}");
+        assert!(!out.contains("amb update"), "{out}");
+    }
+
+    /// A relay behind the installed client catches up by a restart, not an update: the update has
+    /// already happened, which is why the client is ahead.
+    #[test]
+    fn a_relay_behind_the_client_is_pointed_at_a_restart() {
+        let out = version_advice("0.4.27", Seen::Version("0.4.27"), Seen::Version("0.4.26"), "amb");
+        assert!(out.contains("relay on this machine is 0.4.26"), "{out}");
+        assert!(out.contains("restart"), "{out}");
+        assert!(!out.contains("amb update"), "{out}");
+    }
+
+    /// The direction the old banner was right about: a build newer than this client means this
+    /// machine is behind.
+    #[test]
+    fn a_client_older_than_the_broker_is_told_to_update() {
+        let out = version_advice("0.4.26", Seen::Version("0.4.27"), Seen::Version("0.4.26"), "amb");
+        assert!(out.contains("MISMATCH") && out.contains("amb update"), "{out}");
+    }
+
+    /// Compared as numbers: as text, "0.4.10" sorts below "0.4.9".
+    #[test]
+    fn versions_are_compared_as_numbers_not_text() {
+        let out = version_advice("0.4.10", Seen::Version("0.4.9"), Seen::Version("0.4.10"), "amb");
+        assert!(!out.contains("amb update"), "0.4.10 was taken as older than 0.4.9: {out}");
+    }
+
+    /// A version that is not three numbers cannot be put in order, so the cautious warning stands.
+    #[test]
+    fn a_version_that_cannot_be_ordered_keeps_the_full_warning() {
+        let out = version_advice("0.4.27", Seen::Version("0.4.27-dirty"), Seen::Version("0.4.27"), "amb");
+        assert!(out.contains("MISMATCH") && out.contains("0.4.27-dirty"), "{out}");
+        assert!(out.contains("amb update"), "{out}");
     }
 
     /// Both halves must survive `validate_address`, or the hook would hand a session a name that
