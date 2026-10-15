@@ -9,8 +9,12 @@ bus: 2 unread
 bus: 2 unread for machine-a/repo · newest: [request] machine-b/other: please check   (toast)
 ```
 
-Status: a prototype. Its tests pass under `claude plugin test`, and it has not yet run in a live
-session. See *What has been checked* below.
+In the terminal, Claude Code marks a mod's status line with a ⚠ and the plugin's name, so the
+first line above reads `⚠ agent-msg-bus-inbox: bus: 2 unread`.
+
+Status: in use since 15 Oct 2026, released with agent-msg-bus 0.4.27. It has run in a live
+terminal session; the desktop app and Remote Control are not checked yet. See *What has been
+checked* below.
 
 ## Why
 
@@ -75,17 +79,25 @@ it gives up or is stopped.
 
 ## Install
 
-From a clone of this repository, on the machine the sessions run on:
+On the machine the sessions run on, from the repository's git URL pinned to a release tag:
 
 ```bash
-claude plugin marketplace add <path to the clone>
+claude plugin marketplace add git@<git-host>:<owner>/agent-msg-bus.git#v0.4.27
 claude plugin install agent-msg-bus-inbox@agent-msg-bus
 ```
 
-A marketplace that is a folder is read from that folder, so a `git pull` and `/reload-plugins`
-update the mod with no reinstall. That cuts both ways: every session runs whatever the folder
-holds, uncommitted edits included, so install from a clone nobody edits in. To try it in one session only:
-`claude --plugin-dir <path to the clone>/claude-code-mod`.
+The tag goes after `#`. `claude plugin marketplace list` shows the pin as `@v0.4.27`, but `@` in
+the add command is taken as part of the repository name and the clone fails. Claude Code clones
+the tag into its own folder, so no working clone is shared with the sessions, and an edit in
+progress never reaches them. Every session started after the install loads the mod. A session
+that is already open loads it on `/reload-plugins`.
+
+`install` reports the three options below as "not yet set". That is expected: an option left
+unset takes its default.
+
+A folder works as the source too (`claude plugin marketplace add <path to a clone>`), but then
+every session runs whatever the folder holds, uncommitted edits included. To try the mod in one
+session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
 
 ## What has been checked
 
@@ -95,8 +107,15 @@ holds, uncommitted edits included, so install from a clone nobody edits in. To t
 - 19 defects were seeded one at a time; the tests caught all 19.
 - `tsc` with the API's own declarations: no errors. A deliberate type error was caught.
 
+- A live terminal session, 15 Oct 2026, with the mod loaded from a mods folder. A message arrived
+  from another address, and the user saw the status line show `bus: 1 unread`. After a second
+  message, the user reported the trial working; what was asked was the toast on a rising count
+  and the line clearing after the session acked. The broker side was checked with
+  `read --unread --json` each time. A message a session sends to itself never counts, because the
+  broker never delivers a sender its own mail, so a trial needs a second sender address.
+- The install above, from the git URL pinned to `v0.4.27`, on the same machine.
+
 Not checked yet:
-- a live session;
 - whether the status line and toasts reach a session the desktop app hosts, or one used over
   Remote Control. The API declares a longer text limit for remote surfaces, which suggests they
   draw it, but nobody has looked;

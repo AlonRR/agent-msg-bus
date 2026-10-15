@@ -842,7 +842,8 @@ types shipped with Claude Code 2.1.296. The bus facts are measured from this rep
   - **`poll` stays the default.** `watch` mode stays opt-in, because it subscribes the address.
     A minute's delay is acceptable.
   - **The CLI half ships as 0.4.27**, and the mod is installed for every session on the user's
-    machine after a live trial.
+    machine after a live trial. Both done 15 Oct 2026: the trial passed in a terminal session, and
+    the mod is installed from the git URL pinned to `v0.4.27`.
 
 ---
 

@@ -22,6 +22,14 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Changed
+
+- **The mod's README gives the install that was tested**: a git URL with the release tag after
+  `#`. `@` is how `marketplace list` shows the pin, but in the add command it fails the clone. It
+  also says the mod has run in a live terminal session, how Claude Code draws its status line, and
+  that a trial needs a second sender address, because the broker never delivers a sender its own
+  mail.
+
 ## [0.4.27] — 2026-10-14
 
 ### Added
