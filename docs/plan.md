@@ -824,8 +824,9 @@ types shipped with Claude Code 2.1.296. The bus facts are measured from this rep
 - **`read --unread` is safe to poll.** The broker answers it with SELECTs only: no cursor move, no
   registry write. It needs broker 0.4.23 or later and a registered address (404 otherwise).
 - **Limits:**
-  - The mod API marks `$.process` "CLI only". Whether that excludes sessions hosted by the desktop
-    app or driven over Remote Control is unverified.
+  - The mod API marks `$.process` "CLI only". It runs in a session the desktop app hosts on the
+    same machine (the user reported the mod working there, 15 Oct 2026). Remote Control is
+    unverified.
   - A held watch is a subscription. The session shows as live in `peers`, a second session in the
     same repo binds the `.<8 hex>` name again, and `migrate` answers 409 while the watch is held.
     After `update`, the watch runs the old build until the mod reloads.

@@ -22,6 +22,12 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Changed
+
+- **The mod's README records that it works in the desktop app too**, as reported by the user, so
+  the API's "CLI only" mark on `$.process` does not exclude a session the desktop app runs on the
+  same machine. Remote Control is still unchecked.
+
 ## [0.4.28] — 2026-10-15
 
 ### Fixed

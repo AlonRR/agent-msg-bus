@@ -13,7 +13,7 @@ In the terminal, Claude Code marks a mod's status line with a ⚠ and the plugin
 first line above reads `⚠ agent-msg-bus-inbox: bus: 2 unread`.
 
 Status: in use since 15 Oct 2026, released with agent-msg-bus 0.4.27. It has run in a live
-terminal session; the desktop app and Remote Control are not checked yet. See *What has been
+terminal session and in the desktop app; Remote Control is not checked yet. See *What has been
 checked* below.
 
 ## Why
@@ -115,11 +115,13 @@ session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
   broker never delivers a sender its own mail, so a trial needs a second sender address.
 - The install above, from the git URL pinned to `v0.4.27`, on the same machine.
 
+- A session in the desktop app, 15 Oct 2026, with the mod installed as above: the user reported
+  it working. So `$.process`, which the API marks "CLI only", does run there, for a session the
+  desktop app runs on the same machine.
+
 Not checked yet:
-- whether the status line and toasts reach a session the desktop app hosts, or one used over
-  Remote Control. The API declares a longer text limit for remote surfaces, which suggests they
-  draw it, but nobody has looked;
-- that `$.process`, which the API marks "CLI only", runs in those sessions.
+- whether the status line and toasts reach a session used over Remote Control. The API declares a
+  longer text limit for remote surfaces, which suggests they draw it, but nobody has looked.
 
 ## Developing
 
