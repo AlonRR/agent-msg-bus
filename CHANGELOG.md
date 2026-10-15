@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.28] — 2026-10-15
+
 ### Fixed
 
 - **The session-start banner no longer tells a session to update a client that is already the
