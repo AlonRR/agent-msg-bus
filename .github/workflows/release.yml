@@ -2,6 +2,12 @@ name: release
 
 # Build both platforms' binaries and publish a GitHub Release whenever a version tag (v0.2.0,
 # v1.2.3, …) is pushed. Can also be run by hand against a tag that already exists.
+#
+# Push at most three tags at a time. GitHub creates no push event for any tag in a push of more
+# than three ("Events will not be created for tags when more than three tags are pushed at once",
+# its workflow-events reference), so none of them builds. On 21 Oct 2026 eight tags pushed together
+# started no release at all. A tag that missed its build is built by running this by hand:
+#   gh workflow run release.yml -f tag=vX.Y.Z
 on:
   push:
     tags: ['v*.*.*']
