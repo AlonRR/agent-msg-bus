@@ -22,6 +22,14 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Security
+
+- **rustls 0.23.45, for GHSA-2mjx-qc3c-rqvc** ("TLS 1.3 handshake messages incorrectly accepted
+  across encryption level boundaries", moderate; versions 0.23.13 to 0.23.44 are affected). The
+  lockfile held 0.23.43. rustls-webpki moves with it, from 0.103.13 to 0.103.16. TLS is used only
+  by the CLI and the relay, when they reach a broker over `https://` or `wss://`; the broker serves
+  plain HTTP and builds no TLS config, so updating the clients is enough.
+
 ## [0.4.29] — 2026-10-21
 
 ### Fixed
