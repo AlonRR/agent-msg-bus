@@ -397,24 +397,40 @@ pub fn processes_still_on_the_old_build() -> Vec<String> {
         ])
         .output();
     match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .collect(),
+        Ok(o) => without_pid(
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string())
+                .collect(),
+            std::process::id(),
+        ),
         Err(_) => Vec::new(),
     }
+}
+
+/// `lines` without the one for process `pid`. Each line starts with its pid, then `|` on Windows or
+/// a space from `pgrep -a`. The update leaves itself out: it exits as soon as it has reported.
+pub(crate) fn without_pid(lines: Vec<String>, pid: u32) -> Vec<String> {
+    let me = pid.to_string();
+    lines
+        .into_iter()
+        .filter(|l| l.split(['|', ' ']).next() != Some(me.as_str()))
+        .collect()
 }
 
 #[cfg(not(windows))]
 pub fn processes_still_on_the_old_build() -> Vec<String> {
     let out = std::process::Command::new("pgrep").args(["-a", "agent-msg-bus"]).output();
     match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .collect(),
+        Ok(o) => without_pid(
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string())
+                .collect(),
+            std::process::id(),
+        ),
         Err(_) => Vec::new(),
     }
 }
@@ -427,6 +443,29 @@ mod tests {
         let d = std::env::temp_dir().join(format!("amb-update-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The process doing the update is about to exit, so it is not "still running the old build".
+    /// Both machines' updates on 14 and 15 Oct listed it anyway, beside the relay.
+    #[test]
+    fn the_update_does_not_list_itself() {
+        let windows = vec![
+            "13804|\"C:\\x\\agent-msg-bus.exe\"  relay --listen 127.0.0.1:9451".to_string(),
+            "34924|C:\\x\\agent-msg-bus.exe update --from target/release/agent-msg-bus.exe".to_string(),
+        ];
+        assert_eq!(without_pid(windows, 34924), ["13804|\"C:\\x\\agent-msg-bus.exe\"  relay --listen 127.0.0.1:9451"]);
+        let pgrep = vec![
+            "812 /usr/local/bin/agent-msg-bus relay".to_string(),
+            "990 /usr/local/bin/agent-msg-bus update".to_string(),
+        ];
+        assert_eq!(without_pid(pgrep, 990), ["812 /usr/local/bin/agent-msg-bus relay"]);
+    }
+
+    /// Only a line that starts with exactly that pid goes: 3492 is not 34924.
+    #[test]
+    fn only_the_exact_pid_is_dropped() {
+        let lines = vec!["3492|relay".to_string(), "34924|update".to_string(), "no pid here".to_string()];
+        assert_eq!(without_pid(lines, 3492), ["34924|update", "no pid here"]);
     }
 
     /// The swap must preserve the old file rather than destroy it, and the backup name must say

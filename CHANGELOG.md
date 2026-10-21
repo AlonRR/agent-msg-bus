@@ -32,6 +32,10 @@ explicitly not part of it and can change in a patch.
   `ts` stays the real time of sending. The newest id is read from the table on each send, so this
   holds across a restart. **A broker change: deploy the broker for it to take effect.**
 
+- **`update` no longer lists itself as a process still running the old build.** It exits right
+  after its report, and listing it beside the relay made every update look as if two processes
+  needed a restart. `self-update` uses the same list.
+
 ### Changed
 
 - **The mod's README records that it works in the desktop app too**, as reported by the user, so
