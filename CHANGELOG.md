@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.30] — 2026-10-21
+
 ### Security
 
 - **rustls 0.23.45, for GHSA-2mjx-qc3c-rqvc** ("TLS 1.3 handshake messages incorrectly accepted
