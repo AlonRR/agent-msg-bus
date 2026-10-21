@@ -54,7 +54,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # A named image, not ubuntu-latest. The binary links glibc dynamically and needs a glibc
+          # at least as new as the build host's (docs/operations.md). ubuntu-latest moved from 24.04
+          # to 26.04 in October 2026, and a build there would not load on an older distribution such
+          # as Debian 13. v0.4.21 was built on ubuntu-24.04; a newer image is a deliberate change.
+          - os: ubuntu-24.04
             artifact: agent-msg-bus-linux-x86_64
             bin: agent-msg-bus
           - os: windows-latest
