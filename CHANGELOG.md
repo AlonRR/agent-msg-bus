@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.29] — 2026-10-21
+
 ### Fixed
 
 - **A message id is never minted below one already stored.** An id starts with the broker's clock,
