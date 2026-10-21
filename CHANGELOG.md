@@ -22,6 +22,16 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A message id is never minted below one already stored.** An id starts with the broker's clock,
+  and a cursor means "everything above this id". So a clock stepped back, by a time-sync
+  correction or a restart into an earlier time, could mint an id below one a reader had acked, and
+  that message was never unread for that reader, with nothing to report it. Now a new id is above
+  the newest stored one: behind it, the id keeps that id's time and counts on from its counter.
+  `ts` stays the real time of sending. The newest id is read from the table on each send, so this
+  holds across a restart. **A broker change: deploy the broker for it to take effect.**
+
 ### Changed
 
 - **The mod's README records that it works in the desktop app too**, as reported by the user, so

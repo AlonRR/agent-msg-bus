@@ -209,6 +209,13 @@ can repair it because cursors only move forward. Live pushes keep arriving, so n
 what is gone is the replay of anything that arrives while you are disconnected. Refused outright
 from v0.4.3 — but the guard runs on the **broker**, so a client update does not protect you.
 
+**Ids go up even when the broker's clock does not.** An id starts with the time it was minted, so
+before v0.4.29 a broker clock stepped back, by a time-sync correction or a restart into an earlier
+time, could mint an id below one a reader had already acked, and that message was never unread
+for that reader. From v0.4.29 a new id is never at or below the newest one stored: behind it, the
+id keeps that id's time and counts on from its counter. The message's `ts` is still the real time
+it was sent. This is also a broker change.
+
 **Checking your own cursor costs one command:** a **non-zero `pending` in `peers` proves it is
 healthy**, because a poisoned cursor matches nothing and reads 0 forever. That is a one-way test —
 zero pending proves nothing, since it is also what an empty mailbox looks like. To settle a zero,

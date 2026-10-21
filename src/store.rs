@@ -129,12 +129,39 @@ pub fn is_message_id(s: &str) -> bool {
     b.iter().enumerate().all(|(i, c)| i == 8 || i == 18 || c.is_ascii_digit())
 }
 
+/// The id and timestamp for a message sent at `now`: never at or below `newest`, the newest id
+/// already stored.
+///
+/// A cursor means "everything above this id", so an id minted below one a reader has acked is
+/// never unread for that reader, and nothing reports it. The clock alone cannot promise order: a
+/// time-sync correction can step it back, and the counter starts again at 0 on every restart.
+/// Behind the newest id, the new one keeps that id's time and counts on from its counter, so it
+/// sorts directly above it. `ts` stays the real time of sending.
+///
+/// The counter has nine digits. Running past them would need a billion messages minted while the
+/// clock stays behind one id, which no clock correction comes near.
+pub(crate) fn mint_after(newest: Option<&str>, now: time::OffsetDateTime) -> (String, String) {
+    let (id, ts) = mint_at(now);
+    match newest {
+        Some(n) if is_message_id(n) && id.as_str() <= n => {
+            // `YYYYMMDDTHHMMSSmmm-` is the first 19 bytes, and the counter the last 9.
+            let (time_part, counter) = n.split_at(19);
+            let next = counter.parse::<u64>().unwrap_or(0) + 1;
+            (format!("{time_part}{next:09}"), ts)
+        }
+        _ => (id, ts),
+    }
+}
+
+fn mint_id() -> (String, String) {
+    mint_at(time::OffsetDateTime::now_utc())
+}
+
 /// `<compact utc>-<counter>`, so ids sort lexicographically **and** chronologically, and cursors can
 /// be plain string comparisons. The counter breaks ties inside one millisecond; it is process-wide,
 /// which is sound because the broker is the only writer. The PRIMARY KEY is the backstop: a
 /// collision would fail the insert loudly rather than overwrite a message silently.
-fn mint_id() -> (String, String) {
-    let now = time::OffsetDateTime::now_utc();
+fn mint_at(now: time::OffsetDateTime) -> (String, String) {
     let id = format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}{:03}-{:09}",
         now.year(),
@@ -329,7 +356,11 @@ impl Store {
     }
 
     pub fn send(&self, m: &NewMessage) -> Result<String> {
-        let (id, ts) = mint_id();
+        // Read from the table, not kept in memory, so it holds across a restart. `id` is the
+        // primary key, so this is one index lookup.
+        let newest: Option<String> =
+            self.conn.query_row("SELECT MAX(id) FROM messages", [], |r| r.get(0))?;
+        let (id, ts) = mint_after(newest.as_deref(), time::OffsetDateTime::now_utc());
         self.conn.execute(
             "INSERT INTO messages(id, ts, sender, recipient, kind, subject, body, reply_to)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -947,6 +978,77 @@ mod tests {
             body: "b".into(),
             reply_to: String::new(),
         }
+    }
+
+    // ---- ids never go backwards --------------------------------------------
+    //
+    // A cursor is "everything above this id", so an id minted below one already stored is never
+    // unread for a reader that has acked past it. The clock alone used to decide, so a clock
+    // stepped back, by a time-sync correction or a restart into an earlier time, could do exactly
+    // that, and nothing would report it.
+
+    /// Stores a message under a given id, as a broker whose clock ran ahead would have.
+    fn stored_at(s: &Store, id: &str, from: &str, to: &str) {
+        s.conn
+            .execute(
+                "INSERT INTO messages(id, ts, sender, recipient, kind, subject, body, reply_to)
+                 VALUES (?1, '2099-01-01T00:00:00.000Z', ?2, ?3, 'fyi', 'ahead', 'b', '')",
+                params![id, from, to],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_id_is_never_below_one_already_stored() {
+        let s = store();
+        stored_at(&s, "20990101T000000000-000000005", "machine-a/sender", "machine-a/reader");
+        let id = s.send(&msg("machine-a/sender", "machine-a/reader", "after")).unwrap();
+        assert!(
+            id.as_str() > "20990101T000000000-000000005",
+            "minted {id} below the newest stored id"
+        );
+        assert!(is_message_id(&id), "{id} is not a message id");
+    }
+
+    /// The failure as a reader meets it: mail sent after the clock stepped back never shows up.
+    #[test]
+    fn mail_sent_after_the_clock_steps_back_is_still_unread() {
+        let s = store();
+        s.register(&reg("machine-a/reader")).unwrap();
+        stored_at(&s, "20990101T000000000-000000005", "machine-a/sender", "machine-a/reader");
+        s.ack("machine-a/reader", "20990101T000000000-000000005").unwrap();
+        s.send(&msg("machine-a/sender", "machine-a/reader", "after the step")).unwrap();
+        let pending = s.pending_for("machine-a/reader").unwrap();
+        assert_eq!(
+            pending.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(),
+            ["after the step"],
+            "the new message was minted below the reader's cursor"
+        );
+    }
+
+    #[test]
+    fn with_the_clock_ahead_of_the_newest_id_the_clock_decides() {
+        let now = time::macros::datetime!(2026-10-21 09:30:15.250 UTC);
+        let (id, ts) = mint_after(Some("20261021T093015100-000000007"), now);
+        assert!(id.starts_with("20261021T093015250-"), "{id}");
+        assert_eq!(ts, "2026-10-21T09:30:15.250Z");
+    }
+
+    /// Behind the newest id, the new one keeps that id's time and counts on from it, so it sorts
+    /// directly above it. `ts` stays the real time of sending.
+    #[test]
+    fn with_the_clock_behind_the_newest_id_the_id_counts_on_from_it() {
+        let now = time::macros::datetime!(2026-10-21 09:30:15.250 UTC);
+        let (id, ts) = mint_after(Some("20261021T093016000-000000041"), now);
+        assert_eq!(id, "20261021T093016000-000000042");
+        assert_eq!(ts, "2026-10-21T09:30:15.250Z");
+    }
+
+    #[test]
+    fn an_empty_store_mints_from_the_clock() {
+        let now = time::macros::datetime!(2026-10-21 09:30:15.250 UTC);
+        let (id, _) = mint_after(None, now);
+        assert!(id.starts_with("20261021T093015250-"), "{id}");
     }
 
     // ---- read filters -----------------------------------------------------
