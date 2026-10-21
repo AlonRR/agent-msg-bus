@@ -36,6 +36,13 @@ explicitly not part of it and can change in a patch.
   after its report, and listing it beside the relay made every update look as if two processes
   needed a restart. `self-update` uses the same list.
 
+- **The mod rereads the inbox only after a command that runs the bus CLI.** It reread after any
+  command that named `agent-msg-bus` anywhere and had a word like `read` or `send` in it, which is
+  every command run inside this repository's folder with such a word. Now the subcommand has to be
+  the word straight after the binary's name or path, or after a shell variable holding that path.
+  A wasted read cost about 0.1 s and no model turn, so this is tidiness rather than a cost fix. The
+  mod is now 0.1.1.
+
 ### Changed
 
 - **The mod's README records that it works in the desktop app too**, as reported by the user, so

@@ -34,7 +34,10 @@ outside the model, which costs no turns at all.
    the count, plus the newest message's kind, sender and subject when all of them were read.
 4. After the session runs the bus CLI in Bash or PowerShell, it reads again at once, so an `ack`
    clears the count without waiting for the timer. After `pin`, `unpin`, `register` or `migrate`
-   it asks `whoami` again first.
+   it asks `whoami` again first. A run counts when the subcommand is the word straight after the
+   binary: its name, a path ending in it (in quotes or not), or a shell variable that holds that
+   path, as in `"$B" ack`. The name is also a folder and part of this plugin's name, so a command
+   that only passes through them, such as `cd …/agent-msg-bus && grep read`, reads nothing.
 
 An unreachable broker is shown once in the status line, `bus: unreachable`, and never as a toast:
 a laptop off the network is the normal case. Nothing waits on the broker: the session's first
@@ -102,9 +105,9 @@ session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
 ## What has been checked
 
 - `claude plugin validate`: passes.
-- `claude plugin test`: 26 tests, against a stand-in for the CLI. They cover finding the inbox, what
+- `claude plugin test`: 29 tests, against a stand-in for the CLI. They cover finding the inbox, what
   is shown and when, the timer, re-reading after a bus command, and watch mode.
-- 19 defects were seeded one at a time; the tests caught all 19.
+- 22 defects were seeded one at a time; the tests caught all 22.
 - `tsc` with the API's own declarations: no errors. A deliberate type error was caught.
 
 - A live terminal session, 15 Oct 2026, with the mod loaded from a mods folder. A message arrived

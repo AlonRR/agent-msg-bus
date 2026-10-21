@@ -292,6 +292,36 @@ describe('after the session runs the bus CLI', () => {
     expect(reads(w)).toBe(1)
   })
 
+  // The name is also a folder and part of the plugin's name, so a command that only passes
+  // through them is not a run of the CLI, whatever words follow.
+  test('a command that only names the repo or the plugin reads nothing', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    await $.tool.call({ tool: 'Bash', command: 'cd /work/agent-msg-bus && cargo test 2>&1 | grep read' })
+    await $.tool.call({ tool: 'Bash', command: 'git -C D:/src/agent-msg-bus log --grep send' })
+    await $.tool.call({ tool: 'Bash', command: 'grep -n register C:/x/plugins/marketplaces/agent-msg-bus/claude-code-mod/README.md' })
+    await w.clock.advance(0)
+    expect(reads(w)).toBe(1)
+    expect(whoamis(w)).toBe(1)
+  })
+
+  test('the binary held in a variable still counts, in Bash and in PowerShell', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    await $.tool.call({ tool: 'Bash', command: 'B="$LOCALAPPDATA/agent-msg-bus/agent-msg-bus.exe"; "$B" ack machine-a/repo x' })
+    await $.tool.call({ tool: 'PowerShell', command: '$B = "$env:LOCALAPPDATA\\agent-msg-bus\\agent-msg-bus.exe"; & $B ack machine-a/repo x' })
+    await w.clock.advance(0)
+    expect(reads(w)).toBe(3)
+  })
+
+  test('a subcommand after a path in quotes counts', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    await $.tool.call({ tool: 'Bash', command: '"$LOCALAPPDATA/agent-msg-bus/agent-msg-bus.exe" read machine-a/repo --unread' })
+    await w.clock.advance(0)
+    expect(reads(w)).toBe(2)
+  })
+
   test('a pin asks for the address again before reading', async ($, on) => {
     const w = world(on)
     await start($, w)

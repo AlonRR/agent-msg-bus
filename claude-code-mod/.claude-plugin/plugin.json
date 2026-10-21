@@ -1,6 +1,6 @@
 {
   "name": "agent-msg-bus-inbox",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shows how much agent-msg-bus mail is waiting for this session, in the status line and a toast, without starting a model turn.",
   "author": {
     "name": "AlonRR"

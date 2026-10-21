@@ -42,10 +42,26 @@ const RUN_TIMEOUT_MS = 15_000
 const SHOWN = 20
 const SUBJECT_MAX = 100
 
-/** A command that may have changed what is waiting, or which address is ours. */
-const BUS_COMMAND = /\bagent-msg-bus(?:\.exe)?\b/
-const CHANGES_INBOX = /\b(?:ack|read|send|pin|unpin|register|migrate|forget)\b/
-const CHANGES_ADDRESS = /\b(?:pin|unpin|register|migrate)\b/
+/**
+ * The subcommands that may change what is waiting, or which address is ours. One counts only as
+ * the word after the binary: its name or a path ending in it, maybe closed by a quote, or a shell
+ * variable holding that path. The name is also a folder and part of this plugin's name, so a word
+ * anywhere else in a command that only passes through them is not a run of the CLI.
+ */
+const SUBCOMMAND = '(ack|read|send|pin|unpin|register|migrate|forget)'
+const DIRECT = new RegExp(`agent-msg-bus(?:\\.exe)?["']?\\s+${SUBCOMMAND}\\b`, 'g')
+const ASSIGNED = /\$?([A-Za-z_]\w*)\s*=\s*["']?[^"'\s;]*agent-msg-bus(?:\.exe)?["']?(?=[\s;]|$)/g
+const CHANGES_ADDRESS = new Set(['pin', 'unpin', 'register', 'migrate'])
+
+/** The bus subcommands `command` runs, in no particular order. */
+export function busSubcommands(command: string): string[] {
+  const words = (re: RegExp) => [...command.matchAll(re)].flatMap(m => (m[1] ? [m[1]] : []))
+  const found = words(DIRECT)
+  for (const name of words(ASSIGNED)) {
+    found.push(...words(new RegExp(`\\$\\{?${name}\\}?["']?\\s+${SUBCOMMAND}\\b`, 'g')))
+  }
+  return found
+}
 
 /** One line of at most SUBJECT_MAX characters, with nothing in it that could act on a terminal. */
 export function clip(text: string): string {
@@ -238,8 +254,10 @@ async function begin($: EngineInterface, s: State, binary: unknown, intervalMs: 
 /** After a shell command that ran the bus CLI, read again: an `ack` should clear the count now. */
 function afterCommand($: EngineInterface, s: State, tool: string, command: unknown): void {
   if (tool !== 'Bash' && tool !== 'PowerShell') return
-  if (typeof command !== 'string' || !BUS_COMMAND.test(command) || !CHANGES_INBOX.test(command)) return
-  if (CHANGES_ADDRESS.test(command)) void reidentify($, s)
+  if (typeof command !== 'string') return
+  const ran = busSubcommands(command)
+  if (ran.length === 0) return
+  if (ran.some(c => CHANGES_ADDRESS.has(c))) void reidentify($, s)
   else void refresh($, s)
 }
 
