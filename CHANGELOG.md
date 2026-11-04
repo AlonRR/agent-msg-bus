@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.31] — 2026-11-04
+
 ### Security
 
 - **rustls 0.23.46, for three advisories that cover every version below it:**
