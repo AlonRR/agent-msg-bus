@@ -22,6 +22,16 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Security
+
+- **rustls 0.23.46, for three advisories that cover every version below it:**
+  GHSA-c8m5-c952-6cm4 (medium; `Debug` formatting of a session exposes TLS master secrets and
+  resumption PSKs), GHSA-w44r-93j7-qv28 (low; an unauthenticated ServerHello poisons the per-name
+  key-exchange record, so later ClientHellos carry only a classical X25519 share) and
+  GHSA-h2v8-394m-p7vv (low; Brotli certificate decompression). The Brotli code is not compiled in
+  here, as no dependency enables that feature. TLS is used only by the CLI and the relay, so
+  updating the clients is enough; the broker needs no upgrade for this.
+
 ## [0.4.30] — 2026-10-21
 
 ### Security
