@@ -22,6 +22,27 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Added
+
+- **`AMB_ADDRESS` gives a started session its own mailbox.** Whatever launches a session can set it,
+  and the SessionStart hook pins the session to that address before registering, so it never touches
+  the repo address. A name the bus refuses is reported at the top of the banner, and the session
+  starts as before. Opt-in, so no existing session's address changes. See *Sessions started by
+  another session* in `docs/usage.md`.
+
+### Fixed
+
+- **`whoami` no longer tells you to `migrate` a role into the repo address.** Any `<address>.<suffix>`
+  was reported as an abandoned session name, so a deliberately pinned role drew a command that would
+  have folded its live mailbox into the shared one. Only the 8-hex and `nosession` suffixes that a
+  fallback mints are reported now, and a shared last word no longer reads as the same session.
+- **`pin` refuses a wildcard.**
+
+### Documentation
+
+- `docs/usage.md` said two live sessions in one repo cannot share a mailbox. That holds only for
+  subscribed sessions: without a socket there is no 409, and they share one cursor.
+
 ## [0.4.31] — 2026-11-04
 
 ### Security

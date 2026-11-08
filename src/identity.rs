@@ -38,9 +38,17 @@ pub enum RegStatus {
     Unverified(String),
 }
 
+/// Is this the shape `hook::fallback_address` mints from a session id?
+///
+/// The slot after the repo name holds a role as readily as a session id, and only one of them is a
+/// leftover. A role is a name someone chose, so nothing may treat it as an abandoned session.
+fn is_session_id(s: &str) -> bool {
+    s.len() == 8 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Session id is the part after the final `.` - `machine-a/homelab.3da118c4` -> `3da118c4`.
 fn session_of(addr: &str) -> Option<&str> {
-    addr.rsplit_once('.').map(|(_, s)| s).filter(|s| !s.is_empty())
+    addr.rsplit_once('.').map(|(_, s)| s).filter(|s| is_session_id(s))
 }
 
 pub fn classify(addr: &str, peers: &Result<PeersOut, String>) -> RegStatus {
@@ -119,7 +127,9 @@ pub fn stranding_siblings(me: &str, peers: &PeersOut) -> Vec<(String, usize)> {
     let mut out: Vec<(String, usize)> = peers
         .known
         .iter()
-        .filter(|k| k.addr.starts_with(&prefix))
+        .filter(|k| {
+            k.addr.strip_prefix(&prefix).is_some_and(|s| s == "nosession" || is_session_id(s))
+        })
         .filter(|k| !aliased.iter().any(|a| a == &k.addr))
         .map(|k| (k.addr.clone(), k.pending))
         .collect();
@@ -231,6 +241,15 @@ mod tests {
         assert!(text.contains("NOT REGISTERED"));
         assert!(text.contains("machine-a/homelab.3da118c4"), "must name the real address: {text}");
         assert!(text.contains("silently dead"), "must warn about the subscribe URL: {text}");
+    }
+
+    /// Two different repos can each have a role called `dns`. A shared last word is not a shared
+    /// session, so nothing may claim the caller is registered under the other one.
+    #[test]
+    fn a_shared_role_name_is_not_mistaken_for_the_same_session() {
+        let p = peers(&["machine-a/other.dns"]);
+        let s = classify("machine-a/admin.fixes.dns", &p);
+        assert_eq!(s, RegStatus::Unregistered { session_peer: None });
     }
 
     #[test]
@@ -401,6 +420,29 @@ mod sibling_tests {
             stranding_siblings("machine-a/tools", &peers).is_empty(),
             "claimed an address belonging to another repo or machine"
         );
+    }
+
+    /// A role is a name someone chose, not a leftover. Telling the parent to `migrate` it would fold
+    /// a live mailbox into the shared one: `whoami` printed exactly that for a pinned role.
+    #[test]
+    fn a_role_or_a_child_of_one_is_not_reported() {
+        let peers = out(vec![
+            p("machine-a/admin", 0, &[]),
+            p("machine-a/admin.fixes", 3, &[]),
+            p("machine-a/admin.fixes.dns-cleanup", 2, &[]),
+            p("machine-a/admin.fixes.0123abcd", 1, &[]),
+        ]);
+        assert!(
+            stranding_siblings("machine-a/admin", &peers).is_empty(),
+            "reported a chosen name as an abandoned one"
+        );
+    }
+
+    /// The name given to a session whose payload carried no id is a session name too.
+    #[test]
+    fn the_no_session_fallback_is_still_reported() {
+        let peers = out(vec![p("machine-a/tools", 0, &[]), p("machine-a/tools.nosession", 1, &[])]);
+        assert_eq!(stranding_siblings("machine-a/tools", &peers).len(), 1);
     }
 
     /// A session on a session-suffixed address of its own has no siblings to worry about — the

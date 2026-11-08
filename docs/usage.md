@@ -245,15 +245,42 @@ in it. That is what makes a mailbox outlive a session: mail queued while nobody 
 repo is delivered to whoever picks it up next, rather than being stranded under a name that died
 with the session it was minted for.
 
-Two live sessions in one repo cannot share a mailbox, and that is settled **at the socket, not in
-the name**. The first session to subscribe gets the repo address; a second one is refused with a
-409 and binds `<machine>/<repo>.<session-prefix>` instead, announcing on its first line that it did
-so and that mail sent to the repo address will not reach it. Nothing is guessed in advance.
+Two **subscribed** sessions in one repo cannot share a mailbox, and that is settled **at the socket,
+not in the name**. The first session to subscribe gets the repo address; a second one is refused
+with a 409 and binds `<machine>/<repo>.<session-prefix>` instead, announcing on its first line that
+it did so and that mail sent to the repo address will not reach it. Nothing is guessed in advance.
+
+⚠️ **Sessions that do not subscribe are not separated.** No socket means no 409, so every such
+session in a repo reads the repo address, and they share one cursor: one session's `ack` empties the
+mailbox for the others. Give a session that works alongside others its own address, with a role.
 
 The `.role` half is yours to use deliberately: `pin machine-a/agent-msg-bus.review` gives a session
 its own durable mailbox, separate from whoever else is in that repo. A **pinned** address is never
 swapped for a fallback — a pin is an explicit claim, so a collision on one is an error you should
 see rather than a quiet rename.
+
+### Sessions started by another session
+
+Whatever starts a session can give it its own mailbox by setting `AMB_ADDRESS` in its environment.
+The SessionStart hook turns that into the session's pin before it registers, so the session is never
+on the repo address, not even briefly. Name a child after its parent's address and its task:
+
+```
+machine-a/admin.fixes                  the parent
+machine-a/admin.fixes.dns-cleanup      a session it started
+```
+
+The parent chooses the name, so it knows where to write before the child is running; register the
+address first and the mail waits there. Sending to `machine-a/admin.fixes.*` reaches every child and
+not the parent.
+
+- A name the bus refuses is reported at the top of the session's banner, and the session starts on
+  its repo address. Every part after the `/` is checked against the reserved words, so `.test` or
+  `.tmp` is refused, as is a wildcard.
+- A pin the session already holds stands over the variable.
+- ⚠️ A process inherits its parent's environment. A launcher that starts sessions from inside a
+  session must clear `AMB_ADDRESS` for each child it does not name, or that child takes the same
+  address and shares its mailbox.
 
 `agent-msg-bus whoami` prints the address, the fallback if there is one, and — read from the relay
 rather than re-derived — the name actually **bound**. If those last two differ from the first, this

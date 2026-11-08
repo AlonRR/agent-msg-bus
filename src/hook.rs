@@ -114,12 +114,54 @@ pub fn validate_address(addr: &str) -> Result<(), String> {
 
 pub fn set_pin(addr: &str) -> Result<PathBuf, String> {
     validate_address(addr)?;
+    if addr.contains('*') {
+        return Err("a wildcard matches many addresses, and a session has exactly one".into());
+    }
     let p = pin_path().ok_or("no CLAUDE_CODE_SESSION_ID; cannot pin outside a Claude Code session")?;
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     std::fs::write(&p, addr).map_err(|e| e.to_string())?;
     Ok(p)
+}
+
+/// Set by whatever starts a session, to give that session its own mailbox from its first moment.
+pub const ADDRESS_ENV: &str = "AMB_ADDRESS";
+
+/// Turns a launcher's `AMB_ADDRESS` into this session's pin. Returns what the session must be told.
+///
+/// **It has to happen here, before the address is derived.** Sessions in one repo derive one address
+/// and, with nothing subscribed, no 409 ever separates them: they share a mailbox and a cursor, so
+/// one session's `ack` empties it for the others. Pinning from inside the session comes too late,
+/// because by then the hook has registered it on the repo address and shown it that backlog.
+///
+/// A pin rather than a value read each time, because the variable is only certain to reach this
+/// hook: the commands a session runs later, and the mod's, find the pin by session id.
+fn apply_requested_address() -> String {
+    let requested = std::env::var(ADDRESS_ENV).unwrap_or_default();
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return String::new();
+    }
+    // A pin is a claim the session made itself, so it stands, as on a resume under the same variable.
+    if let Some(existing) = pinned_address() {
+        if existing == requested {
+            return String::new();
+        }
+        return format!(
+            "NOTE: {ADDRESS_ENV} asks for `{requested}`, but this session is already pinned to \
+             `{existing}`, and the pin stands.\n\n"
+        );
+    }
+    match set_pin(requested) {
+        Ok(_) => String::new(),
+        Err(why) => format!(
+            "agent-msg-bus: {ADDRESS_ENV} REFUSED `{requested}`: {why}\n\
+             This session did NOT get the mailbox its launcher named. It is on the address derived \
+             from its repo, which other sessions in this repo also read, so an ack here can empty \
+             mail meant for them. Tell whoever started this session.\n\n"
+        ),
+    }
 }
 
 pub fn clear_pin() -> Result<bool, String> {
@@ -391,6 +433,8 @@ pub fn run() -> ! {
         )),
     };
 
+    let address_note = apply_requested_address();
+
     // The address is repo-scoped, so a missing session_id no longer prevents deriving one — it only
     // costs the FALLBACK, which is what a second concurrent session in this repo would need. That is
     // a degraded state rather than a fatal one, and it is named rather than papered over.
@@ -531,7 +575,7 @@ pub fn run() -> ! {
 
     let subscribe = inbox_instructions(&me, &mine, &watch_cmd, unread, unread_view);
     emit(&format!(
-        "{stale}agent-msg-bus is available. This session's address is `{addr}` and it is registered \
+        "{address_note}{stale}agent-msg-bus is available. This session's address is `{addr}` and it is registered \
          with the broker at {}.\n\
          {identity_note}\
          \n\
