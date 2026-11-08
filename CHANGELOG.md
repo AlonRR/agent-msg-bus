@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.32] — 2026-11-08
+
 ### Added
 
 - **`AMB_ADDRESS` gives a started session its own mailbox.** Whatever launches a session can set it,
