@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.33] — 2026-11-13
+
 ### Added
 
 - **A token can be bound to its own machine's addresses.** No route compared the address a request
