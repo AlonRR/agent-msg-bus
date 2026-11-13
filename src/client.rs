@@ -126,7 +126,15 @@ impl Client {
             .post(&format!("{}{}", self.base, path))
             .set("Authorization", &format!("Bearer {}", self.token))
             .send_json(body);
-        self.finish(r)
+        let v = self.finish(r)?;
+        // Printed for every write, here in one place: a broker in warn mode lets a token act for
+        // another machine's address and says so only in the reply, and the sender is the one who
+        // can fix it. Before enforce is switched on, this line is how a misconfigured machine finds
+        // out.
+        if let Some(w) = v.get("binding_warning").and_then(|x| x.as_str()) {
+            eprintln!("agent-msg-bus: WARNING: {w}");
+        }
+        Ok(v)
     }
 
     fn get(&self, path: &str) -> Result<serde_json::Value, ClientError> {

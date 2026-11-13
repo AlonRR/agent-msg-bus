@@ -4,7 +4,7 @@
 //! them. That is what makes the core swappable: if hand-rolled durability disappoints, this surface
 //! can sit in front of NATS instead and no client changes.
 
-use crate::hub::{Auth, Hub};
+use crate::hub::{Auth, Binding, Hub};
 use crate::store::{Message, NewMessage, Registration, Store};
 use axum::extract::ws::{CloseCode, CloseFrame, Message as Ws, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -138,6 +138,47 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
+/// Token binding for the addresses a request acts for (see `Auth::mismatch`).
+///
+/// `Ok(None)`: nothing to say. `Ok(Some(w))`: warn mode let a mismatch through, and `w` goes back
+/// to the sender as `binding_warning`, because the sender is the one who can fix it and the broker's
+/// log is read by someone else. `Err(why)`: enforce mode refuses it, before anything happened;
+/// answer with `forbidden(&why)`.
+fn bind(
+    st: &AppState,
+    bearer: Option<&str>,
+    route: &str,
+    addrs: &[&str],
+) -> Result<Option<String>, String> {
+    let why: Vec<String> = addrs.iter().filter_map(|a| st.auth.mismatch(bearer, a)).collect();
+    if why.is_empty() {
+        return Ok(None);
+    }
+    let why = why.join("; ");
+    match st.auth.binding() {
+        Binding::Warn => {
+            eprintln!("agent-msg-bus: token binding, let through (warn) on /{route}: {why}");
+            Ok(Some(why))
+        }
+        Binding::Enforce => {
+            eprintln!("agent-msg-bus: token binding, refused on /{route}: {why}");
+            Err(why)
+        }
+    }
+}
+
+fn forbidden(why: &str) -> Response {
+    (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": why}))).into_response()
+}
+
+/// A success reply, carrying `binding_warning` when warn mode let a mismatch through.
+fn reply(mut v: serde_json::Value, warning: Option<String>) -> Response {
+    if let (Some(w), Some(o)) = (warning, v.as_object_mut()) {
+        o.insert("binding_warning".into(), w.into());
+    }
+    Json(v).into_response()
+}
+
 // ---- HTTP ------------------------------------------------------------------
 
 /// Reports the broker's own build.
@@ -174,9 +215,14 @@ async fn register(
     Query(q): Query<HashMap<String, String>>,
     Json(b): Json<RegisterBody>,
 ) -> Response {
-    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
         return unauthorized();
     }
+    let warning = match bind(&st, bearer.as_deref(), "register", &[&b.addr]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
     let reg = Registration {
         addr: b.addr.clone(),
         version: b.version,
@@ -187,7 +233,7 @@ async fn register(
         pid: b.pid,
     };
     match st.store.lock().unwrap().register(&reg) {
-        Ok(()) => Json(serde_json::json!({"addr": b.addr})).into_response(),
+        Ok(()) => reply(serde_json::json!({"addr": b.addr}), warning),
         Err(e) => server_error(e),
     }
 }
@@ -215,9 +261,15 @@ async fn send(
     Query(q): Query<HashMap<String, String>>,
     Json(b): Json<SendBody>,
 ) -> Response {
-    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
         return unauthorized();
     }
+    // The sender only. Sending TO another machine is what a bus is for.
+    let warning = match bind(&st, bearer.as_deref(), "send", &[&b.from]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
     let nm = NewMessage {
         from: b.from,
         to: b.to,
@@ -291,14 +343,16 @@ async fn send(
         ))
     };
 
-    Json(serde_json::json!({
-        "id": stored.id,
-        "pushed_to": pushed,
-        "self_addressed": self_addressed,
-        "recipient_known": known,
-        "note": reason,
-    }))
-    .into_response()
+    reply(
+        serde_json::json!({
+            "id": stored.id,
+            "pushed_to": pushed,
+            "self_addressed": self_addressed,
+            "recipient_known": known,
+            "note": reason,
+        }),
+        warning,
+    )
 }
 
 #[derive(Deserialize)]
@@ -313,9 +367,15 @@ async fn ack(
     Query(q): Query<HashMap<String, String>>,
     Json(b): Json<AckBody>,
 ) -> Response {
-    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
         return unauthorized();
     }
+    // An ack is cumulative, so acking another machine's mailbox empties it.
+    let warning = match bind(&st, bearer.as_deref(), "ack", &[&b.addr]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
     // Answered before the store sees it: a malformed cursor is a bad request, and saying so with
     // 400 is what tells the caller to fix the call rather than retry it.
     if let Some(why) = crate::store::cursor_refusal(&b.addr, &b.up_to_id) {
@@ -330,7 +390,7 @@ async fn ack(
         Ok(None) => {}
     }
     match store.ack(&b.addr, &b.up_to_id) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(()) => reply(serde_json::json!({"ok": true}), warning),
         Err(e) => server_error(e),
     }
 }
@@ -512,7 +572,8 @@ async fn delete_orphan(
     Query(q): Query<HashMap<String, String>>,
     Json(b): Json<DeleteOrphanBody>,
 ) -> Response {
-    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
         return unauthorized();
     }
     let store = st.store.lock().unwrap();
@@ -524,6 +585,11 @@ async fn delete_orphan(
         }
         Err(e) => return server_error(e),
     };
+    // Bound to the machine the mail was for: an orphan has no owner, but it has an address.
+    let warning = match bind(&st, bearer.as_deref(), "orphans/delete", &[&msg.to]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
     if store.recipient_is_known(&msg.to).unwrap_or(true) {
         return (
             StatusCode::CONFLICT,
@@ -534,7 +600,7 @@ async fn delete_orphan(
             .into_response();
     }
     match store.delete_message(&b.id) {
-        Ok(deleted) => Json(serde_json::json!({"deleted": deleted, "to": msg.to})).into_response(),
+        Ok(deleted) => reply(serde_json::json!({"deleted": deleted, "to": msg.to}), warning),
         Err(e) => server_error(e),
     }
 }
@@ -640,9 +706,16 @@ async fn migrate(
     Query(q): Query<HashMap<String, String>>,
     Json(b): Json<MigrateBody>,
 ) -> Response {
-    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
         return unauthorized();
     }
+    // Both ends: out of another machine's mailbox takes its mail, and into another machine's name
+    // plants a mailbox and a cursor there.
+    let warning = match bind(&st, bearer.as_deref(), "migrate", &[&b.from, &b.to]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
     if b.from == b.to {
         return (
             StatusCode::BAD_REQUEST,
@@ -663,10 +736,12 @@ async fn migrate(
             .into_response();
     }
     match st.store.lock().unwrap().migrate(&b.from, &b.to) {
-        Ok((pending, adopted)) => Json(serde_json::json!({
-            "from": b.from, "to": b.to, "pending_now": pending, "adopted_cursor": adopted
-        }))
-        .into_response(),
+        Ok((pending, adopted)) => reply(
+            serde_json::json!({
+                "from": b.from, "to": b.to, "pending_now": pending, "adopted_cursor": adopted
+            }),
+            warning,
+        ),
         Err(e) => server_error(e),
     }
 }
@@ -682,9 +757,14 @@ async fn forget(
     Query(q): Query<HashMap<String, String>>,
     Json(b): Json<ForgetBody>,
 ) -> Response {
-    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
         return unauthorized();
     }
+    let warning = match bind(&st, bearer.as_deref(), "forget", &[&b.addr]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
     // Refuse while a socket is live, so this cannot be used to yank an address out from under a
     // working session.
     if st.hub.is_live(&b.addr) {
@@ -708,20 +788,22 @@ async fn forget(
     // lists nothing.
     let stranded = store.pending_owned_by(&b.addr).map(|v| v.len()).unwrap_or(0);
     match store.forget(&b.addr) {
-        Ok(existed) => Json(serde_json::json!({
-            "forgotten": existed,
-            "orphaned": stranded,
-            "note": if stranded > 0 {
-                Some(format!(
-                    "{stranded} undelivered message(s) for {} are now orphaned - no registration \
-                     will collect them. `agent-msg-bus orphans` lists them.",
-                    b.addr
-                ))
-            } else {
-                None
-            },
-        }))
-        .into_response(),
+        Ok(existed) => reply(
+            serde_json::json!({
+                "forgotten": existed,
+                "orphaned": stranded,
+                "note": if stranded > 0 {
+                    Some(format!(
+                        "{stranded} undelivered message(s) for {} are now orphaned - no \
+                         registration will collect them. `agent-msg-bus orphans` lists them.",
+                        b.addr
+                    ))
+                } else {
+                    None
+                },
+            }),
+            warning,
+        ),
         Err(e) => server_error(e),
     }
 }
@@ -867,8 +949,14 @@ async fn sub(
     if let Some(t) = &p.token {
         q.insert("token".to_string(), t.clone());
     }
-    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
         return unauthorized();
+    }
+    // The widest door: a subscriber is pushed the mailbox's live mail. Warn mode has no reply body
+    // to carry a warning in, so for a subscribe the broker's log is the only record.
+    if let Err(why) = bind(&st, bearer.as_deref(), "sub", &[&p.addr]) {
+        return forbidden(&why);
     }
     let force = matches!(p.force.as_deref(), Some("1") | Some("true"));
     let (conn_id, rx) = match st.hub.claim(&p.addr, force) {

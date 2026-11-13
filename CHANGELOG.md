@@ -22,6 +22,16 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Added
+
+- **A token can be bound to its own machine's addresses.** No route compared the address a request
+  acts for with the machine its token is keyed under, so any machine's token could send under another
+  session's name, ack its mailbox empty, register, migrate or forget it, or subscribe to its live
+  mail. `serve --token-binding warn|enforce` closes that. `warn`, the default, refuses nothing: the
+  reply carries `binding_warning`, the client prints it, and the broker logs it. `enforce` refuses
+  with a 403 naming both machines. Sending to another machine, and every read, stay unbound. See
+  *Each token acts for its own machine* in `docs/operations.md`.
+
 ## [0.4.32] — 2026-11-08
 
 ### Added

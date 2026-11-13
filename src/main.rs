@@ -6,7 +6,7 @@
 
 use agent_msg_bus::client::Client;
 use agent_msg_bus::identity::Recommend;
-use agent_msg_bus::hub::{Auth, Hub};
+use agent_msg_bus::hub::{Auth, Binding, Hub};
 use agent_msg_bus::server::{app, AppState};
 use agent_msg_bus::store::Store;
 use clap::{Parser, Subcommand};
@@ -55,6 +55,11 @@ enum Cmd {
         /// a silent downgrade to open access.
         #[arg(long)]
         insecure_no_auth: bool,
+        /// What to do when a token acts for another machine's address (sends under its name, acks,
+        /// registers, migrates, forgets or subscribes to it). `warn` lets it through and tells the
+        /// sender; `enforce` refuses it with a 403. A token's machine is its key in the tokens file.
+        #[arg(long, value_enum, default_value = "warn")]
+        token_binding: Binding,
         /// How often to sweep aged-out provisional registrations. 0 disables the sweeper.
         #[arg(long, default_value_t = 30)]
         sweep_minutes: u64,
@@ -317,8 +322,24 @@ fn cli_client(url: &str, token: &str, ca_file: &str) -> Client {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Serve { listen, db, tokens, insecure_no_auth, sweep_minutes, provisional_hours } => {
-            serve(&listen, &db, tokens.as_deref(), insecure_no_auth, sweep_minutes, provisional_hours)
+        Cmd::Serve {
+            listen,
+            db,
+            tokens,
+            insecure_no_auth,
+            token_binding,
+            sweep_minutes,
+            provisional_hours,
+        } => {
+            serve(
+                &listen,
+                &db,
+                tokens.as_deref(),
+                insecure_no_auth,
+                token_binding,
+                sweep_minutes,
+                provisional_hours,
+            )
         }
         Cmd::Relay { ref listen } => {
             let listen = listen.clone();
@@ -758,12 +779,26 @@ async fn serve(
     db: &str,
     tokens: Option<&str>,
     insecure: bool,
+    binding: Binding,
     sweep_minutes: u64,
     provisional_hours: i64,
 ) {
     let auth = match (tokens, insecure) {
         (Some(path), _) => match Auth::from_file(path) {
-            Ok(a) => a,
+            Ok(a) => {
+                match binding {
+                    Binding::Warn => eprintln!(
+                        "agent-msg-bus: token binding: warn. A token acting for another machine's \
+                         address is let through and the sender is told; --token-binding enforce \
+                         refuses it."
+                    ),
+                    Binding::Enforce => eprintln!(
+                        "agent-msg-bus: token binding: enforce. A token acts only for its own \
+                         machine's addresses."
+                    ),
+                }
+                a.with_binding(binding)
+            }
             Err(e) => {
                 eprintln!("agent-msg-bus: cannot read tokens file {path}: {e}");
                 std::process::exit(1);

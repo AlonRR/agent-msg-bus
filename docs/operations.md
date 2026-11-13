@@ -64,6 +64,25 @@ chmod 600 /etc/agent-msg-bus/tokens.json
 > remember, because a revoked-but-still-working token is a silent failure of exactly the control you
 > were trying to exercise.
 
+### Each token acts for its own machine
+
+A token belongs to the machine it is keyed under in `tokens.json`, and an address to the machine
+before its `/`. `--token-binding` decides what happens when a token acts for another machine's
+address: sends under its name, acks its mailbox, registers, migrates or forgets it, deletes orphaned
+mail addressed to it, or subscribes to it.
+
+| Mode | What happens |
+|---|---|
+| `warn` (default) | It goes through as before. The reply carries `binding_warning`, the client prints it, and the broker logs it. |
+| `enforce` | `403`, naming both machines. Nothing is stored or changed. |
+
+- **The key names must be exactly the machine names your clients use** (`"machine": ...` in each
+  client's config). A key that differs locks that machine out of every write the day `enforce` goes
+  on. Run `warn` first and watch for warnings.
+- Sending **to** another machine is never bound; that is what the bus is for. Reads are not bound
+  either: `peers`, `read`, `orphans` and `prune` work with any valid token, as before.
+- With `--insecure-no-auth` there are no tokens, so nothing is bound.
+
 ### systemd, and the hardening trap
 
 Standard hardening is correct here, with one caveat that will cost you an afternoon:

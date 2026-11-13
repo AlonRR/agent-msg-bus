@@ -129,6 +129,16 @@ impl Hub {
 pub struct Auth {
     tokens: HashMap<String, String>,
     disabled: bool,
+    binding: Binding,
+}
+
+/// What a broker does when a token acts for another machine's address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Binding {
+    /// Let it through, and say so: in the reply, as `binding_warning`, and in the broker's log.
+    Warn,
+    /// Refuse it with a 403 that names both machines.
+    Enforce,
 }
 
 impl Auth {
@@ -138,14 +148,18 @@ impl Auth {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         // file is machine -> token; index by token for lookup
         let tokens = map.into_iter().map(|(machine, token)| (token, machine)).collect();
-        Ok(Auth { tokens, disabled: false })
+        Ok(Auth { tokens, disabled: false, binding: Binding::Warn })
+    }
+
+    pub fn with_binding(self, binding: Binding) -> Auth {
+        Auth { binding, ..self }
     }
 
     /// Only ever reached via an explicit `--insecure-no-auth` flag. There is deliberately no way to
     /// end up here by omission: a missing tokens file is a hard startup error, not a silent
     /// downgrade to open access.
     pub fn disabled() -> Auth {
-        Auth { tokens: HashMap::new(), disabled: true }
+        Auth { tokens: HashMap::new(), disabled: true, binding: Binding::Warn }
     }
 
     pub fn check(&self, token: Option<&str>) -> bool {
@@ -160,5 +174,65 @@ impl Auth {
 
     pub fn machine_for(&self, token: &str) -> Option<&str> {
         self.tokens.get(token).map(|s| s.as_str())
+    }
+
+    pub fn binding(&self) -> Binding {
+        self.binding
+    }
+
+    /// Why this token may not act for `addr`, or `None` if it may.
+    ///
+    /// A token belongs to the machine `tokens.json` names it under, and an address to the machine
+    /// before its `/`. Until this check, no route compared the two, so any machine's token could
+    /// send under another session's name, ack its mailbox empty, or subscribe to its mail.
+    ///
+    /// With auth disabled there is no token and no machine, so nothing is bound.
+    pub fn mismatch(&self, bearer: Option<&str>, addr: &str) -> Option<String> {
+        if self.disabled {
+            return None;
+        }
+        let mine = self.machine_for(bearer?)?;
+        let theirs = addr.split_once('/').map_or(addr, |(m, _)| m);
+        if mine == theirs {
+            return None;
+        }
+        Some(format!(
+            "this token belongs to machine '{mine}', and '{addr}' is an address of machine \
+             '{theirs}'; a token acts only for its own machine's addresses"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    fn auth() -> Auth {
+        let tokens = [("tok-a".to_string(), "machine-a".to_string())].into_iter().collect();
+        Auth { tokens, disabled: false, binding: Binding::Warn }
+    }
+
+    #[test]
+    fn an_address_on_the_tokens_own_machine_is_allowed() {
+        assert_eq!(auth().mismatch(Some("tok-a"), "machine-a/repo.role"), None);
+    }
+
+    /// A prefix match would let `machine-a` act for `machine-ab`.
+    #[test]
+    fn the_machine_is_compared_whole_not_as_a_prefix() {
+        assert!(auth().mismatch(Some("tok-a"), "machine-ab/repo").is_some());
+    }
+
+    #[test]
+    fn an_address_with_no_machine_part_is_a_mismatch() {
+        assert!(auth().mismatch(Some("tok-a"), "machine-a").is_none());
+        assert!(auth().mismatch(Some("tok-a"), "repo").is_some());
+        assert!(auth().mismatch(Some("tok-a"), "*").is_some());
+    }
+
+    #[test]
+    fn the_reason_names_both_machines() {
+        let why = auth().mismatch(Some("tok-a"), "machine-b/x").unwrap();
+        assert!(why.contains("machine-a") && why.contains("machine-b"), "{why}");
     }
 }
