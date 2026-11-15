@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.35] — 2026-11-15
+
 ### Added
 
 - **The inbox mod wakes its session for mail that needs it** (mod 0.3.0, Phase 11 piece A in
