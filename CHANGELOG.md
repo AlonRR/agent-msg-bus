@@ -22,6 +22,15 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Changed
+
+- **`/pending` and `/pending/sub` follow token binding when they name another machine.** A
+  token asking for another machine's waiting mail, with `machine=`, gets a `binding_warning` in
+  warn mode (the feed's warning goes to the broker's log, as for `/sub`) and a 403 in enforce mode.
+  Its own machine, the default, is never warned about. Reading a mailbox stays unbound, as before:
+  this covers only the routes that list a whole machine. Decided by the user before turning
+  enforce on.
+
 ## [0.4.35] — 2026-11-15
 
 ### Added

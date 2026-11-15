@@ -876,6 +876,11 @@ async fn pending_sub(
         return unauthorized();
     }
     let (machine, kinds) = pending_scope(&st, presented.as_deref(), &q);
+    // Another machine's feed follows the binding (D27 (b), 15 Nov 2026). Warn mode has no reply
+    // body to carry a warning in, so the broker's log is the record, as for `/sub`.
+    if let Err(why) = bind(&st, presented.as_deref(), "pending/sub", &[&format!("{machine}/*")]) {
+        return forbidden(&why);
+    }
     let (feed_id, rx) = st.hub.add_feed(&machine, &kinds);
     ws.on_upgrade(move |socket| drive_feed(socket, st, feed_id, rx))
 }
@@ -931,6 +936,11 @@ async fn pending(
         return unauthorized();
     }
     let (machine, kinds) = pending_scope(&st, presented.as_deref(), &q);
+    // Another machine's mailboxes follow the binding (D27 (b), 15 Nov 2026): warned, or refused.
+    let warning = match bind(&st, presented.as_deref(), "pending", &[&format!("{machine}/*")]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
     let found = st.store.lock().unwrap().waking_on(&machine, &kinds);
     match found {
         Ok(rows) => {
@@ -943,8 +953,10 @@ async fn pending(
                     v
                 })
                 .collect();
-            Json(serde_json::json!({"schema": 1, "machine": machine, "kinds": kinds, "addresses": addresses}))
-                .into_response()
+            reply(
+                serde_json::json!({"schema": 1, "machine": machine, "kinds": kinds, "addresses": addresses}),
+                warning,
+            )
         }
         Err(e) => server_error(e),
     }

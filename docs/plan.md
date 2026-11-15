@@ -984,8 +984,10 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
    The admin session then chose a service that stays connected over a timer (its own decision,
    with the user's yes), so 0.4.35 also carries `watch --pending` over `GET /pending/sub`: a feed of
    `{address, id, kind, ts}` per new waking message, metadata only, with no replay (the service
-   runs `peers --pending` on each connect). It uses the machine's token for now; a read-only,
-   metadata-only token scope would be a change to the tokens file and every route's check.
+   runs `peers --pending` on each connect). It uses the machine's token: the user chose that for now
+   (15 Nov 2026) over a read-only, metadata-only token scope, which would change the tokens file
+   and every route's check. Asking for another machine follows the token binding, from 0.4.36, so
+   under enforce a token sees only its own machine's pending mail (decided 15 Nov 2026).
 5. **Build order:** A, then D, then C, decided by the user on 15 Nov 2026. A and D need no broker
    change, and together they cover a long job waking its session. B's query comes right after A,
    so the launcher is not held up.

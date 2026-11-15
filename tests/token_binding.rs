@@ -7,7 +7,9 @@
 //!
 //! In `warn` mode, the default, nothing is refused: the request does what it always did, and the
 //! reply carries `binding_warning` so the sender sees it. In `enforce` mode it is a 403 naming both
-//! machines, and nothing happens. Reads stay unbound: a machine may read any mailbox, as before.
+//! machines, and nothing happens. Reads stay unbound: a machine may read any mailbox, as before. The
+//! one exception is the pending routes, which list a whole machine's waiting mail: asking for another
+//! machine's follows the binding (D27 (b), 15 Nov 2026).
 
 use agent_msg_bus::client::Client;
 use agent_msg_bus::hub::{Auth, Binding, Hub};
@@ -265,4 +267,52 @@ async fn with_auth_disabled_nothing_is_bound() {
     let (c, v) = post(&r, "anything", "/send", send_body("machine-b/x", "machine-a/y")).await;
     assert_eq!(c, 200, "{v}");
     assert!(v.get("binding_warning").is_none(), "{v}");
+}
+
+// ---- the pending routes (D27 (b), 15 Nov 2026) --------------------------------------------------
+//
+// `/pending` and `/pending/sub` say which of a machine's mailboxes have mail waiting. A launcher
+// asks for its own machine; asking for another one follows the binding like any other route.
+
+async fn get(r: &Rig, token: &str, path: &str) -> (u16, serde_json::Value) {
+    let url = format!("{}{}", r.base, path);
+    let auth = format!("Bearer {token}");
+    blocking(move || {
+        let (code, text) = match ureq::get(&url).set("Authorization", &auth).call() {
+            Ok(r) => (r.status(), r.into_string().unwrap()),
+            Err(ureq::Error::Status(c, r)) => (c, r.into_string().unwrap()),
+            Err(e) => panic!("transport error: {e}"),
+        };
+        (code, serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_warn_mode_asking_for_another_machines_pending_mail_answers_and_says_so() {
+    let r = rig(Some(Binding::Warn)).await;
+    let (code, v) = get(&r, TOKEN_A, "/pending?machine=machine-b").await;
+    assert_eq!(code, 200, "{v}");
+    assert!(names_both(&v, "binding_warning"), "no warning naming both machines: {v}");
+    let (_, mine) = get(&r, TOKEN_A, "/pending").await;
+    assert!(mine.get("binding_warning").is_none(), "its own machine was warned about: {mine}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enforced_asking_for_another_machines_pending_mail_is_refused() {
+    let r = rig(Some(Binding::Enforce)).await;
+    let (code, v) = get(&r, TOKEN_A, "/pending?machine=machine-b").await;
+    assert_eq!(code, 403, "{v}");
+    let (code, v) = get(&r, TOKEN_A, "/pending?machine=machine-a").await;
+    assert_eq!(code, 200, "its own machine was refused: {v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enforced_a_feed_of_another_machines_pending_mail_is_refused() {
+    let r = rig(Some(Binding::Enforce)).await;
+    let ws = r.base.replace("http://", "ws://");
+    let theirs = format!("{ws}/pending/sub?machine=machine-b&token={TOKEN_A}"); // secret-gate: allow
+    assert!(tokio_tungstenite::connect_async(theirs).await.is_err(), "the feed connected anyway");
+    let mine = format!("{ws}/pending/sub?token={TOKEN_A}"); // secret-gate: allow
+    assert!(tokio_tungstenite::connect_async(mine).await.is_ok(), "its own machine's feed was refused");
 }
