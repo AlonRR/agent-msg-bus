@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.36] — 2026-11-15
+
 ### Changed
 
 - **`/pending` and `/pending/sub` follow token binding when they name another machine.** A
