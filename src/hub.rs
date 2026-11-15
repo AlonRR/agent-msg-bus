@@ -22,7 +22,17 @@ pub type ConnId = u64;
 
 pub struct Hub {
     conns: Mutex<HashMap<String, (ConnId, mpsc::UnboundedSender<Message>)>>,
+    /// Waking-mail feeds (`/pending/sub`), by connection. Kept apart from `conns` on purpose: a feed
+    /// holds no address, so it never makes one live and never takes a mailbox's mail.
+    feeds: Mutex<HashMap<ConnId, Feed>>,
     next_id: AtomicU64,
+}
+
+/// One feed: the machine it watches, the kinds it wants (lower case), and where its lines go.
+struct Feed {
+    machine: String,
+    kinds: Vec<String>,
+    tx: mpsc::UnboundedSender<serde_json::Value>,
 }
 
 impl Default for Hub {
@@ -33,7 +43,51 @@ impl Default for Hub {
 
 impl Hub {
     pub fn new() -> Hub {
-        Hub { conns: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) }
+        Hub {
+            conns: Mutex::new(HashMap::new()),
+            feeds: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Start a feed of `machine`'s waking mail of `kinds`. The receiver gets one metadata line per
+    /// message and address; nothing is replayed.
+    pub fn add_feed(&self, machine: &str, kinds: &[String]) -> (ConnId, mpsc::UnboundedReceiver<serde_json::Value>) {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let kinds = kinds.iter().map(|k| k.to_lowercase()).collect();
+        self.feeds.lock().unwrap().insert(id, Feed { machine: machine.to_string(), kinds, tx });
+        (id, rx)
+    }
+
+    pub fn drop_feed(&self, id: ConnId) {
+        self.feeds.lock().unwrap().remove(&id);
+    }
+
+    /// Whether any feed is held, so a send can skip working out who it reached when nobody asks.
+    pub fn has_feeds(&self) -> bool {
+        !self.feeds.lock().unwrap().is_empty()
+    }
+
+    /// Tell each feed watching an address's machine that `msg` reached it. `reached` is every
+    /// registered address the message matched, with its machine. The sender is never told of its
+    /// own message, as `deliver_to` never pushes it one. Metadata only: no subject, no body.
+    pub fn notify_feeds(&self, msg: &Message, reached: &[(String, String)]) {
+        let feeds = self.feeds.lock().unwrap();
+        let kind = msg.kind.to_lowercase();
+        for feed in feeds.values() {
+            if !feed.kinds.contains(&kind) {
+                continue;
+            }
+            for (addr, machine) in reached {
+                if machine != &feed.machine || addr == &msg.from {
+                    continue;
+                }
+                let _ = feed.tx.send(serde_json::json!({
+                    "address": addr, "id": msg.id, "kind": msg.kind, "ts": msg.ts,
+                }));
+            }
+        }
     }
 
     /// Claim `addr` for a new socket.

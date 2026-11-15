@@ -279,9 +279,22 @@ enum Cmd {
     /// human re-arms it. This reconnects internally, so a relay restart does not end the watch.
     /// Monitor itself may still expire it; the session must re-arm when Monitor says so.
     Watch {
-        addr: String,
+        #[arg(required_unless_present = "pending")]
+        addr: Option<String>,
         #[arg(long)]
         relay: Option<String>,
+        /// Instead of a mailbox: the broker's feed of one machine's waking mail, one JSON line per
+        /// message and address, `{address, id, kind, ts}`, for a launcher that starts ended
+        /// sessions. Claims no address and reads no mail. Nothing is replayed: run
+        /// `peers --pending --json` on each `connected` line. Needs broker 0.4.35 or later.
+        #[arg(long, conflicts_with_all = ["addr", "relay", "fallback"])]
+        pending: bool,
+        /// With --pending: the machine to watch. Default: the machine this client's token is for.
+        #[arg(long, requires = "pending")]
+        machine: Option<String>,
+        /// With --pending: the kinds that count, comma-separated.
+        #[arg(long, requires = "pending", default_value = "request,blocking,timer,job")]
+        kinds: String,
         /// Name to bind instead if ADDR is already held by another live session on this machine.
         ///
         /// This is what makes a repo-scoped address safe to claim optimistically: the collision is
@@ -360,11 +373,15 @@ fn main() {
             relay(&listen, &url, &token, &ca_file)
         }
         Cmd::SessionStart => agent_msg_bus::hook::run(),
-        Cmd::Watch { ref addr, ref relay, ref fallback } => {
+        Cmd::Watch { pending: true, ref machine, ref kinds, .. } => {
+            let (url, token, ca_file) = resolve_conn(&cli);
+            watch_pending(&url, &token, &ca_file, machine.as_deref(), kinds)
+        }
+        Cmd::Watch { ref addr, ref relay, ref fallback, .. } => {
             let relay = relay.clone().or_else(|| {
                 agent_msg_bus::hook::load_config().map(|c| c.relay)
             }).unwrap_or_else(|| "127.0.0.1:9451".to_string());
-            watch(&relay, addr, fallback.clone())
+            watch(&relay, addr.as_deref().unwrap_or_default(), fallback.clone())
         }
         Cmd::Whoami { json } => whoami(&cli, json),
         Cmd::Update { ref from, ref to, dry_run, force } => {
@@ -380,6 +397,11 @@ fn main() {
 #[tokio::main]
 async fn watch(relay: &str, addr: &str, fallback: Option<String>) -> ! {
     agent_msg_bus::watch::run(relay, addr, fallback.as_deref()).await
+}
+
+#[tokio::main]
+async fn watch_pending(url: &str, token: &str, ca_file: &str, machine: Option<&str>, kinds: &str) -> ! {
+    agent_msg_bus::watch::run_pending(url, token, ca_file, machine, kinds).await
 }
 
 /// Say what `tidy` did to the replaced builds. Silent when there was nothing to do.

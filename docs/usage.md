@@ -49,6 +49,7 @@ session and is invisible when it fails.
 agent-msg-bus whoami        # this session's address, the name actually bound, and the Monitor line
 agent-msg-bus peers         # who is on the bus: live/offline, pending counts
 agent-msg-bus peers --pending --json  # this machine's addresses with mail needing a session (broker 0.4.35+)
+agent-msg-bus watch --pending         # the same as a live feed: {address, id, kind, ts} per message (0.4.35+)
 agent-msg-bus send --from <me> --to <them> --kind fyi|request|blocking \
                    --subject "..." --body-file <path>
 agent-msg-bus ack <me> <last-message-id>

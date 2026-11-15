@@ -110,6 +110,7 @@ pub fn app(state: AppState) -> Router {
         .route("/ack", post(ack))
         .route("/peers", get(peers))
         .route("/pending", get(pending))
+        .route("/pending/sub", get(pending_sub))
         .route("/forget", post(forget))
         .route("/migrate", post(migrate))
         .route("/messages", get(messages))
@@ -314,6 +315,12 @@ async fn send(
             .collect()
     };
     let pushed = st.hub.deliver_to(&stored, &targets);
+    // The waking-mail feeds: every registered mailbox the message reached, live or not, since a
+    // launcher wants exactly the ones with nobody there. Worked out only while a feed is held.
+    if st.hub.has_feeds() {
+        let reached = st.store.lock().unwrap().reached_by(&stored.to).unwrap_or_default();
+        st.hub.notify_feeds(&stored, &reached);
+    }
 
     // `pushed_to: 0` is ambiguous, and it is the only number a sender sees. It means "nobody live
     // matched", which covers three very different situations: the recipient is offline and the
@@ -834,6 +841,80 @@ struct KnownPeer {
 /// The kinds `/pending` counts when the request names none: the ones the inbox mod wakes for.
 const WAKING_KINDS: &str = "request,blocking,timer,job";
 
+/// The `machine` and `kinds` a pending query or feed asks for: the machine the token is keyed
+/// under unless it names another, and the waking kinds unless it names others.
+fn pending_scope(st: &AppState, presented: Option<&str>, q: &HashMap<String, String>) -> (String, Vec<String>) {
+    let machine = match q.get("machine").filter(|m| !m.is_empty()) {
+        Some(m) => m.clone(),
+        None => presented.and_then(|t| st.auth.machine_for(t)).unwrap_or_default().to_string(),
+    };
+    let kinds = q
+        .get("kinds")
+        .map(|s| s.as_str())
+        .unwrap_or(WAKING_KINDS)
+        .split(',')
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    (machine, kinds)
+}
+
+/// A feed of one machine's waking mail as it arrives (Phase 11 piece B): one text frame per message
+/// and address reached, `{address, id, kind, ts}`, never a subject or a body. For a launcher that
+/// stays connected; it catches up with `/pending` on each connect, since nothing is replayed.
+///
+/// It claims no address and reads no mailbox, so the mailbox's owner can still subscribe, nothing
+/// is marked delivered, and no address looks live because a feed is held.
+async fn pending_sub(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let presented = token_from(&headers, &q);
+    if !st.auth.check(presented.as_deref()) {
+        return unauthorized();
+    }
+    let (machine, kinds) = pending_scope(&st, presented.as_deref(), &q);
+    let (feed_id, rx) = st.hub.add_feed(&machine, &kinds);
+    ws.on_upgrade(move |socket| drive_feed(socket, st, feed_id, rx))
+}
+
+async fn drive_feed(
+    socket: WebSocket,
+    st: AppState,
+    feed_id: crate::hub::ConnId,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+) {
+    let (mut tx, mut incoming) = socket.split();
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.tick().await;
+    let mut watchdog = tokio::time::interval(Duration::from_secs(15));
+    watchdog.tick().await;
+    let mut last_seen = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            _ = watchdog.tick() => {
+                if client_is_stale(last_seen.elapsed()) { break; }
+            },
+            line = rx.recv() => match line {
+                Some(v) => {
+                    if tx.send(Ws::Text(v.to_string().into())).await.is_err() { break; }
+                }
+                None => break,
+            },
+            _ = ping.tick() => {
+                if tx.send(Ws::Ping(Vec::new().into())).await.is_err() { break; }
+            },
+            frame = incoming.next() => match frame {
+                Some(Ok(Ws::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => last_seen = std::time::Instant::now(),
+            },
+        }
+    }
+    st.hub.drop_feed(feed_id);
+}
+
 /// Which addresses on one machine have unread mail that needs a session (Phase 11 piece B), for a
 /// launcher that starts ended sessions. `machine` defaults to the machine the token is keyed
 /// under, so a launcher sees its own machine's mailboxes unless it asks for another. Read-only.
@@ -849,18 +930,7 @@ async fn pending(
     if !st.auth.check(presented.as_deref()) {
         return unauthorized();
     }
-    let machine = match q.get("machine").filter(|m| !m.is_empty()) {
-        Some(m) => m.clone(),
-        None => presented.as_deref().and_then(|t| st.auth.machine_for(t)).unwrap_or_default().to_string(),
-    };
-    let kinds: Vec<String> = q
-        .get("kinds")
-        .map(|s| s.as_str())
-        .unwrap_or(WAKING_KINDS)
-        .split(',')
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty())
-        .collect();
+    let (machine, kinds) = pending_scope(&st, presented.as_deref(), &q);
     let found = st.store.lock().unwrap().waking_on(&machine, &kinds);
     match found {
         Ok(rows) => {

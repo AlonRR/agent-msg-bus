@@ -955,6 +955,24 @@ impl Store {
     /// Read-only: it moves no cursor and writes no registry row, because a launcher asks on a timer.
     /// Kinds compare without case. Provisional rows count: an address that can receive is a mailbox
     /// a launcher may want to open, whether or not it ever subscribed.
+    /// Every registered mailbox a message addressed to `to` reaches, with its machine: matched
+    /// against every name the mailbox answers to, as live delivery is, so mail to a name a mailbox
+    /// inherited by migration counts for it. Aliases are not mailboxes of their own.
+    pub fn reached_by(&self, to: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT addr, machine FROM registry WHERE addr NOT IN (SELECT alias FROM aliases) ORDER BY addr",
+        )?;
+        let rows: Vec<(String, String)> =
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_>>()?;
+        let mut out = Vec::new();
+        for (addr, machine) in rows {
+            if self.names_for(&addr)?.iter().any(|n| addr_matches(to, n)) {
+                out.push((addr, machine));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn waking_on(&self, machine: &str, kinds: &[String]) -> Result<Vec<Waiting>> {
         let wanted: Vec<String> = kinds.iter().map(|k| k.to_lowercase()).collect();
         let mut stmt = self.conn.prepare(

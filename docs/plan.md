@@ -237,6 +237,7 @@ here.
 | `POST /send` | `{to, subject, body, kind, reply_to}` → `{id}` |
 | `POST /ack` | `{addr, up_to_id}` |
 | `GET /peers` | live + known addresses |
+| `GET /pending/sub?machine=…&kinds=…` | added in 0.4.35: WebSocket, one text frame per new message of those kinds and registered address reached on the machine, `{address, id, kind, ts}`; no replay; claims no address and consumes nothing |
 | `GET /pending?machine=…&kinds=…` | added in 0.4.35: one machine's addresses with unread mail of those kinds, `{schema, machine, kinds, addresses: [{address, session_id, cwd, registered_at, pending, kinds, oldest_ts, newest_id, subscribed}]}`; read-only |
 
 **One message per text frame.** Monitor turns each *frame* into one notification, so batching several
@@ -979,6 +980,11 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
    `peers --pending --json` over a new read-only `GET /pending` route (0.4.35), shaped to what that
    session asked for. `subscribed` means only a live socket now: a polling session leaves no trace
    on the broker, so liveness is the launcher's to decide from the machine's own session list.
+   The admin session then chose a service that stays connected over a timer (its own decision,
+   with the user's yes), so 0.4.35 also carries `watch --pending` over `GET /pending/sub`: a feed of
+   `{address, id, kind, ts}` per new waking message, metadata only, with no replay (the service
+   runs `peers --pending` on each connect). It uses the machine's token for now; a read-only,
+   metadata-only token scope would be a change to the tokens file and every route's check.
 5. **Build order:** A, then D, then C, decided by the user on 15 Nov 2026. A and D need no broker
    change, and together they cover a long job waking its session. B's query comes right after A,
    so the launcher is not held up.

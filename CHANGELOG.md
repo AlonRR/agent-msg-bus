@@ -41,6 +41,13 @@ explicitly not part of it and can change in a patch.
   whether a socket is live now. `session_id` is null for an address no session registered. Asking
   moves no cursor and writes nothing. An older broker answers 404, which the client reports as the
   version needed.
+- **`watch --pending`, over a new WebSocket route `GET /pending/sub`**: the same question as a live
+  feed, for a launcher that stays connected. One JSON line per new message of the waking kinds and
+  registered address it reached on the machine, `{address, id, kind, ts}`, never a subject or a
+  body; a message sent to a pattern gives a line per matching address, and none for its sender.
+  Holding the feed claims no address, consumes nothing and makes no address look live. Nothing is
+  replayed: a `connected` line on each connect says when to catch up with `peers --pending`. It
+  reconnects with backoff, and stops at once on a 404 (a broker older than 0.4.35) or a 401.
 
 ## [0.4.34] — 2026-11-15
 

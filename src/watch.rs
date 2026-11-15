@@ -473,6 +473,87 @@ pub async fn run(relay: &str, addr: &str, fallback: Option<&str>) -> ! {
     }
 }
 
+/// The broker's waking-mail feed URL: `ws(s)://host/pending/sub?kinds=…[&machine=…]`. The token
+/// rides in the query only over plain `ws://`, as the relay's does; over TLS it goes in the header
+/// alone, out of a front's access log.
+pub fn pending_url(broker: &str, token: &str, machine: Option<&str>, kinds: &str) -> String {
+    let (scheme, host) = match broker.strip_prefix("https://") {
+        Some(rest) => ("wss", rest),
+        None => ("ws", broker.strip_prefix("http://").unwrap_or(broker)),
+    };
+    let mut url = format!("{scheme}://{}/pending/sub?kinds={}", host.trim_end_matches('/'), crate::client::urlencode(kinds));
+    if let Some(m) = machine {
+        url.push_str(&format!("&machine={}", crate::client::urlencode(m)));
+    }
+    if scheme == "ws" {
+        url.push_str(&format!("&token={}", crate::client::urlencode(token)));
+    }
+    url
+}
+
+/// `watch --pending`: hold the broker's waking-mail feed for good, printing each line as it comes,
+/// with a `connected` frame on every connect (catch up with `peers --pending` then: nothing is
+/// replayed) and a `disconnected` frame on every drop, reconnecting with backoff.
+///
+/// A broker without the route, or a refused token, ends it at once: retrying cannot fix either.
+pub async fn run_pending(broker: &str, token: &str, ca_file: &str, machine: Option<&str>, kinds: &str) -> ! {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    let ca = (!ca_file.is_empty()).then(|| std::path::Path::new(ca_file));
+    let tls = match crate::tls::client_config(ca) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("agent-msg-bus: {e}");
+            std::process::exit(1);
+        }
+    };
+    let scope = machine.map_or("this token's machine".to_string(), |m| format!("machine {m}"));
+    let mut backoff = 1;
+    loop {
+        let mut req = match pending_url(broker, token, machine, kinds).into_client_request() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("agent-msg-bus: bad broker URL: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Ok(bearer) = format!("Bearer {token}").parse() {
+            req.headers_mut().insert("Authorization", bearer);
+        }
+        let attempt = tokio_tungstenite::connect_async_tls_with_config(
+            req,
+            None,
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(tls.clone())),
+        )
+        .await;
+        match attempt {
+            Ok((mut sock, _)) => {
+                backoff = 1;
+                status("connected", &format!("waking-mail feed of {scope} ({kinds}) from {broker}"));
+                while let Some(frame) = sock.next().await {
+                    match frame {
+                        Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => println!("{t}"),
+                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                status("disconnected", "the feed's socket closed; reconnecting");
+            }
+            Err(WsError::Http(resp)) if resp.status().as_u16() == 404 => {
+                eprintln!("agent-msg-bus: this broker has no /pending/sub route: `watch --pending` needs broker 0.4.35 or later");
+                std::process::exit(1);
+            }
+            Err(WsError::Http(resp)) if resp.status().as_u16() == 401 => {
+                eprintln!("agent-msg-bus: the broker refused this token for the waking-mail feed");
+                std::process::exit(1);
+            }
+            Err(e) => status("disconnected", &crate::tls::with_hint(e.to_string())),
+        }
+        tokio::time::sleep(Duration::from_secs(backoff)).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
 
 #[cfg(test)]
 mod heartbeat_tests {
