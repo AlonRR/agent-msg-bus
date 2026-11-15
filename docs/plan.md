@@ -968,11 +968,33 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
 
 #### Decisions before building
 
-1. **Wake route for piece A:** `$.prompt.submit` (recommended) or `$.session.send` to itself. Try
-   both in a lab session first.
-2. **Which kinds wake by default**: proposed `request`, `blocking`, `timer`, `job`.
-3. **The `--every` default for job matches**: proposed 15 minutes.
-4. **Piece B** is the launcher owner's to decide; this repo only supplies the query.
+1. **Wake route for piece A:** `$.prompt.submit`, framed as the plugin's message (never `asUser`).
+   Built that way in mod 0.3.0. It has not run in a real session yet.
+2. **Which kinds wake by default:** `request`, `blocking`, `timer`, `job`. Decided by the user,
+   15 Nov 2026.
+3. **The `--every` default for job matches**: proposed 15 minutes, still open.
+4. **Piece B** is the launcher owner's to decide; this repo only supplies the query. The machine's
+   admin session took it on 15 Nov 2026 and put its own questions to the user.
+5. **Build order:** A, then D, then C, decided by the user on 15 Nov 2026. A and D need no broker
+   change, and together they cover a long job waking its session. B's query comes right after A,
+   so the launcher is not held up.
+
+#### What piece A came to (mod 0.3.0, 15 Nov 2026)
+
+- **"Already woken" is kept in the plugin's `$.store`, keyed by inbox**, not in `$.state`. The
+  store is one file per plugin on the machine, shared by every session and kept across restarts
+  (relayed from the mod API's types). So a reload, a restart and a second session on one inbox
+  all see the same record, and a message wakes one session once. Two sessions reading at the same
+  instant can both wake; that race is accepted.
+- **The record is pruned to what is still waiting**, whenever the read saw the whole backlog, so it
+  stays the size of the backlog rather than growing for ever.
+- **A message is marked before its prompt is submitted**, whatever comes of the prompt, so a
+  refused prompt is not retried on every poll.
+- **New mail behind a backlog.** `read --unread` lists the oldest first, so a request behind 20
+  older messages is not in the band's listing. When more is waiting than the band lists, the wake
+  reads up to 200. Past 200, or past the 4 MiB output limit, only the listed messages can wake.
+- **A session started for its mail wakes for it**, because no session marked that message. A
+  session that was woken and ended without acking is not woken again for that message.
 
 #### Build order — each step one commit, test first
 

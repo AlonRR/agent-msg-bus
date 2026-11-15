@@ -1,7 +1,7 @@
 {
   "name": "agent-msg-bus-inbox",
-  "version": "0.2.0",
-  "description": "Shows how much agent-msg-bus mail is waiting for this session, in a row above the prompt and a toast, without starting a model turn. Click the row to list what is unread, and a header to read that message.",
+  "version": "0.3.0",
+  "description": "Shows how much agent-msg-bus mail is waiting for this session, in a row above the prompt and a toast. Click the row to list what is unread, and a header to read that message. A new request, blocking, timer or job message wakes the session with a pointer to it.",
   "types": "./types/index.d.ts",
   "author": {
     "name": "AlonRR"
@@ -23,6 +23,12 @@
         "poll",
         "watch"
       ]
+    },
+    "wakeKinds": {
+      "type": "string",
+      "title": "Kinds of mail that wake the session",
+      "description": "A comma-separated list of message kinds. When a new message of one of these kinds arrives, the mod starts a turn in this session with a pointer to it: id, sender, kind and subject, never the body. Other kinds only show on the band. none: never wake.",
+      "default": "request,blocking,timer,job"
     },
     "intervalSeconds": {
       "type": "number",

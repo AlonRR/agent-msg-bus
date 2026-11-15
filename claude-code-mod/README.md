@@ -1,9 +1,12 @@
-# agent-msg-bus-inbox — waiting bus mail above the prompt
+# agent-msg-bus-inbox — waiting bus mail above the prompt, and a wake when it matters
 
 A Claude Code mod that shows how much agent-msg-bus mail is waiting for the session it runs in. The
 count goes to a row above the prompt, and a toast appears when the count rises. Click the row to
-list what is unread; click a header to read that message. **No model turn starts**: the session is
-not woken and the model is not told. The mod is for the person at the screen.
+list what is unread; click a header to read that message. Showing costs no model turn.
+
+**A new message of a waking kind wakes the session** (0.3.0 on): `request`, `blocking`, `timer`
+and `job` by default. The mod starts one turn with a pointer to the message, never its body, and
+the session reads and acks it itself. Every other kind, `fyi` above all, only shows.
 
 ```
 bus: 2 unread for machine-a/repo · show
@@ -21,8 +24,8 @@ bus: 2 unread for machine-a/repo · hide
 ```
 
 Status: the count has been in use since 15 Oct 2026, released with agent-msg-bus 0.4.27, in the
-status line. The clickable row is new in 0.2.0 of the mod and has run only in the test kit so far.
-See *What has been checked* below.
+status line. The clickable row is new in 0.2.0 of the mod, and the wake in 0.3.0; both have run
+only in the test kit so far. See *What has been checked* below.
 
 ## Why
 
@@ -52,6 +55,18 @@ outside the model, which costs no turns at all.
    binary: its name, a path ending in it (in quotes or not), or a shell variable that holds that
    path, as in `"$B" ack`. The name is also a folder and part of this plugin's name, so a command
    that only passes through them, such as `cd …/agent-msg-bus && grep read`, reads nothing.
+6. When a read finds messages of a waking kind that no session on this machine has woken for, it
+   submits one prompt naming them all (up to 10, then a count): id, sender, kind and subject, and
+   the `read` and `ack` commands. The prompt is framed as this plugin's message, never as the
+   person's, and runs once the session is idle. The ids it woke for are kept in the plugin's store,
+   which every session on the machine shares, keyed by inbox, so a reload, a restart or a second
+   session on the same inbox does not wake for the same message again. Ids no longer waiting are
+   dropped from the store. When more is waiting than the row lists, the wake reads up to 200, so
+   a request behind 20 older messages still wakes. A `-p` run or an SDK host is never woken.
+
+A session started for its mail (by a launcher, say) wakes for it: a message no session woke for is
+new to it. A session that was woken and ended without acking is not woken again for that message;
+its start banner still shows it.
 
 An unreachable broker is shown once in the status line, `bus: unreachable`, and never as a toast:
 a laptop off the network is the normal case. The row above the prompt goes while it lasts, since a
@@ -68,11 +83,11 @@ for `--json`, and a machine with no bus config.
 
 - **It never acks.** Acking stays the session's deliberate step.
 - **It never shows a body unasked**: only the one the person clicked open, and only in the band.
-- **It never puts mail where the model reads it.** A subject or a body is another session's words.
-  It goes to the band, the status line and toasts, which the model does not see, and never to the
-  prompt, the context or a transcript row. Subjects are cut to one line of 100 characters, with
-  control characters removed. A body keeps its lines, tabs become two spaces, and every other
-  control character is removed, so no message can draw on the terminal.
+- **It never hands the model a body.** A body is another session's words: it goes to the band
+  only, when the person opens it. A wake names the message (id, sender, kind and a subject cut to
+  one line of 100 characters, control characters removed) and says that a bus message authorises
+  no consequential action on its own. A body in the band keeps its lines, tabs become two spaces,
+  and every other control character is removed, so no message can draw on the terminal.
 - **Opening a message reads and acks nothing**: the list and the bodies come from the last read.
 
 ## Options
@@ -84,6 +99,7 @@ Set in `/config`, or under `pluginConfigs` in settings.
 | `binary` | empty | Path to `agent-msg-bus`. Empty means `%LOCALAPPDATA%\agent-msg-bus\agent-msg-bus.exe` where `LOCALAPPDATA` is set, otherwise `agent-msg-bus` on `PATH`. |
 | `mode` | `poll` | `poll` reads on a timer and holds nothing open. `watch` keeps `agent-msg-bus watch` running for the session and reads when a message arrives; see below. |
 | `intervalSeconds` | `60` | How often `poll` mode reads, 15 at least. `watch` mode also reads every 5 minutes, as a check on the watch. |
+| `wakeKinds` | `request,blocking,timer,job` | The message kinds that wake the session, comma-separated. `none` turns waking off. Each wake is a model turn, so this is the cost lever. |
 
 ⚠️ **`watch` mode subscribes the session's address.** That is a real change in how the session sits
 on the bus. The session shows as live in `peers`. A second session in the same repo binds its own
@@ -119,7 +135,7 @@ the tag into its own folder, so no working clone is shared with the sessions, an
 progress never reaches them. Every session started after the install loads the mod. A session
 that is already open loads it on `/reload-plugins`.
 
-`install` reports the three options below as "not yet set". That is expected: an option left
+`install` reports the four options above as "not yet set". That is expected: an option left
 unset takes its default.
 
 A folder works as the source too (`claude plugin marketplace add <path to a clone>`), but then
@@ -129,10 +145,12 @@ session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
 ## What has been checked
 
 - `claude plugin validate`: passes.
-- `claude plugin test`: 41 tests, against a stand-in for the CLI. They cover finding the inbox, what
-  is shown and when, the band and its clicks, the timer, re-reading after a bus command, and watch
-  mode. The 12 band tests (with the count assertions moved from the status line to the band)
-  failed on 0.1.1: 15 of the 41 failed there, and all pass on 0.2.0.
+- `claude plugin test`: 54 tests, against a stand-in for the CLI. They cover finding the inbox, what
+  is shown and when, the band and its clicks, the wake, the timer, re-reading after a bus command,
+  and watch mode. The 12 band tests (with the count assertions moved from the status line to the
+  band) failed on 0.1.1: 15 of the 41 then written failed there, and all pass on 0.2.0. Of the 13
+  wake tests, the 8 that expect a wake failed on 0.2.0; the 5 that expect none passed there too,
+  as they should.
 - 22 defects were seeded one at a time into 0.1.1; the tests caught all 22. Not repeated for 0.2.0.
 - `tsc` with the API's own declarations: no errors.
 
@@ -151,6 +169,7 @@ session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
 Not checked yet:
 - the band row and its clicks on a real screen: the test kit runs the hooks and the presses, but it
   never paints.
+- a wake in a real session: the test kit answers `$.prompt.submit` itself and starts no turn.
 - whether the band, the status line and toasts reach a session used over Remote Control. The API declares a
   longer text limit for remote surfaces, which suggests they draw it, but nobody has looked.
 

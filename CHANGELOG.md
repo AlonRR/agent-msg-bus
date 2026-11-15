@@ -22,6 +22,18 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Added
+
+- **The inbox mod wakes its session for mail that needs it** (mod 0.3.0, Phase 11 piece A in
+  `docs/plan.md`). A new message of a waking kind, `request`, `blocking`, `timer` or `job` by
+  default (the `wakeKinds` option), starts one turn with a pointer: id, sender, kind, subject and
+  the `read` and `ack` commands, never the body, framed as the plugin's message. The ids woken for
+  are kept in the plugin's store, shared by the machine's sessions and keyed by inbox, so a reload,
+  a restart or a second session on one inbox does not wake for a message twice. When more is
+  waiting than the band lists, the wake reads up to 200, so new mail behind a backlog still wakes.
+  A `-p` run or an SDK host is never woken. This reverses the "show only" decision of 14 Oct 2026,
+  at the user's request.
+
 ## [0.4.34] — 2026-11-15
 
 ### Changed
