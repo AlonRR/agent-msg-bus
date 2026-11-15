@@ -942,7 +942,7 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
   ends (kind `job`, with the exit code or signal, the run time and the last 20 lines), and one per
   `--match` hit.
 - **A matched line can arrive many times a minute, and each message can be a paid turn.** So matches
-  are batched: at most one message per `--every` interval (proposed default 15 minutes), carrying the
+  are batched: at most one message per `--every` interval (no default: the session sets it with the pattern), carrying the
   count and the newest matched lines. The end-of-job message is never held back.
 - **It has to outlive the session that started it.** A session's background shell is reaped, and its
   Monitor expires at 30 minutes. So for anything long, `job run` is started under the host's own
@@ -974,7 +974,8 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
    Built that way in mod 0.3.0. It has not run in a real session yet.
 2. **Which kinds wake by default:** `request`, `blocking`, `timer`, `job`. Decided by the user,
    15 Nov 2026.
-3. **The `--every` default for job matches**: proposed 15 minutes, still open.
+3. **The interval for job matches:** no default. The session that starts a job decides both the
+   pattern and the interval, so `--match` needs `--every`. Decided by the user, 15 Nov 2026.
 4. **Piece B** is the launcher owner's to decide; this repo only supplies the query. The machine's
    admin session took it on 15 Nov 2026 and put its own questions to the user. The query is
    `peers --pending --json` over a new read-only `GET /pending` route (0.4.35), shaped to what that
