@@ -100,6 +100,9 @@ async fn read_unread_json_gives_the_total_and_the_messages_oldest_first() {
     assert_eq!(msgs[0]["subject"], "subject 0", "not oldest first: {v}");
     assert_eq!(msgs[0]["from"], "machine-a/peer");
     assert!(msgs[0]["id"].as_str().is_some_and(|s| !s.is_empty()), "no id to ack by: {v}");
+    // The inbox mod's band shows a message's age and, on a click, its body.
+    assert_eq!(msgs[0]["body"], "body", "{v}");
+    assert!(msgs[0]["ts"].as_str().is_some_and(|s| !s.is_empty()), "no ts to give an age by: {v}");
 }
 
 #[tokio::test]

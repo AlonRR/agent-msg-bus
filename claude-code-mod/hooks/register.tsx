@@ -2,21 +2,27 @@
 //
 // - The session's address comes from `agent-msg-bus whoami --json`, so this module knows nothing of
 //   how addresses are derived, pinned or fallen back. It reads mail from the `inbox` field.
-// - The count comes from `read <inbox> --unread --json`: read-only on the broker, no cursor moves.
-// - It goes to the status line, and a toast when it rises. Nothing else.
+// - The mail comes from `read <inbox> --unread --json`: read-only on the broker, no cursor moves.
+// - The count goes to a row above the prompt, and a toast when it rises. Clicking the row lists the
+//   unread headers; clicking a header opens that message's body under it. Status problems (an
+//   unreachable broker, a watch that stopped) go to the status line.
 //
 // Three things it never does, by design:
 // - It never acks. Acking is the session's deliberate step.
-// - It never shows a body.
-// - It never puts mail where the model reads it. A subject is another session's words, so it goes to
-//   the person's screen only: no prompt, no context, no transcript row.
+// - It never shows a body unasked: only the one the person clicked open, and only in the band.
+// - It never puts mail where the model reads it. A subject or a body is another session's words, so
+//   it goes to the person's screen only: no prompt, no context, no transcript row.
 
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-type Header = { id: string; from: string; kind: string; subject: string }
-type Inbox = { addr: string; total: number; messages: Header[] }
+import type { Header, Listed, Opened } from '../types'
+
+/** A message as `read --unread --json` gives it. `ts` and `body` are optional: older builds may lack them. */
+type Wire = { id: string; ts?: unknown; from: string; kind: string; subject: string; body?: unknown }
+type Inbox = { addr: string; total: number; messages: Wire[] }
 type Me = { address: string; inbox: string; pinned: boolean; fallback: string | null }
-type Ran = { ok: boolean; code: number | undefined; stdout: string; why: string }
+type Ran = { ok: boolean; code: number | undefined; stdout: string; truncated: boolean; why: string }
 
 /** What one load of the module knows. A reload starts it over, and `session.start` fires again. */
 type State = {
@@ -33,7 +39,14 @@ type State = {
   again: boolean
   down: boolean
   explained: boolean
+  /** The bodies of the messages last listed, by id: kept here, and copied to state only when opened. */
+  bodies: Map<string, string>
 }
+
+// Change a tag when that value's fields change: it declines what an earlier version stored.
+const inboxAtom = atom({ plugin: 'agent-msg-bus-inbox', key: 'inbox' } as const, null, { shape: 'inbox-1' })
+const expandedAtom = atom({ plugin: 'agent-msg-bus-inbox', key: 'isExpanded' } as const, false, { shape: 'expanded-1' })
+const openedAtom = atom({ plugin: 'agent-msg-bus-inbox', key: 'opened' } as const, null, { shape: 'opened-1' })
 
 const MIN_INTERVAL_S = 15
 const WATCH_CHECK_MS = 5 * 60_000
@@ -41,6 +54,8 @@ const WATCH_RESTART_MS = 30_000
 const RUN_TIMEOUT_MS = 15_000
 const SHOWN = 20
 const SUBJECT_MAX = 100
+/** The most of one body the band draws; past it, it says how much is left and how to read it. */
+export const BODY_MAX = 20_000
 
 /**
  * The subcommands that may change what is waiting, or which address is ours. One counts only as
@@ -69,7 +84,48 @@ export function clip(text: string): string {
   return flat.length > SUBJECT_MAX ? `${flat.slice(0, SUBJECT_MAX - 1)}…` : flat
 }
 
-export function toastText(inbox: Inbox): string {
+/**
+ * A body as the band draws it: its lines kept, tabs as two spaces, and every other control
+ * character gone, so it cannot move the cursor, clear the screen or recolour the terminal.
+ */
+export function cleanBody(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/\t/g, '  ')
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, '')
+}
+
+/**
+ * Milliseconds since the epoch of a UTC time as the broker writes it (`2026-11-13T15:38:24.632Z`),
+ * or undefined. Parsed by hand: the module's environment is not promised a `Date`.
+ */
+export function utcMs(ts: string): number | undefined {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/.exec(ts)
+  if (m === null) return undefined
+  const [y, mo, d, h, mi, s] = m.slice(1, 7).map(Number) as [number, number, number, number, number, number]
+  const ms = Number((m[7] ?? '0').padEnd(3, '0').slice(0, 3))
+  // Days from 1970-01-01 to y-mo-d in the proleptic Gregorian calendar (Hinnant's days_from_civil).
+  const yy = mo <= 2 ? y - 1 : y
+  const era = Math.floor(yy / 400)
+  const yoe = yy - era * 400
+  const doy = Math.floor((153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5) + d - 1
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy
+  const days = era * 146097 + doe - 719468
+  return ((days * 24 + h) * 60 + mi) * 60_000 + s * 1000 + ms
+}
+
+/** How long ago `ts` was, in one short unit; empty when `ts` does not parse. */
+export function age(ts: string, now: number): string {
+  const at = utcMs(ts)
+  if (at === undefined) return ''
+  const s = Math.max(0, Math.floor((now - at) / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 48 * 3600) return `${Math.floor(s / 3600)}h`
+  return `${Math.floor(s / 86400)}d`
+}
+
+export function toastText(inbox: { addr: string; total: number; messages: { from: string; kind: string; subject: string }[] }): string {
   const head = `bus: ${inbox.total} unread for ${inbox.addr}`
   // Oldest first: the newest is the last one, and only when everything waiting was shown.
   const newest = inbox.total <= inbox.messages.length ? inbox.messages.at(-1) : undefined
@@ -96,6 +152,8 @@ function isMe(v: unknown): v is Me {
   return typeof o?.inbox === 'string' && o.inbox !== '' && typeof o.address === 'string'
 }
 
+const text = (v: unknown): string => (typeof v === 'string' ? v : '')
+
 async function run($: EngineInterface, s: State, args: string[]): Promise<Ran> {
   try {
     const r = await $.process.run([s.bin, ...args], {
@@ -103,10 +161,10 @@ async function run($: EngineInterface, s: State, args: string[]): Promise<Ran> {
       timeoutMs: RUN_TIMEOUT_MS,
     })
     const why = r.stderr.trim().split('\n')[0] ?? ''
-    return { ok: r.exitCode === 0, code: r.exitCode, stdout: r.stdout, why: why || `exit ${r.exitCode}` }
+    return { ok: r.exitCode === 0, code: r.exitCode, stdout: r.stdout, truncated: r.isStdoutTruncated, why: why || `exit ${r.exitCode}` }
   } catch (err) {
     // Could not start, or still running at the timeout.
-    return { ok: false, code: undefined, stdout: '', why: err instanceof Error ? err.message : String(err) }
+    return { ok: false, code: undefined, stdout: '', truncated: false, why: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -121,10 +179,29 @@ function isPermanent(r: Ran): boolean {
 }
 
 /** Once per load, a dim transcript line the model does not read, saying why nothing shows. */
-function explain($: EngineInterface, s: State, text: string): void {
+function explain($: EngineInterface, s: State, line: string): void {
   if (s.explained) return
   s.explained = true
-  $.ui.log(`agent-msg-bus-inbox: ${text}`)
+  $.ui.log(`agent-msg-bus-inbox: ${line}`)
+}
+
+/**
+ * A state write that may be refused, as when the session ends under a read still in flight.
+ * Nothing is lost: the next read writes it again.
+ */
+async function quietly(write: Promise<unknown>): Promise<void> {
+  try {
+    await write
+  } catch {
+    // Written again by the next read.
+  }
+}
+
+/** Said once, in the status line, and the band emptied: a stale count is worse than none. */
+async function markDown($: EngineInterface, s: State): Promise<void> {
+  if (!s.down) $.ui.status('bus: unreachable')
+  s.down = true
+  await quietly(update($, inboxAtom, () => null))
 }
 
 async function identify($: EngineInterface, s: State): Promise<boolean> {
@@ -139,8 +216,7 @@ async function identify($: EngineInterface, s: State): Promise<boolean> {
       explain($, s, `no inbox to show: \`${s.bin} whoami --json\` failed (${why}). It needs agent-msg-bus 0.4.27 or later and a bus config on this machine.`)
     } else {
       // Asked again on the next tick: a laptop off the network is the normal case.
-      if (!s.down) $.ui.status('bus: unreachable')
-      s.down = true
+      await markDown($, s)
     }
     return false
   }
@@ -152,18 +228,32 @@ async function identify($: EngineInterface, s: State): Promise<boolean> {
 async function readOnce($: EngineInterface, s: State): Promise<void> {
   if (s.me === undefined) return
   const r = await run($, s, ['read', s.me.inbox, '--unread', '--json', '--limit', String(SHOWN)])
-  const inbox = r.ok ? parse(r.stdout) : undefined
+  let inbox = r.ok && !r.truncated ? parse(r.stdout) : undefined
+  let listed = true
+  if (r.ok && r.truncated) {
+    // The bodies together are past what one read returns: the count alone still fits.
+    const count = await run($, s, ['read', s.me.inbox, '--unread', '--json', '--limit', '0'])
+    inbox = count.ok ? parse(count.stdout) : undefined
+    listed = false
+  }
   if (!isInbox(inbox)) {
-    // Said once, in the status line, and never as a toast: an unreachable broker on a laptop that
-    // is off the network is the normal case, not news every minute.
-    if (!s.down) $.ui.status('bus: unreachable')
-    s.down = true
+    // Never as a toast: an unreachable broker on a laptop off the network is not news every minute.
+    await markDown($, s)
     return
   }
   s.down = false
-  $.ui.status(inbox.total > 0 ? `bus: ${inbox.total} unread` : undefined)
-  if (inbox.total > (s.last ?? 0)) $.ui.toast(toastText(inbox))
+  $.ui.status(undefined)
+  const messages = listed ? inbox.messages : []
+  s.bodies = new Map(messages.map(m => [m.id, text(m.body)]))
+  const headers: Header[] = messages.map(m => ({ id: m.id, ts: text(m.ts), from: m.from, kind: m.kind, subject: m.subject }))
+  const listing: Listed = { addr: inbox.addr, total: inbox.total, listed, messages: headers }
+  if (inbox.total > (s.last ?? 0)) $.ui.toast(toastText({ ...inbox, messages }))
   s.last = inbox.total
+  await quietly(update($, inboxAtom, () => listing))
+  // An acked message closes; an empty inbox folds the list, so new mail arrives as one row.
+  const ids = new Set(headers.map(one => one.id))
+  await quietly(update($, openedAtom, cur => (cur !== null && ids.has(cur.id) ? cur : null)))
+  if (inbox.total === 0) await quietly(update($, expandedAtom, () => false))
 }
 
 /** One read at a time. A request during a read runs one more read after it, not one each. */
@@ -261,6 +351,21 @@ function afterCommand($: EngineInterface, s: State, tool: string, command: unkno
   else void refresh($, s)
 }
 
+/** A click on a header opens its body under it, a second click closes it. */
+function openOrClose($: EngineInterface, s: State, id: string): void {
+  void quietly(update($, openedAtom, (cur): Opened | null => {
+    if (cur !== null && cur.id === id) return null
+    const body = cleanBody(s.bodies.get(id) ?? '')
+    return { id, body: body.slice(0, BODY_MAX), left: Math.max(0, body.length - BODY_MAX) }
+  }))
+}
+
+function headerLabel(msg: Header, now: number): string {
+  const kind = msg.kind && msg.kind !== 'fyi' ? `[${clip(msg.kind)}] ` : ''
+  const when = age(msg.ts, now)
+  return `${when ? `${when.padStart(3)}  ` : ''}${clip(msg.from)}  ${kind}${clip(msg.subject)}`
+}
+
 export const register: Register = (on, options) => {
   const seconds = Number(options.intervalSeconds)
   const intervalMs = Math.max(MIN_INTERVAL_S, Number.isFinite(seconds) ? seconds : 60) * 1000
@@ -276,6 +381,7 @@ export const register: Register = (on, options) => {
     again: false,
     down: false,
     explained: false,
+    bodies: new Map(),
   }
 
   // Started, not awaited: a `whoami` that waits on an unreachable broker must not hold up the
@@ -293,4 +399,48 @@ export const register: Register = (on, options) => {
     afterCommand($, s, e.tool, (e as { command?: unknown }).command)
     return result
   }).catch(($, e, next) => next(e))
+
+  // The row above the prompt. Nothing waiting, or a survey holding the band: no row at all.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const inbox = await read($, inboxAtom)
+    if (e.props.hasSurvey || inbox === null || inbox.total === 0) {
+      return next(e)
+    }
+    const isExpanded = await read($, expandedAtom)
+    const opened = await read($, openedAtom)
+    const now = await $.clock.now()
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const more = inbox.total - inbox.messages.length
+    const readIt = `agent-msg-bus read ${clip(inbox.addr)} --unread`
+
+    return (
+      <Box flexDirection="column">
+        <Button key="toggle" plain onPress={() => update($, expandedAtom, v => !v)}>
+          bus: {String(inbox.total)} unread for {clip(inbox.addr)} <Text dimColor>{isExpanded ? '· hide' : '· show'}</Text>
+        </Button>
+        {/* Never name a variable `h` in this file: JSX compiles to calls of the global `h`. */}
+        {isExpanded &&
+          inbox.messages.map(msg => (
+            <Box key={`m-${msg.id}`} flexDirection="column" paddingLeft={2}>
+              <Button key={msg.id} plain dimColor={opened !== null && opened.id !== msg.id} onPress={() => openOrClose($, s, msg.id)}>
+                {headerLabel(msg, now)}
+              </Button>
+              {opened !== null && opened.id === msg.id && (
+                <Box flexDirection="column" paddingLeft={2}>
+                  <Text dimColor>{`${clip(msg.id)}${msg.ts ? ` · sent ${clip(msg.ts)}` : ''}`}</Text>
+                  <Text>{opened.body === '' ? '(no body)' : opened.body}</Text>
+                  {opened.left > 0 && <Text dimColor>{`… ${opened.left} more characters; read it whole with ${readIt}`}</Text>}
+                </Box>
+              )}
+            </Box>
+          ))}
+        {isExpanded && !inbox.listed && (
+          <Text dimColor>{`  too large to list here; read with ${readIt}`}</Text>
+        )}
+        {isExpanded && inbox.listed && more > 0 && (
+          <Text dimColor>{`  … and ${more} more, not listed; read with ${readIt}`}</Text>
+        )}
+      </Box>
+    )
+  })
 }

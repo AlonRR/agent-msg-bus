@@ -1,7 +1,8 @@
 {
   "name": "agent-msg-bus-inbox",
-  "version": "0.1.1",
-  "description": "Shows how much agent-msg-bus mail is waiting for this session, in the status line and a toast, without starting a model turn.",
+  "version": "0.2.0",
+  "description": "Shows how much agent-msg-bus mail is waiting for this session, in a row above the prompt and a toast, without starting a model turn. Click the row to list what is unread, and a header to read that message.",
+  "types": "./types/index.d.ts",
   "author": {
     "name": "AlonRR"
   },

@@ -22,6 +22,16 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Changed
+
+- **The inbox mod's count is a row above the prompt that opens on a click** (mod 0.2.0). The
+  status line takes no clicks, so the count moved to the band: `bus: N unread for <addr> · show`.
+  A click lists up to 20 unread headers (age, sender, kind, subject); a click on a header opens
+  that message's body under it, up to 20,000 characters, control characters removed. Opening reads
+  and acks nothing, and nothing reaches the model. The status line keeps `bus: unreachable` and the
+  watch notices. Bodies too large for one read still give the count. `tests/json_output.rs` now
+  pins `ts` and `body` in `read --unread --json`, which the mod reads.
+
 ## [0.4.33] — 2026-11-13
 
 ### Added

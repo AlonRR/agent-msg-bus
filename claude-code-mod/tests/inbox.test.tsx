@@ -1,6 +1,6 @@
 // The mod against a stand-in for the agent-msg-bus binary: every `$.process.run` lands in the
 // test's hook, which answers as the real CLI does. What the person would see is what the test
-// reads: the status line, the toasts and the dim log lines.
+// reads: the band above the prompt, the status line, the toasts and the dim log lines.
 
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
@@ -17,7 +17,7 @@ const ME = {
   relay: '127.0.0.1:9451',
 }
 
-type Header = { id: string; from: string; kind: string; subject: string }
+type Header = { id: string; ts?: string; from: string; kind: string; subject: string; body?: string }
 
 /** What the stand-in binary knows, and everything the mod did to the screen. */
 type World = {
@@ -28,6 +28,8 @@ type World = {
   whoamiTakesMs: number
   waiting: Header[]
   readFails: boolean
+  /** The listing read comes back cut at the output limit, as 20 large bodies would. */
+  readTruncated: boolean
   runs: string[][]
   envs: Record<string, string>[]
   statuses: (string | undefined)[]
@@ -36,8 +38,18 @@ type World = {
   clock: ReturnType<typeof mock.clock>
 }
 
+const NOW = Date.parse('2026-10-14T13:00:00.000Z')
+
 function header(n: number, extra: Partial<Header> = {}): Header {
-  return { id: `20261014T1200000${n}-00000000${n}`, from: 'machine-a/peer', kind: 'fyi', subject: `subject ${n}`, ...extra }
+  return {
+    id: `20261014T1200000${n}-00000000${n}`,
+    ts: '2026-10-14T12:00:00.000Z',
+    from: 'machine-a/peer',
+    kind: 'fyi',
+    subject: `subject ${n}`,
+    body: `body ${n}`,
+    ...extra,
+  }
 }
 
 function world(on: On): World {
@@ -47,12 +59,13 @@ function world(on: On): World {
     whoamiTakesMs: 0,
     waiting: [],
     readFails: false,
+    readTruncated: false,
     runs: [],
     envs: [],
     statuses: [],
     toasts: [],
     logs: [],
-    clock: mock.clock(on),
+    clock: mock.clock(on, { now: NOW }),
   }
   mock.env(on, { LOCALAPPDATA: 'C:\\L' })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -61,8 +74,8 @@ function world(on: On): World {
   on('process.run', async ($, e) => {
     w.runs.push([...e.argv])
     w.envs.push({ ...(e.init?.env ?? {}) })
-    const answer = (exitCode: number, stdout: string, stderr = '') => ({
-      value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
+    const answer = (exitCode: number, stdout: string, stderr = '', isStdoutTruncated = false) => ({
+      value: { exitCode, stdout, stderr, isStdoutTruncated, isStderrTruncated: false },
     })
     if (e.argv[1] === 'whoami') {
       if (w.whoamiTakesMs > 0) await w.clock.sleep(w.whoamiTakesMs)
@@ -74,7 +87,9 @@ function world(on: On): World {
     if (e.argv[1] === 'read') {
       if (w.readFails) return answer(1, '', 'agent-msg-bus: cannot reach the broker\n')
       const limit = Number(e.argv[e.argv.indexOf('--limit') + 1])
-      return answer(0, JSON.stringify({ addr: e.argv[2], total: w.waiting.length, messages: w.waiting.slice(0, limit) }))
+      const out = JSON.stringify({ addr: e.argv[2], total: w.waiting.length, messages: w.waiting.slice(0, limit) })
+      if (w.readTruncated && limit > 0) return answer(0, out.slice(0, out.length - 20), '', true)
+      return answer(0, out)
     }
     return answer(1, '', 'not stood in for\n')
   })
@@ -91,6 +106,11 @@ function world(on: On): World {
     return { value: undefined }
   })
   on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  // Stands for the engine beneath the band: what is drawn when the mod passes.
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
   return w
 }
 
@@ -98,6 +118,33 @@ function world(on: On): World {
 async function start($: Engine, w: World): Promise<void> {
   await $.session.start({ cwd: 'C:\\w\\repo', surface: 'terminal', isInteractive: true })
   await w.clock.advance(0)
+}
+
+const BAND = {
+  plugin: 'agent-msg-bus-inbox',
+  component: 'AbovePrompt',
+  props: {
+    hasSurvey: false,
+    isCollapsed: false,
+    isWorking: false,
+    maxRows: 40,
+    bodyColumns: 120,
+    scroll: { offset: 0, bodyRows: 39 },
+    view: {},
+  },
+} as const
+
+/** The band as the terminal draws it now. */
+function band($: Engine, props: { hasSurvey?: boolean } = {}) {
+  return $.ui.mount({ ...BAND, props: { ...BAND.props, ...props }, surface: 'terminal' })
+}
+
+/** The text of the band's top row, or undefined when the mod drew none. */
+async function bandHead($: Engine): Promise<string | undefined> {
+  const ui = await band($)
+  const head = await ui.find({ key: 'toggle' })
+  await ui.unmount()
+  return head?.text
 }
 
 const reads = (w: World) => w.runs.filter(r => r[1] === 'read').length
@@ -168,27 +215,30 @@ describe('finding the inbox', () => {
     w.waiting = [header(1)]
     await w.clock.advance(60_000)
     expect(whoamis(w)).toBe(2)
-    expect(w.statuses.at(-1)).toBe('bus: 1 unread')
+    expect(w.statuses.at(-1)).toBe(undefined)
+    expect(await bandHead($)).toContain('bus: 1 unread')
   })
 })
 
 describe('what the person sees', () => {
-  test('nothing waiting: no status line and no toast', async ($, on) => {
+  test('nothing waiting: no status line, no toast and no row in the band', async ($, on) => {
     const w = world(on)
     await start($, w)
     expect(w.statuses).toEqual([undefined])
     expect(w.toasts).toEqual([])
+    expect(await bandHead($)).toBe(undefined)
   })
 
   test('mail waiting at the start: the count, and one toast naming the newest', async ($, on) => {
     const w = world(on)
     w.waiting = [header(1), header(2, { kind: 'request', from: 'machine-b/other', subject: 'please check' })]
     await start($, w)
-    expect(w.statuses.at(-1)).toBe('bus: 2 unread')
+    expect(await bandHead($)).toContain('bus: 2 unread for machine-a/repo')
+    expect(w.statuses).not.toContain('bus: 2 unread')
     expect(w.toasts).toEqual(['bus: 2 unread for machine-a/repo · newest: [request] machine-b/other: please check'])
   })
 
-  test('a toast only when the count rises, and the status clears when it falls to 0', async ($, on) => {
+  test('a toast only when the count rises, and the row goes when it falls to 0', async ($, on) => {
     const w = world(on)
     w.waiting = [header(1)]
     await start($, w)
@@ -200,12 +250,12 @@ describe('what the person sees', () => {
     w.waiting = [header(1), header(2)]
     await w.clock.advance(60_000)
     expect(w.toasts.length).toBe(2)
-    expect(w.statuses.at(-1)).toBe('bus: 2 unread')
+    expect(await bandHead($)).toContain('bus: 2 unread')
 
     w.waiting = []
     await w.clock.advance(60_000)
     expect(w.toasts.length).toBe(2)
-    expect(w.statuses.at(-1)).toBe(undefined)
+    expect(await bandHead($)).toBe(undefined)
   })
 
   test('more waiting than shown: the toast gives the count and does not guess the newest', async ($, on) => {
@@ -236,7 +286,177 @@ describe('what the person sees', () => {
     w.readFails = false
     w.waiting = [header(1)]
     await w.clock.advance(60_000)
-    expect(w.statuses.at(-1)).toBe('bus: 1 unread')
+    expect(w.statuses.at(-1)).toBe(undefined)
+    expect(await bandHead($)).toContain('bus: 1 unread')
+  })
+
+  test('a broker that goes away takes the stale count out of the band', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1)]
+    await start($, w)
+    expect(await bandHead($)).toContain('bus: 1 unread')
+    w.readFails = true
+    await w.clock.advance(60_000)
+    expect(await bandHead($)).toBe(undefined)
+    expect(w.statuses.at(-1)).toBe('bus: unreachable')
+  })
+})
+
+describe('the band: click to see what is unread', () => {
+  test('one row with the count, the list folded', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1), header(2)]
+    await start($, w)
+    const ui = await band($)
+    expect((await ui.find({ key: 'toggle' }))?.text).toContain('bus: 2 unread for machine-a/repo')
+    expect(await ui.find({ key: header(1).id })).toBe(undefined)
+    await ui.unmount()
+  })
+
+  test('a click on the row lists each header, oldest first; another folds it', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1), header(2, { kind: 'request', from: 'machine-b/other', subject: 'please check', ts: '2026-10-14T12:55:00.000Z' })]
+    await start($, w)
+    const ui = await band($)
+    await ui.press({ key: 'toggle' })
+    const rows = (await ui.findAll({ type: 'Button' })).filter(b => b.key !== 'toggle')
+    expect(rows.map(r => r.key)).toEqual([header(1).id, header(2).id])
+    expect(rows[0]?.text).toBe(' 1h  machine-a/peer  subject 1')
+    expect(rows[1]?.text).toBe(' 5m  machine-b/other  [request] please check')
+    expect(await ui.find({ type: 'Text', text: 'body 1' })).toBe(undefined)
+
+    await ui.press({ key: 'toggle' })
+    expect(await ui.find({ key: header(1).id })).toBe(undefined)
+    await ui.unmount()
+  })
+
+  test('a click on a header opens its message in full; another closes it', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1), header(2, { body: 'line one\nline two' })]
+    await start($, w)
+    const ui = await band($)
+    await ui.press({ key: 'toggle' })
+    await ui.press({ key: header(2).id })
+    expect((await ui.find({ type: 'Text', text: 'line one' }))?.text).toBe('line one\nline two')
+    expect(await ui.find({ type: 'Text', text: header(2).id })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'body 1' })).toBe(undefined)
+
+    await ui.press({ key: header(1).id })
+    expect(await ui.find({ type: 'Text', text: 'line one' })).toBe(undefined)
+    expect((await ui.find({ type: 'Text', text: 'body 1' }))?.text).toBe('body 1')
+
+    await ui.press({ key: header(1).id })
+    expect(await ui.find({ type: 'Text', text: 'body 1' })).toBe(undefined)
+    await ui.unmount()
+  })
+
+  test('opening a message reads nothing and acks nothing', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1)]
+    await start($, w)
+    const before = w.runs.length
+    const ui = await band($)
+    await ui.press({ key: 'toggle' })
+    await ui.press({ key: header(1).id })
+    await ui.unmount()
+    expect(w.runs.length).toBe(before)
+  })
+
+  test('a body cannot put a control sequence on screen, and keeps its lines', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1, { body: 'top\u001b[2J\r\nnext\u0007\tend' })]
+    await start($, w)
+    const ui = await band($)
+    await ui.press({ key: 'toggle' })
+    await ui.press({ key: header(1).id })
+    expect((await ui.find({ type: 'Text', text: 'top' }))?.text).toBe('top[2J\nnext  end')
+    await ui.unmount()
+  })
+
+  test('a very long body is drawn up to 20,000 characters, and says how much is left', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1, { body: 'x'.repeat(25_000) })]
+    await start($, w)
+    const ui = await band($)
+    await ui.press({ key: 'toggle' })
+    await ui.press({ key: header(1).id })
+    expect((await ui.find({ type: 'Text', text: /^x+$/ }))?.text.length).toBe(20_000)
+    expect((await ui.find({ type: 'Text', text: '5000 more characters' }))?.text).toContain('agent-msg-bus read machine-a/repo --unread')
+    await ui.unmount()
+  })
+
+  test('an acked message closes, and an emptied inbox folds the list', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1), header(2)]
+    await start($, w)
+    let ui = await band($)
+    await ui.press({ key: 'toggle' })
+    await ui.press({ key: header(1).id })
+    await ui.unmount()
+
+    w.waiting = [header(2)]
+    await w.clock.advance(60_000)
+    ui = await band($)
+    expect(await ui.find({ key: header(1).id })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: 'body 1' })).toBe(undefined)
+    expect(await ui.find({ key: header(2).id })).toBeDefined()
+    await ui.unmount()
+
+    w.waiting = []
+    await w.clock.advance(60_000)
+    w.waiting = [header(3)]
+    await w.clock.advance(60_000)
+    ui = await band($)
+    expect(await ui.find({ key: header(3).id })).toBe(undefined)
+    await ui.unmount()
+  })
+
+  test('more waiting than listed: the list says how many more', async ($, on) => {
+    const w = world(on)
+    w.waiting = Array.from({ length: 25 }, (_, i) => header(i))
+    await start($, w)
+    const ui = await band($)
+    await ui.press({ key: 'toggle' })
+    expect((await ui.findAll({ type: 'Button' })).length).toBe(21)
+    expect(await ui.find({ type: 'Text', text: 'and 5 more' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('bodies too large for one read: the count still shows, not unreachable', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1), header(2)]
+    w.readTruncated = true
+    await start($, w)
+    expect(w.statuses).not.toContain('bus: unreachable')
+    expect(w.runs.at(-1)).toContain('0')
+    const ui = await band($)
+    expect((await ui.find({ key: 'toggle' }))?.text).toContain('bus: 2 unread')
+    await ui.press({ key: 'toggle' })
+    expect(await ui.find({ type: 'Text', text: 'too large to list here' })).toBeDefined()
+    await ui.unmount()
+    expect(w.toasts).toEqual(['bus: 2 unread for machine-a/repo'])
+  })
+
+  test('a build without ts or body: headers still list, with no age', async ($, on) => {
+    const w = world(on)
+    w.waiting = [{ id: 'old-1', from: 'machine-a/peer', kind: 'fyi', subject: 'from an old build' }]
+    await start($, w)
+    const ui = await band($)
+    await ui.press({ key: 'toggle' })
+    expect((await ui.find({ key: 'old-1' }))?.text).toBe('machine-a/peer  from an old build')
+    await ui.press({ key: 'old-1' })
+    expect(await ui.find({ type: 'Text', text: '(no body)' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a survey holding the band: the mod gives way', async ($, on) => {
+    const w = world(on)
+    w.waiting = [header(1)]
+    await start($, w)
+    const ui = await band($, { hasSurvey: true })
+    expect(await ui.find({ key: 'toggle' })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: 'engine' })).toBeDefined()
+    await ui.unmount()
   })
 })
 
@@ -272,7 +492,7 @@ describe('after the session runs the bus CLI', () => {
     await $.tool.call({ tool: 'Bash', command: 'agent-msg-bus ack machine-a/repo 20261014T12000001-000000001' })
     await w.clock.advance(0)
     expect(reads(w)).toBe(2)
-    expect(w.statuses.at(-1)).toBe(undefined)
+    expect(await bandHead($)).toBe(undefined)
   })
 
   test('PowerShell and the .exe name count too', async ($, on) => {
