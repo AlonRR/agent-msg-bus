@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.34] — 2026-11-15
+
 ### Changed
 
 - **The inbox mod's count is a row above the prompt that opens on a click** (mod 0.2.0). The
