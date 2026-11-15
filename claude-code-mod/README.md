@@ -24,8 +24,8 @@ bus: 2 unread for machine-a/repo · hide
 ```
 
 Status: the count has been in use since 15 Oct 2026, released with agent-msg-bus 0.4.27, in the
-status line. The clickable row is new in 0.2.0 of the mod, and the wake in 0.3.0; both have run
-only in the test kit so far. See *What has been checked* below.
+status line. The clickable row is new in 0.2.0 of the mod, and the wake in 0.3.0; both were checked
+on a real terminal on 15 Nov 2026. See *What has been checked* below.
 
 ## Why
 
@@ -166,10 +166,18 @@ session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
   it working. So `$.process`, which the API marks "CLI only", does run there, for a session the
   desktop app runs on the same machine.
 
+- A throwaway terminal session, 15 Nov 2026 (Claude Code 2.1.325, mod 0.3.0, 140 columns), run in a
+  pseudo-terminal and read as text, with its own bus address and a second sender address:
+  - a `request` drew the row (`bus: 1 unread for <addr> · show`) and a toast, and woke the session
+    once with the pointer prompt, shown as "Prompt from the agent-msg-bus-inbox plugin". The woken
+    session read and acked the message, and the row went;
+  - an `fyi` drew the row and woke nothing;
+  - a mouse click on the row listed the headers with their age (`13s  <sender>  <subject>`), a click
+    on a header opened its id, sent time and every line of its body under it, and a click on the row
+    folded the list again.
+
 Not checked yet:
-- the band row and its clicks on a real screen: the test kit runs the hooks and the presses, but it
-  never paints.
-- a wake in a real session: the test kit answers `$.prompt.submit` itself and starts no turn.
+- colours and fonts: the check above read the screen as text, not pixels.
 - whether the band, the status line and toasts reach a session used over Remote Control. The API declares a
   longer text limit for remote surfaces, which suggests they draw it, but nobody has looked.
 
