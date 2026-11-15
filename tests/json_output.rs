@@ -165,3 +165,80 @@ async fn whoami_json_names_the_address_to_read_and_whether_the_broker_knows_it()
     let after = json(&run(&b, &repo, &["whoami", "--json"]).await);
     assert_eq!(after["registered"], true, "{after}");
 }
+
+/// Addresses on two machines, each registered, with mail of several kinds waiting. Returns the id
+/// of the newest waking message to `machine-a/busy`.
+async fn machines_with_mail(b: &Broker) -> String {
+    let c = Client::new(&b.base, TOKEN);
+    blocking(move || {
+        c.register("machine-a/busy", "s-busy", "machine-a", "busy", "/w/busy", 1).unwrap();
+        c.register("machine-a/quiet", "s-quiet", "machine-a", "quiet", "/w/quiet", 1).unwrap();
+        c.register("machine-a/fyi-only", "s-fyi", "machine-a", "fyi-only", "/w/fyi", 1).unwrap();
+        c.register("machine-a/pinned", "", "machine-a", "pinned", "", 0).unwrap();
+        c.register("machine-b/elsewhere", "s-b", "machine-b", "elsewhere", "/w/b", 1).unwrap();
+        c.send("machine-a/peer", "machine-a/busy", "request", "one", "b", "").unwrap();
+        c.send("machine-a/peer", "machine-a/busy", "fyi", "two", "b", "").unwrap();
+        let newest = c.send("machine-a/peer", "machine-a/busy", "blocking", "three", "b", "").unwrap();
+        c.send("machine-a/peer", "machine-a/fyi-only", "fyi", "x", "b", "").unwrap();
+        c.send("machine-a/peer", "machine-a/pinned", "job", "done", "b", "").unwrap();
+        c.send("machine-a/peer", "machine-b/elsewhere", "request", "y", "b", "").unwrap();
+        newest
+    })
+    .await
+}
+
+fn row<'a>(v: &'a serde_json::Value, addr: &str) -> Option<&'a serde_json::Value> {
+    v["addresses"].as_array()?.iter().find(|r| r["address"] == addr)
+}
+
+/// What a launcher reads to start the ended sessions that have mail needing them (Phase 11
+/// piece B): one machine's addresses, waking kinds only, with what it decides on.
+#[tokio::test]
+async fn peers_pending_json_lists_one_machines_waking_mail() {
+    let b = broker().await;
+    let newest = machines_with_mail(&b).await;
+    let v = json(&run(&b, &b.home, &["peers", "--pending", "--json"]).await);
+    assert_eq!(v["schema"], 1, "{v}");
+    assert_eq!(v["machine"], "machine-a", "not the token's own machine by default: {v}");
+    let listed: Vec<&str> = v["addresses"].as_array().expect("addresses is a list").iter()
+        .filter_map(|r| r["address"].as_str()).collect();
+    assert_eq!(listed, ["machine-a/busy", "machine-a/pinned"], "{v}");
+
+    let busy = row(&v, "machine-a/busy").unwrap();
+    assert_eq!(busy["session_id"], "s-busy", "{v}");
+    assert_eq!(busy["cwd"], "/w/busy", "{v}");
+    assert!(busy["registered_at"].as_str().is_some_and(|s| !s.is_empty()), "{v}");
+    assert_eq!(busy["pending"], 2, "the fyi was counted: {v}");
+    assert_eq!(busy["kinds"], serde_json::json!(["blocking", "request"]), "{v}");
+    assert!(busy["oldest_ts"].as_str().is_some_and(|s| !s.is_empty()), "{v}");
+    assert_eq!(busy["newest_id"], newest.as_str(), "{v}");
+    assert_eq!(busy["subscribed"], false, "{v}");
+
+    let pinned = row(&v, "machine-a/pinned").unwrap();
+    assert!(pinned["session_id"].is_null(), "no session registered it, so a launcher has nothing to start: {v}");
+}
+
+#[tokio::test]
+async fn peers_pending_json_takes_another_machine_and_other_kinds() {
+    let b = broker().await;
+    machines_with_mail(&b).await;
+    let v = json(&run(&b, &b.home, &["peers", "--pending", "--json", "--machine", "machine-b"]).await);
+    assert_eq!(v["machine"], "machine-b", "{v}");
+    assert!(row(&v, "machine-b/elsewhere").is_some(), "{v}");
+    assert!(row(&v, "machine-a/busy").is_none(), "another machine's address leaked in: {v}");
+
+    let v = json(&run(&b, &b.home, &["peers", "--pending", "--json", "--kinds", "fyi"]).await);
+    assert_eq!(row(&v, "machine-a/fyi-only").map(|r| r["pending"].clone()), Some(1.into()), "{v}");
+    assert_eq!(row(&v, "machine-a/busy").map(|r| r["pending"].clone()), Some(1.into()), "{v}");
+    assert!(row(&v, "machine-a/pinned").is_none(), "{v}");
+}
+
+/// A launcher asks on a timer, so asking must never change what is waiting.
+#[tokio::test]
+async fn peers_pending_reads_nothing_and_acks_nothing() {
+    let b = broker().await;
+    machines_with_mail(&b).await;
+    json(&run(&b, &b.home, &["peers", "--pending", "--json"]).await);
+    let v = json(&run(&b, &b.home, &["read", "machine-a/busy", "--unread", "--json"]).await);
+    assert_eq!(v["total"], 3, "{v}");
+}

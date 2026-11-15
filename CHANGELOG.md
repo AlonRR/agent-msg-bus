@@ -33,6 +33,14 @@ explicitly not part of it and can change in a patch.
   waiting than the band lists, the wake reads up to 200, so new mail behind a backlog still wakes.
   A `-p` run or an SDK host is never woken. This reverses the "show only" decision of 14 Oct 2026,
   at the user's request.
+- **`peers --pending --json`, over a new read-only `GET /pending` route** (broker and client), for
+  a launcher that starts ended sessions whose mail needs them (Phase 11 piece B). It lists one
+  machine's addresses (by default the machine the token is for; `--machine` for another) with
+  unread mail of the waking kinds (`--kinds` to change them): the session id, `cwd` and
+  `registered_at` last registered, the count, the kinds, the oldest `ts`, the newest id, and
+  whether a socket is live now. `session_id` is null for an address no session registered. Asking
+  moves no cursor and writes nothing. An older broker answers 404, which the client reports as the
+  version needed.
 
 ## [0.4.34] — 2026-11-15
 

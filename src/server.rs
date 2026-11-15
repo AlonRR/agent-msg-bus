@@ -109,6 +109,7 @@ pub fn app(state: AppState) -> Router {
         .route("/send", post(send))
         .route("/ack", post(ack))
         .route("/peers", get(peers))
+        .route("/pending", get(pending))
         .route("/forget", post(forget))
         .route("/migrate", post(migrate))
         .route("/messages", get(messages))
@@ -828,6 +829,55 @@ struct KnownPeer {
     /// Other names this address answers to, from migrations. Surfaced so a mailbox that has
     /// inherited an identity is visible as such rather than being a hidden routing rule.
     aliases: Vec<String>,
+}
+
+/// The kinds `/pending` counts when the request names none: the ones the inbox mod wakes for.
+const WAKING_KINDS: &str = "request,blocking,timer,job";
+
+/// Which addresses on one machine have unread mail that needs a session (Phase 11 piece B), for a
+/// launcher that starts ended sessions. `machine` defaults to the machine the token is keyed
+/// under, so a launcher sees its own machine's mailboxes unless it asks for another. Read-only.
+///
+/// `subscribed` is only "a socket is live now", as a watch holds. A session that polls leaves no
+/// trace here, by design (`read --unread` writes nothing), so it is no liveness verdict.
+async fn pending(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let presented = token_from(&headers, &q);
+    if !st.auth.check(presented.as_deref()) {
+        return unauthorized();
+    }
+    let machine = match q.get("machine").filter(|m| !m.is_empty()) {
+        Some(m) => m.clone(),
+        None => presented.as_deref().and_then(|t| st.auth.machine_for(t)).unwrap_or_default().to_string(),
+    };
+    let kinds: Vec<String> = q
+        .get("kinds")
+        .map(|s| s.as_str())
+        .unwrap_or(WAKING_KINDS)
+        .split(',')
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    let found = st.store.lock().unwrap().waking_on(&machine, &kinds);
+    match found {
+        Ok(rows) => {
+            let addresses: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|w| {
+                    let live = st.hub.is_live(&w.address);
+                    let mut v = serde_json::to_value(w).unwrap_or_default();
+                    v["subscribed"] = serde_json::Value::Bool(live);
+                    v
+                })
+                .collect();
+            Json(serde_json::json!({"schema": 1, "machine": machine, "kinds": kinds, "addresses": addresses}))
+                .into_response()
+        }
+        Err(e) => server_error(e),
+    }
 }
 
 async fn peers(

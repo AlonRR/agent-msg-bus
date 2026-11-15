@@ -328,6 +328,22 @@ impl Client {
         serde_json::from_value(v).map_err(|e| ClientError::Http(e.to_string()))
     }
 
+    /// Which addresses on `machine` (the token's own when `None`) have unread mail of `kinds`
+    /// (comma-separated), as the broker's `/pending` gives it. A broker older than the route answers
+    /// 404, which is said as the version needed rather than passed on as a bare status.
+    pub fn pending(&self, machine: Option<&str>, kinds: &str) -> Result<serde_json::Value, ClientError> {
+        let mut path = format!("/pending?kinds={}", urlencode(kinds));
+        if let Some(m) = machine {
+            path.push_str(&format!("&machine={}", urlencode(m)));
+        }
+        match self.get(&path) {
+            Err(ClientError::Status(404, _)) => Err(ClientError::Http(
+                "this broker has no /pending route: `peers --pending` needs broker 0.4.35 or later".into(),
+            )),
+            other => other,
+        }
+    }
+
     /// The URL a session hands to `Monitor({ws: …})`, for a broker reached over plain http.
     ///
     /// Refused for an https broker. Its `/sub` takes the token in an `Authorization` header, which

@@ -947,6 +947,62 @@ impl Store {
         })?;
         rows.collect()
     }
+
+    /// Each address registered on `machine` with unread mail of one of `kinds`, and what a launcher
+    /// decides on: the session that last registered it, how much is waiting, of which kinds, since
+    /// when, and the newest such id, which a launcher keeps so it starts a session once per message.
+    ///
+    /// Read-only: it moves no cursor and writes no registry row, because a launcher asks on a timer.
+    /// Kinds compare without case. Provisional rows count: an address that can receive is a mailbox
+    /// a launcher may want to open, whether or not it ever subscribed.
+    pub fn waking_on(&self, machine: &str, kinds: &[String]) -> Result<Vec<Waiting>> {
+        let wanted: Vec<String> = kinds.iter().map(|k| k.to_lowercase()).collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT addr, session_id, cwd, registered_at FROM registry
+              WHERE machine = ?1 AND addr NOT IN (SELECT alias FROM aliases) ORDER BY addr",
+        )?;
+        let rows: Vec<(String, String, String, String)> = stmt
+            .query_map(params![machine], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<_>>()?;
+        let mut out = Vec::new();
+        for (addr, session_id, cwd, registered_at) in rows {
+            let waking: Vec<Message> = self
+                .pending_for(&addr)?
+                .into_iter()
+                .filter(|m| wanted.contains(&m.kind.to_lowercase()))
+                .collect();
+            let (Some(oldest), Some(newest)) = (waking.first(), waking.last()) else { continue };
+            let mut found: Vec<String> = waking.iter().map(|m| m.kind.to_lowercase()).collect();
+            found.sort();
+            found.dedup();
+            let given = |s: String| if s.is_empty() { None } else { Some(s) };
+            out.push(Waiting {
+                oldest_ts: oldest.ts.clone(),
+                newest_id: newest.id.clone(),
+                pending: waking.len(),
+                kinds: found,
+                address: addr,
+                session_id: given(session_id),
+                cwd: given(cwd),
+                registered_at: given(registered_at),
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// One address's waking mail, as `waking_on` reports it. An empty stored field is `None`, so a
+/// launcher reads "never registered by a session" as null rather than as an id of "".
+#[derive(Debug, Clone, Serialize)]
+pub struct Waiting {
+    pub address: String,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub registered_at: Option<String>,
+    pub pending: usize,
+    pub kinds: Vec<String>,
+    pub oldest_ts: String,
+    pub newest_id: String,
 }
 
 #[cfg(test)]

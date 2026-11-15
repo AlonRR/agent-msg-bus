@@ -113,6 +113,19 @@ enum Cmd {
         /// Include provisional addresses: rows nothing has registered, mostly left by older brokers.
         #[arg(long)]
         all: bool,
+        /// Instead: the addresses on one machine with unread mail that needs a session, for a
+        /// launcher that starts ended sessions. Read-only. Needs broker 0.4.35 or later.
+        #[arg(long, conflicts_with = "all")]
+        pending: bool,
+        /// With --pending: the machine to list. Default: the machine this client's token is for.
+        #[arg(long, requires = "pending")]
+        machine: Option<String>,
+        /// With --pending: the kinds that count, comma-separated.
+        #[arg(long, requires = "pending", default_value = "request,blocking,timer,job")]
+        kinds: String,
+        /// With --pending: one JSON object, {schema, machine, kinds, addresses}, for a program.
+        #[arg(long, requires = "pending")]
+        json: bool,
     },
     /// Migrate a mailbox: <to> starts answering to <from> and inherits its unread mail.
     ///
@@ -1062,7 +1075,33 @@ fn run_client(cli: &Cli) {
                 }
             })
             .map_err(Into::into),
-        Cmd::Peers { all } => c
+        Cmd::Peers { pending: true, machine, kinds, json, .. } => c
+            .pending(machine.as_deref(), kinds)
+            .map(|v| {
+                if *json {
+                    println!("{v}");
+                    return;
+                }
+                let machine = v["machine"].as_str().unwrap_or("?");
+                let rows = v["addresses"].as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    println!("no address on {machine} has unread mail of {kinds}");
+                }
+                for r in rows {
+                    let kinds: Vec<&str> =
+                        r["kinds"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
+                    println!(
+                        "{:<32} {:>3} waiting ({})  newest {}  session {}",
+                        r["address"].as_str().unwrap_or("?"),
+                        r["pending"],
+                        kinds.join(", "),
+                        r["newest_id"].as_str().unwrap_or("?"),
+                        r["session_id"].as_str().unwrap_or("(none)"),
+                    );
+                }
+            })
+            .map_err(Into::into),
+        Cmd::Peers { all, .. } => c
             .peers(*all)
             .map(|p| {
                 for k in &p.known {

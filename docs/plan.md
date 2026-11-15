@@ -237,6 +237,7 @@ here.
 | `POST /send` | `{to, subject, body, kind, reply_to}` → `{id}` |
 | `POST /ack` | `{addr, up_to_id}` |
 | `GET /peers` | live + known addresses |
+| `GET /pending?machine=…&kinds=…` | added in 0.4.35: one machine's addresses with unread mail of those kinds, `{schema, machine, kinds, addresses: [{address, session_id, cwd, registered_at, pending, kinds, oldest_ts, newest_id, subscribed}]}`; read-only |
 
 **One message per text frame.** Monitor turns each *frame* into one notification, so batching several
 messages into one frame would collapse them into a single event.
@@ -974,7 +975,10 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
    15 Nov 2026.
 3. **The `--every` default for job matches**: proposed 15 minutes, still open.
 4. **Piece B** is the launcher owner's to decide; this repo only supplies the query. The machine's
-   admin session took it on 15 Nov 2026 and put its own questions to the user.
+   admin session took it on 15 Nov 2026 and put its own questions to the user. The query is
+   `peers --pending --json` over a new read-only `GET /pending` route (0.4.35), shaped to what that
+   session asked for. `subscribed` means only a live socket now: a polling session leaves no trace
+   on the broker, so liveness is the launcher's to decide from the machine's own session list.
 5. **Build order:** A, then D, then C, decided by the user on 15 Nov 2026. A and D need no broker
    change, and together they cover a long job waking its session. B's query comes right after A,
    so the launcher is not held up.
