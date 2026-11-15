@@ -846,6 +846,146 @@ types shipped with Claude Code 2.1.296. The bus facts are measured from this rep
     machine after a live trial. Both done 15 Oct 2026: the trial passed in a terminal session, and
     the mod is installed from the git URL pinned to `v0.4.27`.
 
+### Phase 11 — wake on mail, timers a session sets itself, and jobs that report back (proposed 15 Nov 2026)
+
+**Status: a design, nothing built.** Asked for by the user on 15 Nov 2026. The source is a peer
+session's summary of an article on building always-on agents (13 Nov 2026), relayed. That article
+builds such agents from five parts: an event inbox, timers, memory, permissions and an outbox. The
+bus is already the inbox. This phase adds the timers, and makes arriving mail wake a session.
+
+The user's words: sessions should be woken when they have a message on the bus; a session should be
+able to set its own exact wake-up, without Monitor and its 30-minute re-arm; and a program should
+watch long-running tasks and nudge the session that started them when the task prints something
+that matters or finishes. A program rather than a local model, because the triggers are an exit code
+and a pattern. An example is a scraper that runs for several days.
+
+**This reverses one decision of 14 Oct 2026**, "Show only. The mod tells the person and never wakes
+the session". The user's request on 15 Nov 2026 replaces it. The other 14 Oct decisions stand.
+
+#### The idea in one sentence
+
+**Everything that should wake a session becomes a bus message, and the arrival of a message is what
+wakes it.** A timer is a message held until its time. A finished job is a message its watcher sends.
+A wake is then one mechanism, tested once, and the bus stays the only record, as in Phase 10.
+
+#### The four pieces
+
+| Piece | What it does | Where it runs | Wire or storage change |
+|---|---|---|---|
+| **A. Wake a live session on arrival** | When the inbox mod sees a message id it has not woken for, it starts a turn in its own session with a pointer: id, sender, kind, subject, and the `read` and `ack` commands | the mod, in the session | none |
+| **B. Wake an ended session** | Something on the machine notices unread mail for an address with no live session and starts that session | the machine's own session launcher, outside this repo | a broker query listing addresses with unread mail; additive |
+| **C. Timers** | `send --not-before <time>` stores a message the broker holds until then; `remind` is the same, addressed to the sender itself | broker | `not_before` on `/send` and in the store; additive, but see the refusal below |
+| **D. Job watcher** | `agent-msg-bus job run --to <addr> [--match <regex>] -- <command>` runs a command, and sends a message when a line matches or the command ends, with the exit code and the last lines | wherever the task runs | none: it is a client that sends |
+
+#### A. Waking a live session
+
+- **The route is the mod.** The plan already found two ways for a mod to start a turn in its own
+  session: `$.prompt.submit`, documented for background work waking a quiet session, and
+  `$.session.send` to the session's own id (both relayed from the mod API types, 14 Oct 2026). Use
+  `$.prompt.submit`. Neither has been run in a live session.
+- **The mod already polls `read --unread` without a turn** (0.4.27 on), so it already knows when a
+  new message arrives. Waking adds one turn per new message, and none on a clock: it passes Phase 10's
+  rule that no step may reintroduce a recurring cost.
+- **Wake on a new id, never on a count.** A session that reads a message and doesn't ack it would
+  otherwise be woken again on every poll. The mod keeps the ids it has woken for in `$.state`.
+- **Pointer only**, as Phase 10's decision 1: the session reads and acks the record itself.
+- **The kinds that wake are a setting**, the main cost lever. Proposed default: `request`, `blocking`,
+  `timer` and `job` wake; `fyi` shows on the band without a turn.
+- **The autonomy contract is unchanged.** A woken session is reading a peer's or a script's words,
+  which never authorise a consequential action.
+- **Limits:** a session whose mod is not loaded (VS Code without the band, a session that predates the
+  mod) is not woken by this route. Remote Control sessions are unverified, as for the mod generally.
+
+#### B. Waking an ended session
+
+- **This is not the bus's job, and not this repo's code.** Starting a session is a decision about usage
+  and about which folders may be opened without a person. It belongs to the machine's own session
+  launcher and the session that owns it. Phase 10's accepted limit, "an ended session is not woken",
+  stays true of the bus itself.
+- **The bus's part is to answer one question cheaply:** which addresses on this machine have unread
+  mail that wakes (piece A's kinds), and which session last registered each. The registry already
+  records the session id and `cwd`. A new read-only route, or a `peers --pending --json`, gives it.
+- **The launcher's part:** a host timer (not a session's loop, which dies with the session) asks
+  that question, skips addresses with a live session, and starts the rest under its own usage and
+  trust gates. Once the session is started, piece A wakes it, or the start banner shows the mail.
+- **A timer that comes due for an ended session therefore wakes it only if the launcher is set up
+  for that.** Without it, the mail waits for the next start, as today.
+
+#### C. Timers
+
+- **`send --not-before <RFC 3339 time>`.** The broker stores the message as today, with a
+  `not_before` column. `read --unread`, the start banner's count and `/sub` delivery all skip it until
+  it is due. `remind <addr> --at <time> --subject …` is the same thing, addressed to oneself, with kind
+  `timer`.
+- **Self-delivery.** Today a sender is never sent its own message (`src/server.rs`, measured), so a
+  plain self-send would never arrive. A message with a `not_before` is the one exception. Its sender
+  is the session that set it, and the recipient is the same address later.
+- **Due time is compared against the wall clock, never measured with `Instant`.** `Instant` keeps
+  counting while a machine sleeps (*Known limitations*, below). The broker holds the time as UTC
+  text, like `ts`, and compares it with the current time.
+- **Delivery to a live subscriber needs a broker timer**: sleep until the earliest due message, then
+  push it. Re-plan when a new timer arrives, and wake at least once a minute so a clock change cannot
+  strand one. Poll-mode readers, the mod included, need nothing: their next poll sees it.
+- **An older broker must not receive a timer.** It would ignore the unknown field and deliver the
+  message at once, which is silently wrong. So `send --not-before` first checks `/health`, and refuses
+  with a message naming the version needed when the broker is older. The change is additive, so by
+  the rules in `CHANGELOG.md` it is a patch, and this refusal is what makes that safe.
+- **A timer is cancelled by acking it**, like any message. `remind --list` shows one's pending timers.
+  Recurring schedules are not part of this phase: a session that wants another reminder sets the next
+  one when it handles the first.
+
+#### D. The job watcher
+
+- **`job run`** starts a command and stays its parent. It sends one bus message when the command
+  ends (kind `job`, with the exit code or signal, the run time and the last 20 lines), and one per
+  `--match` hit.
+- **A matched line can arrive many times a minute, and each message can be a paid turn.** So matches
+  are batched: at most one message per `--every` interval (proposed default 15 minutes), carrying the
+  count and the newest matched lines. The end-of-job message is never held back.
+- **It has to outlive the session that started it.** A session's background shell is reaped, and its
+  Monitor expires at 30 minutes. So for anything long, `job run` is started under the host's own
+  supervisor (a systemd unit or `systemd-run` on Linux, a scheduled task on Windows), and `job run`
+  itself holds no state the supervisor can't restart.
+- **A task that is already running** gets `job watch --pid <pid>` (send when it ends) or
+  `job watch --file <log> --match <regex>` (send on matching lines). Pid reuse is guarded the way
+  Phase 10 guards it: record the process start time with the pid.
+- **It sends as its own machine.** 0.4.33 binds each token to its own machine's addresses (warn by
+  default, enforce when chosen), so a watcher on another machine sends from that machine's address
+  to the parent's, never as the parent.
+- **Why a program and not a model:** an exit code and a regex decide the same way every time and can
+  be tested. A model handed a log tail produces a fluent summary even when the input is empty or junk,
+  and costs a call per check.
+
+#### Cost
+
+| Situation | Today | This phase |
+|---|---|---|
+| Idle session, no mail | 0 | 0 |
+| A waking message to a live session | 0 turns; the session sees it only when the person looks, or at its next start | 1 turn |
+| An `fyi` | 0 | 0 (band only) |
+| A timer | not possible | 1 turn when due, 0 before |
+| A job that runs for days | a session watching it pays a Monitor re-arm every 30 minutes, or nobody watches | 1 turn at the end, plus at most 1 per `--every` for matches |
+
+#### Decisions before building
+
+1. **Wake route for piece A:** `$.prompt.submit` (recommended) or `$.session.send` to itself. Try
+   both in a lab session first.
+2. **Which kinds wake by default**: proposed `request`, `blocking`, `timer`, `job`.
+3. **The `--every` default for job matches**: proposed 15 minutes.
+4. **Piece B** is the launcher owner's to decide; this repo only supplies the query.
+
+#### Build order — each step one commit, test first
+
+1. **C, broker and store:** the `not_before` column, held delivery, the broker timer, self-delivery
+   for timers, `/health` advertising it. Integration tests drive a real broker with a timer due in a
+   second. **Deploying the broker is the user's action.**
+2. **C, client:** `send --not-before`, `remind`, `remind --list`, the refusal against an older broker.
+3. **D:** `job run` and `job watch`. Tests run a short child process that prints, matches and exits.
+4. **A:** the mod wakes on new ids of the chosen kinds. Mod tests, then a lab-window check, because
+   the test kit does not start real turns.
+5. **B's query:** the pending-addresses route. The launcher change is filed with its owner.
+6. **Docs:** `usage.md`, `operations.md`, the README and the mod's README.
+
 ---
 
 ## Relay supervision on Windows — what actually recovers a dead relay
