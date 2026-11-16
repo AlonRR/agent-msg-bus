@@ -18,10 +18,33 @@ pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 /// Monotonic tiebreaker so two messages minted in the same millisecond still sort deterministically.
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+impl Message {
+    /// Kind `timer`: the one kind delivered to its own sender, so a session's reminder to itself
+    /// arrives. The broker only lets a timer be addressed to its own sender with this kind.
+    pub fn is_reminder(&self) -> bool {
+        self.kind == "timer"
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     pub id: String,
     pub ts: String,
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub subject: String,
+    pub body: String,
+    pub reply_to: String,
+}
+
+/// A message held until `due` (Phase 11 piece C). It becomes an ordinary message, with an id
+/// minted then, when it comes due.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Timer {
+    pub id: String,
+    pub due: String,
+    pub set_at: String,
     pub from: String,
     pub to: String,
     pub kind: String,
@@ -92,6 +115,12 @@ pub fn cursor_refusal(addr: &str, up_to: &str) -> Option<String> {
     if is_message_id(up_to) {
         return None;
     }
+    if is_timer_id(up_to) {
+        return Some(format!(
+            "'{up_to}' is a timer, not a message: it is not in {addr}'s mailbox until it comes due, \
+             so it cannot be acked. To stop it: agent-msg-bus remind <its sender> --cancel {up_to}"
+        ));
+    }
     Some(format!(
         "'{up_to}' is not a message id (expected YYYYMMDDThhmmssmmm-nnnnnnnnn). Refusing to \
          move {addr}'s cursor: a cursor set from a non-id sorts above every real id and \
@@ -118,6 +147,17 @@ pub fn since_refusal(since: &str) -> Option<String> {
          a timestamp sorts below every id this store can hold and would hand back the ENTIRE \
          history while looking like a filtered one."
     ))
+}
+
+/// A held message's id: `t` and then the shape of a message id, so `ack` refuses it.
+pub fn is_timer_id(s: &str) -> bool {
+    s.strip_prefix('t').is_some_and(is_message_id)
+}
+
+/// `2026-11-16T15:00:00.000Z`, the shape of a message's `ts`. A due time is stored in it so that
+/// "is it due" is a text comparison.
+pub fn ts_of(t: time::OffsetDateTime) -> String {
+    mint_at(t).1
 }
 
 pub fn is_message_id(s: &str) -> bool {
@@ -190,6 +230,20 @@ pub struct Store {
     conn: Connection,
 }
 
+fn timer_row(r: &rusqlite::Row) -> rusqlite::Result<Timer> {
+    Ok(Timer {
+        id: r.get(0)?,
+        due: r.get(1)?,
+        set_at: r.get(2)?,
+        from: r.get(3)?,
+        to: r.get(4)?,
+        kind: r.get(5)?,
+        subject: r.get(6)?,
+        body: r.get(7)?,
+        reply_to: r.get(8)?,
+    })
+}
+
 impl Store {
     pub fn open(path: &str) -> Result<Store> {
         let conn = Connection::open(path)?;
@@ -223,6 +277,22 @@ impl Store {
                target TEXT NOT NULL,
                created_at TEXT NOT NULL
              );
+             -- Messages held until a time (Phase 11 piece C). A held message is NOT in `messages`:
+             -- its id there is minted when it comes due, because a cursor means 'everything up to
+             -- this id' and an id minted when the timer was set would be acked away by any later
+             -- message the recipient handled first.
+             CREATE TABLE IF NOT EXISTS timers(
+               id TEXT PRIMARY KEY,
+               due TEXT NOT NULL,
+               set_at TEXT NOT NULL,
+               sender TEXT NOT NULL,
+               recipient TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               subject TEXT NOT NULL,
+               body TEXT NOT NULL,
+               reply_to TEXT NOT NULL DEFAULT ''
+             );
+             CREATE INDEX IF NOT EXISTS timers_due ON timers(due);
              CREATE TABLE IF NOT EXISTS registry(
                addr TEXT PRIMARY KEY,
                session_id TEXT NOT NULL,
@@ -367,6 +437,78 @@ impl Store {
             params![id, ts, m.from, m.to, m.kind, m.subject, m.body, m.reply_to],
         )?;
         Ok(id)
+    }
+
+    /// Hold `m` until `due`, a time in `ts_of` form. Returns the timer's id.
+    pub fn set_timer(&self, m: &NewMessage, due: &str, now: time::OffsetDateTime) -> Result<String> {
+        let (id, set_at) = mint_at(now);
+        let tid = format!("t{id}");
+        self.conn.execute(
+            "INSERT INTO timers(id, due, set_at, sender, recipient, kind, subject, body, reply_to)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![tid, due, set_at, m.from, m.to, m.kind, m.subject, m.body, m.reply_to],
+        )?;
+        Ok(tid)
+    }
+
+    /// Turn every timer due at `now` into an ordinary message, ids minted now, oldest due first.
+    /// One transaction: a timer is either still held or delivered, never both and never neither.
+    pub fn fire_due(&self, now: time::OffsetDateTime) -> Result<Vec<Message>> {
+        let now_ts = ts_of(now);
+        let tx = self.conn.unchecked_transaction()?;
+        let due: Vec<Timer> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, due, set_at, sender, recipient, kind, subject, body, reply_to
+                   FROM timers WHERE due <= ?1 ORDER BY due ASC, id ASC",
+            )?;
+            let rows = stmt.query_map(params![now_ts], timer_row)?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        let mut ids = Vec::new();
+        for t in &due {
+            let newest: Option<String> = tx.query_row("SELECT MAX(id) FROM messages", [], |r| r.get(0))?;
+            let (id, ts) = mint_after(newest.as_deref(), now);
+            tx.execute(
+                "INSERT INTO messages(id, ts, sender, recipient, kind, subject, body, reply_to)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![id, ts, t.from, t.to, t.kind, t.subject, t.body, t.reply_to],
+            )?;
+            tx.execute("DELETE FROM timers WHERE id = ?1", params![t.id])?;
+            ids.push(id);
+        }
+        tx.commit()?;
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(m) = self.by_id(&id)? {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Timers `addr` set, or that are held for it (or for a name it answers to), soonest first.
+    pub fn timers_for(&self, addr: &str) -> Result<Vec<Timer>> {
+        let names = self.names_for(&self.mailbox_of(addr)?)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, due, set_at, sender, recipient, kind, subject, body, reply_to
+               FROM timers ORDER BY due ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], timer_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let t = row?;
+            if t.from == addr || names.iter().any(|n| addr_matches(&t.to, n)) {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Drop a held timer. Only its sender can: a recipient that doesn't want it acks it once it
+    /// arrives, like any message.
+    pub fn cancel_timer(&self, id: &str, sender: &str) -> Result<bool> {
+        let n = self.conn.execute("DELETE FROM timers WHERE id = ?1 AND sender = ?2", params![id, sender])?;
+        Ok(n > 0)
     }
 
     /// Every name `addr` answers to: itself, plus every alias that resolves to it.
@@ -571,7 +713,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, sender, recipient, kind, subject, body, reply_to
                FROM messages
-              WHERE id > ?1 AND sender <> ?2
+              WHERE id > ?1 AND (sender <> ?2 OR kind = 'timer')
               ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![cursor, owner], |r| {
@@ -750,6 +892,15 @@ impl Store {
     /// "Has never joined" and "has traffic" must not be able to be true at once. When they are, the
     /// traffic is the stronger signal.
     pub fn has_traffic(&self, addr: &str) -> Result<bool> {
+        // A timer set by or held for this address: it will be mail, and the address is real.
+        let held: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM timers WHERE sender = ?1 OR recipient = ?1",
+            params![addr],
+            |r| r.get(0),
+        )?;
+        if held > 0 {
+            return Ok(true);
+        }
         let sent: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE sender = ?1",
             params![addr],
@@ -913,7 +1064,11 @@ impl Store {
     /// the sweeper, a second caller added later, therefore stranded mail silently on a 30-minute
     /// timer. Fixing a caller rather than the invariant is what allowed that.
     pub fn retire(&self, addr: &str) -> Result<(bool, usize)> {
-        let stranded = self.pending_owned_by(addr).map(|v| v.len()).unwrap_or(0);
+        let held: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM timers WHERE recipient = ?1", params![addr], |r| r.get(0))
+            .unwrap_or(0);
+        let stranded = self.pending_owned_by(addr).map(|v| v.len()).unwrap_or(0) + held as usize;
         let n = self.conn.execute("DELETE FROM registry WHERE addr = ?1", params![addr])?;
         self.conn.execute("DELETE FROM cursors WHERE addr = ?1", params![addr])?;
         Ok((n > 0, stranded))
@@ -2122,5 +2277,154 @@ mod tests {
             s.ack("machine-a/old", "20260906T093128443-000000365").is_ok(),
             "acking an alias of a live mailbox was refused"
         );
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    //! Timers (Phase 11 piece C): a message held until a time, then delivered like any other.
+    use super::*;
+    use time::Duration as D;
+
+    fn store() -> Store {
+        Store::open(":memory:").unwrap()
+    }
+
+    fn reg(addr: &str) -> Registration {
+        Registration {
+            addr: addr.into(),
+            session_id: format!("sess-{addr}"),
+            machine: "machine-a".into(),
+            repo: "r".into(),
+            cwd: "C:/x".into(),
+            pid: 1,
+            version: "9.9.9-test".into(),
+        }
+    }
+
+    fn msg(from: &str, to: &str, kind: &str, subject: &str) -> NewMessage {
+        NewMessage {
+            from: from.into(),
+            to: to.into(),
+            kind: kind.into(),
+            subject: subject.into(),
+            body: "b".into(),
+            reply_to: String::new(),
+        }
+    }
+
+    fn now() -> time::OffsetDateTime {
+        time::OffsetDateTime::now_utc()
+    }
+
+    #[test]
+    fn a_timer_is_not_mail_until_it_comes_due() {
+        let s = store();
+        s.register(&reg("machine-a/b")).unwrap();
+        let t = now();
+        s.set_timer(&msg("machine-a/a", "machine-a/b", "request", "later"), &ts_of(t + D::hours(1)), t).unwrap();
+        assert!(s.pending_for("machine-a/b").unwrap().is_empty(), "held, not pending");
+        assert!(s.fire_due(t + D::minutes(30)).unwrap().is_empty(), "not due yet");
+        let fired = s.fire_due(t + D::hours(1)).unwrap();
+        assert_eq!(fired.len(), 1);
+        let got = s.pending_for("machine-a/b").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].kind.as_str(), got[0].subject.as_str()), ("request", "later"));
+        assert!(s.fire_due(t + D::hours(2)).unwrap().is_empty(), "fired once only");
+        assert!(s.timers_for("machine-a/a").unwrap().is_empty(), "no longer held");
+    }
+
+    #[test]
+    fn acking_a_later_message_does_not_ack_away_a_held_timer() {
+        // The reason held messages live outside `messages`: a cursor means "everything up to here".
+        let s = store();
+        s.register(&reg("machine-a/b")).unwrap();
+        let t = now();
+        s.set_timer(&msg("machine-a/a", "machine-a/b", "timer", "held"), &ts_of(t + D::hours(1)), t).unwrap();
+        let later = s.send(&msg("machine-a/a", "machine-a/b", "fyi", "sent after the timer was set")).unwrap();
+        s.ack("machine-a/b", &later).unwrap();
+        s.fire_due(t + D::hours(1)).unwrap();
+        let got = s.pending_for("machine-a/b").unwrap();
+        assert_eq!(got.len(), 1, "the timer arrives after the ack: {got:?}");
+        assert_eq!(got[0].subject, "held");
+    }
+
+    #[test]
+    fn a_reminder_reaches_the_address_that_set_it() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        let t = now();
+        s.set_timer(&msg("machine-a/a", "machine-a/a", "timer", "check the scraper"), &ts_of(t), t).unwrap();
+        s.fire_due(t).unwrap();
+        assert_eq!(s.pending_for("machine-a/a").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_ordinary_message_to_oneself_is_still_not_delivered() {
+        let s = store();
+        s.register(&reg("machine-a/a")).unwrap();
+        s.send(&msg("machine-a/a", "machine-a/a", "fyi", "echo")).unwrap();
+        assert!(s.pending_for("machine-a/a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn timers_fire_in_due_order_with_ids_above_every_stored_message() {
+        let s = store();
+        s.register(&reg("machine-a/b")).unwrap();
+        let t = now();
+        s.set_timer(&msg("machine-a/a", "machine-a/b", "timer", "second"), &ts_of(t + D::seconds(2)), t).unwrap();
+        s.set_timer(&msg("machine-a/a", "machine-a/b", "timer", "first"), &ts_of(t + D::seconds(1)), t).unwrap();
+        let newest = s.send(&msg("machine-a/a", "machine-a/b", "fyi", "now")).unwrap();
+        let fired = s.fire_due(t + D::seconds(5)).unwrap();
+        assert_eq!(fired.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+        assert!(fired[0].id > newest && fired[1].id > fired[0].id);
+    }
+
+    #[test]
+    fn only_the_setter_can_cancel_a_timer() {
+        let s = store();
+        let t = now();
+        let id = s.set_timer(&msg("machine-a/a", "machine-a/b", "timer", "x"), &ts_of(t + D::hours(1)), t).unwrap();
+        assert!(!s.cancel_timer(&id, "machine-a/b").unwrap());
+        assert!(s.cancel_timer(&id, "machine-a/a").unwrap());
+        assert!(s.fire_due(t + D::hours(2)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_timer_id_cannot_be_acked_and_the_refusal_names_the_cancel() {
+        let s = store();
+        let t = now();
+        let id = s.set_timer(&msg("machine-a/a", "machine-a/b", "timer", "x"), &ts_of(t + D::hours(1)), t).unwrap();
+        assert!(is_timer_id(&id) && !is_message_id(&id), "{id}");
+        let why = cursor_refusal("machine-a/b", &id).expect("refused");
+        assert!(why.contains("--cancel") && why.contains(&id), "{why}");
+    }
+
+    #[test]
+    fn timers_are_listed_for_their_setter_and_their_recipient() {
+        let s = store();
+        let t = now();
+        s.set_timer(&msg("machine-a/a", "machine-a/b", "timer", "x"), &ts_of(t + D::hours(1)), t).unwrap();
+        assert_eq!(s.timers_for("machine-a/a").unwrap().len(), 1);
+        assert_eq!(s.timers_for("machine-a/b").unwrap().len(), 1);
+        assert!(s.timers_for("machine-a/c").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_address_with_only_a_held_timer_is_not_swept() {
+        let s = store();
+        let t = now();
+        s.set_timer(&msg("machine-a/a", "machine-a/b", "timer", "x"), &ts_of(t + D::hours(1)), t).unwrap();
+        assert!(s.has_traffic("machine-a/a").unwrap());
+        assert!(s.has_traffic("machine-a/b").unwrap());
+        s.register(&reg("machine-a/b")).unwrap();
+        assert_eq!(s.retire("machine-a/b").unwrap(), (true, 1), "the held timer is reported as stranded");
+    }
+
+    #[test]
+    fn the_due_time_has_the_ts_shape_so_text_order_is_time_order() {
+        let t = time::macros::datetime!(2026-11-16 09:05:03.007 UTC);
+        assert_eq!(ts_of(t), "2026-11-16T09:05:03.007Z");
+        assert!(ts_of(t) < ts_of(t + D::milliseconds(1)));
     }
 }

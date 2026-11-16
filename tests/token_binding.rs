@@ -316,3 +316,40 @@ async fn enforced_a_feed_of_another_machines_pending_mail_is_refused() {
     let mine = format!("{ws}/pending/sub?token={TOKEN_A}"); // secret-gate: allow
     assert!(tokio_tungstenite::connect_async(mine).await.is_ok(), "its own machine's feed was refused");
 }
+
+// ---- timers (Phase 11 piece C) ------------------------------------------------------------------
+
+/// Setting a timer acts for its sender, like `/send`.
+#[tokio::test(flavor = "multi_thread")]
+async fn enforced_a_timer_under_another_machines_name_is_refused_and_not_held() {
+    let r = rig(Some(Binding::Enforce)).await;
+    let body = serde_json::json!({
+        "from": "machine-b/impostor", "to": "machine-a/x", "kind": "timer",
+        "subject": "s", "in_secs": 3600
+    });
+    let (c, v) = post(&r, TOKEN_A, "/timer", body).await;
+    assert_eq!(c, 403, "{v}");
+    assert!(names_both(&v, "error"), "{v}");
+    let base = r.base.clone();
+    let held = blocking(move || Client::new(&base, TOKEN_A).timers("machine-a/x").unwrap()).await;
+    assert!(held.is_empty(), "a refused timer was held: {held:?}");
+}
+
+/// Cancelling acts for the address that set the timer.
+#[tokio::test(flavor = "multi_thread")]
+async fn enforced_cancelling_another_machines_timer_is_refused_and_it_stays() {
+    let r = rig(Some(Binding::Enforce)).await;
+    let body = serde_json::json!({
+        "from": "machine-b/setter", "to": "machine-b/setter", "kind": "timer",
+        "subject": "s", "in_secs": 3600
+    });
+    let (c, v) = post(&r, TOKEN_B, "/timer", body).await;
+    assert_eq!(c, 200, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    let (c, v) =
+        post(&r, TOKEN_A, "/timer/cancel", serde_json::json!({"addr": "machine-b/setter", "id": id})).await;
+    assert_eq!(c, 403, "{v}");
+    let base = r.base.clone();
+    let held = blocking(move || Client::new(&base, TOKEN_B).timers("machine-b/setter").unwrap()).await;
+    assert_eq!(held.len(), 1, "the timer must still be held");
+}

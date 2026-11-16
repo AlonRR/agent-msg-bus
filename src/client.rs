@@ -39,6 +39,20 @@ impl std::fmt::Display for ClientError {
     }
 }
 
+/// A timer route's answer, with an older broker's 404 said in words. The broker's own 404 (a
+/// timer that is not held) carries a JSON error and passes through; a route that does not exist
+/// answers with no body.
+fn timers_route(
+    r: Result<serde_json::Value, ClientError>,
+) -> Result<serde_json::Value, ClientError> {
+    match r {
+        Err(ClientError::Status(404, body)) if !body.contains("error") => Err(ClientError::Http(
+            "this broker has no timers: `send --at/--in` and `remind` need broker 0.4.37 or later".into(),
+        )),
+        other => other,
+    }
+}
+
 /// Was this a deadline expiring, rather than a refusal or a broken connection? ureq reports a
 /// timeout as an I/O error somewhere in the source chain, so walk it.
 fn is_timeout(e: &(dyn std::error::Error + 'static)) -> bool {
@@ -342,6 +356,45 @@ impl Client {
             )),
             other => other,
         }
+    }
+
+    /// Hold a message until `at` (an RFC 3339 time with its zone) or `in_secs` from now on the
+    /// broker's clock. Returns the timer's id and when it is due.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_timer(
+        &self,
+        from: &str,
+        to: &str,
+        kind: &str,
+        subject: &str,
+        body: &str,
+        reply_to: &str,
+        at: Option<&str>,
+        in_secs: Option<u64>,
+    ) -> Result<(String, String), ClientError> {
+        let v = self.post(
+            "/timer",
+            serde_json::json!({
+                "from": from, "to": to, "kind": kind, "subject": subject, "body": body,
+                "reply_to": reply_to, "at": at, "in_secs": in_secs
+            }),
+        );
+        let v = timers_route(v)?;
+        let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        Ok((field("id"), field("due")))
+    }
+
+    /// Timers `addr` set, or that are held for it, soonest first.
+    pub fn timers(&self, addr: &str) -> Result<Vec<crate::store::Timer>, ClientError> {
+        let v = timers_route(self.get(&format!("/timers?addr={}", urlencode(addr))))?;
+        serde_json::from_value(v.get("timers").cloned().unwrap_or_default())
+            .map_err(|e| ClientError::Http(e.to_string()))
+    }
+
+    /// Drop a timer `addr` set.
+    pub fn cancel_timer(&self, addr: &str, id: &str) -> Result<(), ClientError> {
+        timers_route(self.post("/timer/cancel", serde_json::json!({"addr": addr, "id": id})))?;
+        Ok(())
     }
 
     /// The URL a session hands to `Monitor({ws: …})`, for a broker reached over plain http.

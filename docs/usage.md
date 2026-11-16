@@ -52,6 +52,8 @@ agent-msg-bus peers --pending --json  # this machine's addresses with mail needi
 agent-msg-bus watch --pending         # the same as a live feed: {address, id, kind, ts} per message (0.4.35+)
 agent-msg-bus job run --to <me> -- <command>  # run it; mail <me> when it ends (0.4.37+)
 agent-msg-bus job watch --to <me> --pid <pid> [--file <log>]  # the same for one already running
+agent-msg-bus remind <me> --in 2h --subject "check the scraper"  # a message to yourself, later (broker 0.4.37+)
+agent-msg-bus send ... --at 2026-11-17T09:00:00+02:00   # any message, held until then (or --in 30m)
 agent-msg-bus send --from <me> --to <them> --kind fyi|request|blocking \
                    --subject "..." --body-file <path>
 agent-msg-bus ack <me> <last-message-id>
@@ -354,6 +356,32 @@ agent-msg-bus job run --to <me> --name scrape --match 'ERROR|captcha' --every 30
   until stopped and sends matches only.
 - **Patterns** use the `regex-lite` syntax: the usual operators and ASCII classes such as `\d` and
   `\w`, without Unicode classes.
+
+## Reminders and delayed messages
+
+The broker can hold a message until a time and then deliver it like any other. The inbox mod wakes
+a session for kind `timer` by default, so a session can set its own wake-up without a Monitor.
+
+```bash
+agent-msg-bus remind <me> --in 2h --subject "check the scraper's progress"
+agent-msg-bus remind <me> --at 2026-11-17T09:00:00+02:00 --subject "..." --body-file notes.md
+agent-msg-bus send --from <me> --to <them> --kind request --subject "..." --in 1d
+agent-msg-bus remind <me> --list            # timers <me> set or is waiting for
+agent-msg-bus remind <me> --cancel <timer id>
+```
+
+- **`remind`** is a message of kind `timer` from an address to itself: the one message an address is
+  ever delivered from itself. A delayed `send` to yourself must be kind `timer` too, and the broker
+  refuses anything else rather than hold it and drop it.
+- **Times name their zone.** `--at` takes `2026-11-17T09:00:00Z` or `…+02:00`; a time without one is
+  refused, as is one already past, or one more than 400 days ahead. `--in` takes `30s`, `10m`, `2h`
+  or `1d`, counted on the broker's clock.
+- **A timer is not mail until it is due.** It does not show in `read --unread` or the start banner
+  before then, and it cannot be acked: `ack` refuses its id (it starts with `t`) and names the
+  cancel. Only the address that set it can cancel it.
+- **It prints the timer's id** on stdout, and on stderr when it is due and how to cancel it.
+- **Repeating reminders** are not built in: set the next one when you handle the current one.
+- **Needs broker 0.4.37 or later.** An older broker answers 404, and the client says so.
 
 ---
 

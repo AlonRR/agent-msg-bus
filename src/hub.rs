@@ -80,7 +80,7 @@ impl Hub {
                 continue;
             }
             for (addr, machine) in reached {
-                if machine != &feed.machine || addr == &msg.from {
+                if machine != &feed.machine || (addr == &msg.from && !msg.is_reminder()) {
                     continue;
                 }
                 let _ = feed.tx.send(serde_json::json!({
@@ -153,7 +153,8 @@ impl Hub {
         let conns = self.conns.lock().unwrap();
         let mut sent = 0;
         for addr in targets {
-            if addr == &msg.from {
+            // A sender is never pushed its own message, except a reminder it set for itself.
+            if addr == &msg.from && !msg.is_reminder() {
                 continue;
             }
             if let Some((_, tx)) = conns.get(addr) {

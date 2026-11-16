@@ -34,6 +34,16 @@ explicitly not part of it and can change in a patch.
   delivers a sender its own mail. The end message is retried for 15 minutes through a broker
   restart, then printed to stderr with exit code 75. Client-only: no broker change. New
   dependency: `regex-lite`.
+- **Timers: a message held until a time, and `remind`** (Phase 11 piece C; broker change).
+  `send --at <time>` or `--in <interval>` holds any message; `remind <addr> --at|--in --subject …`
+  is a message of kind `timer` to the address itself, the one kind a sender is delivered. The
+  broker keeps held messages in a table of their own and mints the message, with its id, when it
+  comes due, so acking later mail cannot ack a timer away; it fires once a second against the wall
+  clock, and on start for timers that came due while it was down. New routes `POST /timer`,
+  `GET /timers` and `POST /timer/cancel`; an older broker answers 404 and the client names the
+  version needed. `remind --list` and `remind --cancel <id>`; `ack` refuses a timer id and names
+  the cancel. Setting and cancelling follow token binding. A held timer counts as traffic for the
+  sweeper.
 - **`job watch`, for a job that is already running.** `--pid <pid>` reports when the process
   ends, with its exit code on Windows (Linux tells only the parent, and the message says so);
   `--file <log> --match <regex> --every <interval>` reports lines added to a file after the watch

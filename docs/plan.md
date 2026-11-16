@@ -238,6 +238,9 @@ here.
 | `POST /ack` | `{addr, up_to_id}` |
 | `GET /peers` | live + known addresses |
 | `GET /pending/sub?machine=…&kinds=…` | added in 0.4.35: WebSocket, one text frame per new message of those kinds and registered address reached on the machine, `{address, id, kind, ts}`; no replay; claims no address and consumes nothing |
+| `POST /timer` | added in 0.4.37: `{from, to, kind, subject, body, reply_to, at \| in_secs}` → `{id, due}`; holds the message until `due`, then delivers it as `/send` would. `at` is RFC 3339 with its zone; `in_secs` counts on the broker's clock. A timer to its own sender must be kind `timer` |
+| `GET /timers?addr=…` | added in 0.4.37: `{addr, timers: [{id, due, set_at, from, to, kind, subject, body, reply_to}]}`, the timers `addr` set or is held for; read-only |
+| `POST /timer/cancel` | added in 0.4.37: `{addr, id}`; only the address that set it; 404 when it is not held |
 | `GET /pending?machine=…&kinds=…` | added in 0.4.35: one machine's addresses with unread mail of those kinds, `{schema, machine, kinds, addresses: [{address, session_id, cwd, registered_at, pending, kinds, oldest_ts, newest_id, subscribed}]}`; read-only |
 
 **One message per text frame.** Monitor turns each *frame* into one notification, so batching several
@@ -851,8 +854,8 @@ types shipped with Claude Code 2.1.296. The bus facts are measured from this rep
 ### Phase 11 — wake on mail, timers a session sets itself, and jobs that report back (proposed 15 Nov 2026)
 
 **Status (16 Nov 2026): A built** (mod 0.3.0, released in 0.4.35), **B's query and feed built**
-(0.4.35; bound by token binding in 0.4.36), **D built**: `job run` and `job watch` (not yet
-released); C not built. Asked for by the user on 15 Nov 2026. The source is a peer
+(0.4.35; bound by token binding in 0.4.36), **D built**: `job run` and `job watch`, and **C
+built**: timers and `remind` (neither released yet; C needs a broker upgrade). Asked for by the user on 15 Nov 2026. The source is a peer
 session's summary of an article on building always-on agents (13 Nov 2026), relayed. That article
 builds such agents from five parts: an event inbox, timers, memory, permissions and an outbox. The
 bus is already the inbox. This phase adds the timers, and makes arriving mail wake a session.
@@ -917,26 +920,43 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
 
 #### C. Timers
 
-- **`send --not-before <RFC 3339 time>`.** The broker stores the message as today, with a
-  `not_before` column. `read --unread`, the start banner's count and `/sub` delivery all skip it until
-  it is due. `remind <addr> --at <time> --subject …` is the same thing, addressed to oneself, with kind
-  `timer`.
-- **Self-delivery.** Today a sender is never sent its own message (`src/server.rs`, measured), so a
-  plain self-send would never arrive. A message with a `not_before` is the one exception. Its sender
-  is the session that set it, and the recipient is the same address later.
+*As built (16 Nov 2026); the first design is corrected below where building it showed it wrong.*
+
+- **`send --at <time>` or `send --in <interval>`, and `remind <addr> --at|--in --subject …`**, which is
+  the same addressed to oneself with kind `timer`. A time names its zone (`2026-11-16T15:00:00Z`,
+  `…+02:00`); an interval counts on the broker's clock, not the client's.
+- **A held message is not in the messages table; it has a table of its own.** The first design put a
+  `not_before` column on stored messages. That fails: a message's id is minted when it is stored,
+  and a cursor means "everything up to this id", so acking any later message would have acked a held
+  timer away before it was ever delivered. A timer gets an id of its own (`t` and the shape of a
+  message id), and becomes an ordinary message, with an id minted then, when it comes due. Firing
+  moves it in one transaction.
+- **Self-delivery.** A sender is never sent its own message (`src/store.rs` `pending_for`,
+  `src/hub.rs`). Kind `timer` is the one exception, on every path: unread mail, a live socket,
+  `/pending` and its feed. A timer to its own sender with any other kind is refused when it is set,
+  rather than held and then silently dropped.
 - **Due time is compared against the wall clock, never measured with `Instant`.** `Instant` keeps
   counting while a machine sleeps (*Known limitations*, below). The broker holds the time as UTC
   text, like `ts`, and compares it with the current time.
-- **Delivery to a live subscriber needs a broker timer**: sleep until the earliest due message, then
-  push it. Re-plan when a new timer arrives, and wake at least once a minute so a clock change cannot
-  strand one. Poll-mode readers, the mod included, need nothing: their next poll sees it.
-- **An older broker must not receive a timer.** It would ignore the unknown field and deliver the
-  message at once, which is silently wrong. So `send --not-before` first checks `/health`, and refuses
-  with a message naming the version needed when the broker is older. The change is additive, so by
-  the rules in `CHANGELOG.md` it is a patch, and this refusal is what makes that safe.
-- **A timer is cancelled by acking it**, like any message. `remind --list` shows one's pending timers.
-  Recurring schedules are not part of this phase: a session that wants another reminder sets the next
-  one when it handles the first.
+- **The broker looks once a second** (`server::start_timers`, started by `serve`), comparing due
+  times with the wall clock as text in the `ts` shape. Simpler than sleeping until the earliest due
+  time, and no worse: a timer fires within a second, and a clock step or a sleeping host changes
+  nothing. Its first look is at start, so timers that came due while the broker was down fire then.
+  A due timer is delivered through the same function as `/send`, so a live socket, an alias and the
+  waking-mail feed all see it as a message sent then.
+- **An older broker must not receive a timer.** The first design checked `/health` before sending a
+  `not_before` field that an older broker would ignore, delivering at once. Timers have routes of
+  their own instead (`POST /timer`, `GET /timers`, `POST /timer/cancel`), which an older broker
+  answers with 404; the client says which version is needed. Additive, so a patch.
+- **A timer is cancelled with `remind <setter> --cancel <id>`, not by acking it**: it is not in a
+  mailbox until it is due, and `ack` refuses a timer id with a message naming the cancel. Only the
+  address that set it can cancel it (token binding covers the address). `remind <addr> --list` shows
+  the timers an address set or is held for. Recurring schedules are not part of this phase: a session
+  that wants another reminder sets the next one when it handles the first.
+- **Limits.** At most 400 days ahead, and an `at` more than a minute in the past is refused; both are
+  guards against a year or a zone written wrong. A held timer counts as traffic, so the sweeper keeps
+  its addresses, and `forget` reports it among what it strands. A downgrade to a broker older than
+  0.4.37 leaves the timers table in place and never fires it: `docs/operations.md` says so.
 
 #### D. The job watcher
 

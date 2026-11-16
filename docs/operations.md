@@ -282,6 +282,10 @@ It stops at the first step that fails:
 | `1` | Refused before anything changed, or rolled back with the old build healthy again. |
 | `2` | Rolled back, but `/health` does not answer. A person has to look. |
 
+> ⚠️ **A rollback to a broker older than 0.4.37 holds timers for ever.** The `timers` table stays in
+> the database, and an older broker neither fires nor lists it. Roll forward again and they fire at
+> once, overdue ones included.
+
 > ⚠️ **A rollback restores the binary, not the database.** The new build may already have written to
 > it, and restoring the copy would drop whatever it accepted. On exit `2` the script prints the
 > restore command instead. That command deletes `bus.db-wal` and `bus.db-shm` before copying the

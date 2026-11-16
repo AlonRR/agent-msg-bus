@@ -118,6 +118,9 @@ pub fn app(state: AppState) -> Router {
         .route("/orphans/delete", post(delete_orphan))
         .route("/prune", post(prune))
         .route("/sub", get(sub))
+        .route("/timer", post(set_timer))
+        .route("/timers", get(timers))
+        .route("/timer/cancel", post(cancel_timer))
         .with_state(state)
 }
 
@@ -295,32 +298,7 @@ async fn send(
             Err(e) => return server_error(e),
         }
     };
-
-    // Which live sockets should be pushed to? Not simply the ones whose own address matches `to`:
-    // after a migration the successor's socket holds the NEW name while the message is addressed to
-    // a name it inherited, so the match has to be made against every name the mailbox answers to.
-    // See `Hub::deliver_to` for what the narrower version cost.
-    let targets: Vec<String> = {
-        let live = st.hub.live();
-        let store = st.store.lock().unwrap();
-        live.into_iter()
-            .filter(|addr| {
-                store
-                    .names_for(addr)
-                    .map(|names| {
-                        names.iter().any(|n| crate::store::addr_matches(&stored.to, n))
-                    })
-                    .unwrap_or(false)
-            })
-            .collect()
-    };
-    let pushed = st.hub.deliver_to(&stored, &targets);
-    // The waking-mail feeds: every registered mailbox the message reached, live or not, since a
-    // launcher wants exactly the ones with nobody there. Worked out only while a feed is held.
-    if st.hub.has_feeds() {
-        let reached = st.store.lock().unwrap().reached_by(&stored.to).unwrap_or_default();
-        st.hub.notify_feeds(&stored, &reached);
-    }
+    let pushed = deliver(&st, &stored);
 
     // `pushed_to: 0` is ambiguous, and it is the only number a sender sees. It means "nobody live
     // matched", which covers three very different situations: the recipient is offline and the
@@ -361,6 +339,212 @@ async fn send(
         }),
         warning,
     )
+}
+
+/// Push a stored message to the live sockets it reaches, and tell the waking-mail feeds. Shared by
+/// `/send` and a firing timer, so a timer is delivered exactly as a message sent then would be.
+fn deliver(st: &AppState, stored: &Message) -> usize {
+    // Which live sockets should be pushed to? Not simply the ones whose own address matches `to`:
+    // after a migration the successor's socket holds the NEW name while the message is addressed to
+    // a name it inherited, so the match has to be made against every name the mailbox answers to.
+    // See `Hub::deliver_to` for what the narrower version cost.
+    let targets: Vec<String> = {
+        let live = st.hub.live();
+        let store = st.store.lock().unwrap();
+        live.into_iter()
+            .filter(|addr| {
+                store
+                    .names_for(addr)
+                    .map(|names| {
+                        names.iter().any(|n| crate::store::addr_matches(&stored.to, n))
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+    };
+    let pushed = st.hub.deliver_to(stored, &targets);
+    // The waking-mail feeds: every registered mailbox the message reached, live or not, since a
+    // launcher wants exactly the ones with nobody there. Worked out only while a feed is held.
+    if st.hub.has_feeds() {
+        let reached = st.store.lock().unwrap().reached_by(&stored.to).unwrap_or_default();
+        st.hub.notify_feeds(stored, &reached);
+    }
+    pushed
+}
+
+// ---- timers (Phase 11 piece C) ----------------------------------------------
+
+/// Delivers held timers as they come due: a task that looks once a second, against the wall
+/// clock, so a machine that slept or had its clock stepped still fires what is due when it wakes.
+/// The first look is at once, so timers that came due while the broker was down fire on start.
+///
+/// `serve` starts it. A broker without it holds timers for ever and still answers `/health`, which
+/// is why a test drives it through the real binary.
+pub fn start_timers(st: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            fire_timers(&st, time::OffsetDateTime::now_utc());
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+}
+
+/// Fires every timer due at `now` and delivers it as `/send` would. Returns how many fired.
+pub fn fire_timers(st: &AppState, now: time::OffsetDateTime) -> usize {
+    let fired = match st.store.lock().unwrap().fire_due(now) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("agent-msg-bus: timers: {e}");
+            return 0;
+        }
+    };
+    for m in &fired {
+        deliver(st, m);
+    }
+    fired.len()
+}
+
+/// The longest a timer can be set ahead. A guard against a mistyped year, not a policy.
+const TIMER_MAX_AHEAD: time::Duration = time::Duration::days(400);
+
+/// When a timer set at `now` comes due: `at`, an RFC 3339 time that names its zone, or `in_secs`
+/// from now on the broker's clock. Exactly one. A time more than a minute past is refused, since
+/// it is most likely a time zone written wrong; one more than 400 days ahead, since it is most
+/// likely a year written wrong.
+pub fn due_at(
+    at: Option<&str>,
+    in_secs: Option<u64>,
+    now: time::OffsetDateTime,
+) -> Result<time::OffsetDateTime, String> {
+    let due = match (at, in_secs) {
+        (Some(a), None) => {
+            let t = time::OffsetDateTime::parse(a, &time::format_description::well_known::Rfc3339)
+                .map_err(|e| {
+                    format!(
+                        "`{a}` is not a time with its zone, like 2026-11-16T15:00:00Z or \
+                         2026-11-16T17:00:00+02:00 ({e})"
+                    )
+                })?
+                .to_offset(time::UtcOffset::UTC);
+            if t < now - time::Duration::minutes(1) {
+                return Err(format!("`{a}` is in the past (the broker's clock says {})", crate::store::ts_of(now)));
+            }
+            t
+        }
+        (None, Some(s)) => {
+            let secs = i64::try_from(s).unwrap_or(i64::MAX).min(TIMER_MAX_AHEAD.whole_seconds() + 1);
+            now + time::Duration::seconds(secs)
+        }
+        _ => return Err("give exactly one of `at` and `in_secs`".into()),
+    };
+    if due > now + TIMER_MAX_AHEAD {
+        return Err("that is more than 400 days ahead; check the year".into());
+    }
+    Ok(due)
+}
+
+#[derive(Deserialize)]
+pub struct TimerBody {
+    pub from: String,
+    pub to: String,
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    pub subject: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub reply_to: String,
+    #[serde(default)]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub in_secs: Option<u64>,
+}
+
+/// Hold a message until a time. A route of its own rather than a field on `/send`: a broker that
+/// predates timers answers 404 here, where it would ignore an unknown field on `/send` and deliver
+/// at once, which is silently wrong.
+async fn set_timer(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(b): Json<TimerBody>,
+) -> Response {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
+        return unauthorized();
+    }
+    let warning = match bind(&st, bearer.as_deref(), "timer", &[&b.from]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
+    let now = time::OffsetDateTime::now_utc();
+    let due = match due_at(b.at.as_deref(), b.in_secs, now) {
+        Ok(t) => t,
+        Err(why) => return bad_request(&why),
+    };
+    let kind = if b.kind.eq_ignore_ascii_case("timer") { "timer".to_string() } else { b.kind };
+    // A sender never receives its own mail, except a reminder: kind `timer`. Refused here rather
+    // than held and then silently dropped when it comes due.
+    if b.to == b.from && kind != "timer" {
+        return bad_request(&format!(
+            "a timer addressed to its own sender must have kind `timer` (it has `{kind}`): a sender \
+             is never delivered its own mail, and a reminder is the one exception"
+        ));
+    }
+    let nm = NewMessage { from: b.from, to: b.to, kind, subject: b.subject, body: b.body, reply_to: b.reply_to };
+    let due_ts = crate::store::ts_of(due);
+    match st.store.lock().unwrap().set_timer(&nm, &due_ts, now) {
+        Ok(id) => reply(serde_json::json!({"id": id, "due": due_ts}), warning),
+        Err(e) => server_error(e),
+    }
+}
+
+/// Timers an address set, or that are held for it. A read, unbound like `/messages`.
+async fn timers(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !st.auth.check(token_from(&headers, &q).as_deref()) {
+        return unauthorized();
+    }
+    let Some(addr) = q.get("addr") else { return bad_request("addr is required") };
+    match st.store.lock().unwrap().timers_for(addr) {
+        Ok(t) => Json(serde_json::json!({"addr": addr, "timers": t})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CancelTimerBody {
+    /// The address that set the timer.
+    pub addr: String,
+    pub id: String,
+}
+
+/// Drop a held timer. Only by the address that set it, which the token binding covers.
+async fn cancel_timer(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(b): Json<CancelTimerBody>,
+) -> Response {
+    let bearer = token_from(&headers, &q);
+    if !st.auth.check(bearer.as_deref()) {
+        return unauthorized();
+    }
+    let warning = match bind(&st, bearer.as_deref(), "timer/cancel", &[&b.addr]) {
+        Ok(w) => w,
+        Err(why) => return forbidden(&why),
+    };
+    match st.store.lock().unwrap().cancel_timer(&b.id, &b.addr) {
+        Ok(true) => reply(serde_json::json!({"cancelled": b.id}), warning),
+        Ok(false) => not_found(&format!(
+            "no held timer {} set by {}: it may have fired already, or another address set it",
+            b.id, b.addr
+        )),
+        Err(e) => server_error(e),
+    }
 }
 
 #[derive(Deserialize)]

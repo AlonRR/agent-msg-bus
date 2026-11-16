@@ -105,6 +105,38 @@ enum Cmd {
         body_file: Option<String>,
         #[arg(long, default_value = "")]
         reply_to: String,
+        /// Hold the message until this time, written with its zone: 2026-11-16T15:00:00Z or
+        /// 2026-11-16T17:00:00+02:00. Prints the timer's id. Needs broker 0.4.37 or later.
+        #[arg(long, conflicts_with = "in_")]
+        at: Option<String>,
+        /// Hold the message for this long (30s, 10m, 2h, 1d), counted on the broker's clock.
+        #[arg(long = "in", id = "in_", value_name = "INTERVAL")]
+        in_: Option<String>,
+    },
+    /// Set a reminder: a message of kind `timer` to ADDR, from ADDR, delivered at a time. The one
+    /// message an address is ever delivered from itself. Needs broker 0.4.37 or later.
+    ///
+    /// `remind <me> --in 2h --subject "check the scraper"`; `--list` shows the timers ADDR set or
+    /// is waiting for; `--cancel <id>` drops one it set. A timer is not mail until it is due, so it
+    /// cannot be acked before then.
+    #[command(group(clap::ArgGroup::new("what").args(["at", "in_", "list", "cancel"]).required(true)))]
+    Remind {
+        addr: String,
+        #[arg(long)]
+        at: Option<String>,
+        #[arg(long = "in", id = "in_", value_name = "INTERVAL")]
+        in_: Option<String>,
+        #[arg(long, required_unless_present_any = ["list", "cancel"])]
+        subject: Option<String>,
+        #[arg(long, default_value = "")]
+        body: String,
+        /// Read the body from a file, or from stdin with `-`.
+        #[arg(long)]
+        body_file: Option<String>,
+        #[arg(long)]
+        list: bool,
+        #[arg(long, value_name = "TIMER_ID")]
+        cancel: Option<String>,
     },
     /// Confirm messages up to and including this id have been handled.
     Ack { addr: String, up_to_id: String },
@@ -1048,6 +1080,8 @@ async fn serve(
     if sweep_minutes > 0 {
         agent_msg_bus::server::spawn_sweeper(state.clone(), sweep_minutes, provisional_hours);
     }
+    // Timers: without this task a broker holds them for ever while answering /health.
+    agent_msg_bus::server::start_timers(state.clone());
 
     let listener = match tokio::net::TcpListener::bind(listen).await {
         Ok(l) => l,
@@ -1057,6 +1091,7 @@ async fn serve(
         }
     };
     println!("agent-msg-bus listening on {listen}, db {db}");
+    println!("timers: delivering held messages as they come due, checked every second");
     if sweep_minutes > 0 {
         println!("sweeping provisional registrations older than {provisional_hours}h every {sweep_minutes}m");
     } else {
@@ -1076,6 +1111,49 @@ async fn serve(
     }
 }
 
+/// The end of a client command: an error is printed and exits 1.
+fn report(result: Result<(), Box<dyn std::error::Error>>) {
+    if let Err(e) = result {
+        eprintln!("agent-msg-bus: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// A message body: `--body`, or `--body-file` (`-` for stdin).
+fn read_body(body: &str, body_file: Option<&str>) -> String {
+    match body_file {
+        Some("-") => {
+            let mut s = String::new();
+            match std::io::Read::read_to_string(&mut std::io::stdin(), &mut s) {
+                Ok(_) => s,
+                Err(e) => {
+                    eprintln!("agent-msg-bus: cannot read body from stdin: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(p) => match std::fs::read_to_string(p) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("agent-msg-bus: cannot read body file {p}: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => body.to_string(),
+    }
+}
+
+/// `--in`'s interval in seconds, or exit 2 naming the problem.
+fn interval_secs(s: &str) -> u64 {
+    match agent_msg_bus::job::parse_interval(s) {
+        Ok(d) => d.as_secs(),
+        Err(why) => {
+            eprintln!("agent-msg-bus: --in {why}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn run_client(cli: &Cli) {
     let (url, token, ca_file) = resolve_conn(cli);
     let c = cli_client(&url, &token, &ca_file);
@@ -1084,27 +1162,18 @@ fn run_client(cli: &Cli) {
             .register(addr, session_id, machine, repo, cwd, *pid)
             .map(|_| println!("registered {addr}"))
             .map_err(Into::into),
-        Cmd::Send { from, to, kind, subject, body, body_file, reply_to } => {
-            let resolved = match body_file.as_deref() {
-                Some("-") => {
-                    let mut s = String::new();
-                    match std::io::Read::read_to_string(&mut std::io::stdin(), &mut s) {
-                        Ok(_) => s,
-                        Err(e) => {
-                            eprintln!("agent-msg-bus: cannot read body from stdin: {e}");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                Some(p) => match std::fs::read_to_string(p) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("agent-msg-bus: cannot read body file {p}: {e}");
-                        std::process::exit(1);
-                    }
-                },
-                None => body.clone(),
-            };
+        Cmd::Send { from, to, kind, subject, body, body_file, reply_to, at, in_ } => {
+            let resolved = read_body(body, body_file.as_deref());
+            if at.is_some() || in_.is_some() {
+                let in_secs = in_.as_deref().map(interval_secs);
+                return report(c
+                    .set_timer(from, to, kind, subject, &resolved, reply_to, at.as_deref(), in_secs)
+                    .map(|(id, due)| {
+                        println!("{id}");
+                        eprintln!("held {id} until {due}: {from} -> {to}. Cancel with: agent-msg-bus remind {from} --cancel {id}");
+                    })
+                    .map_err(Into::into));
+            }
             // Warn, never refuse: an unknown `--to` already only warns, three sessions are live on
             // this bus, and a send that starts rejecting mid-flight is a worse failure than the one
             // being fixed. The cost of a bad `--from` is not this message - it is every reply to it.
@@ -1128,6 +1197,32 @@ fn run_client(cli: &Cli) {
                     eprintln!("{}", send_confirmation(&id, from, to));
                 })
                 .map_err(Into::into)
+        }
+        Cmd::Remind { addr, at, in_, subject, body, body_file, list, cancel } => {
+            if *list {
+                c.timers(addr)
+                    .map(|ts| {
+                        if ts.is_empty() {
+                            println!("no timers set by or held for {addr}");
+                        }
+                        for t in ts {
+                            println!("{}  due {}  {} -> {}  [{}]  {}", t.id, t.due, t.from, t.to, t.kind, t.subject);
+                        }
+                    })
+                    .map_err(Into::into)
+            } else if let Some(id) = cancel {
+                c.cancel_timer(addr, id).map(|_| println!("cancelled {id}")).map_err(Into::into)
+            } else {
+                let resolved = read_body(body, body_file.as_deref());
+                let subject = subject.as_deref().unwrap_or_default();
+                let in_secs = in_.as_deref().map(interval_secs);
+                c.set_timer(addr, addr, "timer", subject, &resolved, "", at.as_deref(), in_secs)
+                    .map(|(id, due)| {
+                        println!("{id}");
+                        eprintln!("reminder {id} for {addr} at {due}. Cancel with: agent-msg-bus remind {addr} --cancel {id}");
+                    })
+                    .map_err(Into::into)
+            }
         }
         Cmd::Ack { addr, up_to_id } => {
             c.ack(addr, up_to_id).map(|_| println!("acked {addr} up to {up_to_id}")).map_err(Into::into)
