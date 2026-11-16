@@ -305,6 +305,116 @@ enum Cmd {
         #[arg(long)]
         fallback: Option<String>,
     },
+    /// Run a command and report on it to a session as bus mail: when it ends, and when it prints
+    /// a line you asked about.
+    Job {
+        #[command(subcommand)]
+        cmd: JobCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobCmd {
+    /// Run COMMAND and send TO a message of kind `job` when it ends: how it ended, the run time and
+    /// the last lines of output. Exits with the command's own code.
+    ///
+    /// For a job that runs longer than the session, start this under the machine's own supervisor
+    /// (a systemd unit or `systemd-run`, a scheduled task), not a session's background shell,
+    /// which is reaped. The output still reaches this process's stdout and stderr, so the
+    /// supervisor's log keeps it. The lines a message carries are stored on the broker.
+    Run {
+        /// The session to tell: its bus address.
+        #[arg(long)]
+        to: String,
+        /// Send from this address instead of `<machine>/job`. Must be on this token's machine,
+        /// and must not be TO: the broker never delivers a sender its own mail.
+        #[arg(long)]
+        from: Option<String>,
+        /// What the messages call the job. Default: the command, cut short.
+        #[arg(long)]
+        name: Option<String>,
+        /// Also report lines that match this regular expression. Needs --every.
+        #[arg(long = "match", value_name = "REGEX", requires = "every")]
+        pattern: Option<String>,
+        /// With --match: report matches at most once per this interval (30s, 10m, 2h, 1d). The
+        /// first match goes at once; later ones wait and go together. The end is never held back.
+        #[arg(long, requires = "pattern")]
+        every: Option<String>,
+        /// How many of the last output lines the end message carries; 0 for none.
+        #[arg(long, default_value_t = 20)]
+        tail: usize,
+        /// The command and its arguments, after `--`.
+        #[arg(last = true, required = true, num_args = 1..)]
+        command: Vec<String>,
+    },
+}
+
+/// `job run`: checks everything that can be wrong before the command starts, since a mistake
+/// found when a days-long job ends costs the report it existed for. Returns the exit code.
+#[allow(clippy::too_many_arguments)]
+fn job_run(
+    cli: &Cli,
+    to: &str,
+    from: Option<&str>,
+    name: Option<&str>,
+    pattern: Option<&str>,
+    every: Option<&str>,
+    tail: usize,
+    command: &[String],
+) -> i32 {
+    use agent_msg_bus::job;
+    let usage = |msg: String| {
+        eprintln!("agent-msg-bus: job run: {msg}");
+        2
+    };
+    let from = match from {
+        Some(f) => f.to_string(),
+        None => match agent_msg_bus::hook::load_config() {
+            Some(c) if !c.machine.is_empty() => job::default_from(&c.machine),
+            _ => {
+                return usage(
+                    "no machine in this client's config to send from; pass --from <machine>/job".into(),
+                )
+            }
+        },
+    };
+    if from == to {
+        return usage(format!(
+            "--to {to} is the address the job sends from, and the broker never delivers a sender its own mail; \
+             pass --from with another address on this machine"
+        ));
+    }
+    let pattern = match pattern {
+        Some(p) => match regex_lite::Regex::new(p) {
+            Ok(re) => Some((re, p.to_string())),
+            Err(e) => return usage(format!("--match `{p}` is not a regular expression: {e}")),
+        },
+        None => None,
+    };
+    let every = match every {
+        Some(e) => match job::parse_interval(e) {
+            Ok(d) => Some((d, e.to_string())),
+            Err(msg) => return usage(format!("--every {msg}")),
+        },
+        None => None,
+    };
+    let (url, token, ca_file) = resolve_conn(cli);
+    let c = cli_client(&url, &token, &ca_file);
+    let opts = job::RunOpts {
+        from: from.clone(),
+        name: name.map(str::to_string).unwrap_or_else(|| job::default_name(command)),
+        pattern,
+        every,
+        tail,
+        command: command.to_vec(),
+        retry_for: job::RETRY_FOR,
+    };
+    // No sender advisory: `<machine>/job` is never registered, by design, so it would warn on
+    // every message, and nothing reads replies to it.
+    let send = |subject: &str, body: &str| {
+        c.send(&from, to, "job", subject, body, "").map_err(|e| e.to_string())
+    };
+    job::run(&opts, &send)
 }
 
 /// Resolve broker URL, token and CA file: explicit flag/env first, then
@@ -384,6 +494,9 @@ fn main() {
             watch(&relay, addr.as_deref().unwrap_or_default(), fallback.clone())
         }
         Cmd::Whoami { json } => whoami(&cli, json),
+        Cmd::Job { cmd: JobCmd::Run { ref to, ref from, ref name, ref pattern, ref every, tail, ref command } } => {
+            std::process::exit(job_run(&cli, to, from.as_deref(), name.as_deref(), pattern.as_deref(), every.as_deref(), tail, command))
+        }
         Cmd::Update { ref from, ref to, dry_run, force } => {
             update(from.as_deref(), to.as_deref(), dry_run, force)
         }
@@ -1169,7 +1282,7 @@ fn run_client(cli: &Cli) {
             })
             .map_err(Into::into),
         Cmd::SubUrl { addr } => c.sub_url(addr).map(|u| println!("{u}")).map_err(Into::into),
-        Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami { .. }
+        Cmd::Serve { .. } | Cmd::Relay { .. } | Cmd::SessionStart | Cmd::Whoami { .. } | Cmd::Job { .. }
         | Cmd::Watch { .. } | Cmd::Update { .. } | Cmd::SelfUpdate { .. } => {
             unreachable!("handled in main")
         }

@@ -850,7 +850,9 @@ types shipped with Claude Code 2.1.296. The bus facts are measured from this rep
 
 ### Phase 11 — wake on mail, timers a session sets itself, and jobs that report back (proposed 15 Nov 2026)
 
-**Status: a design, nothing built.** Asked for by the user on 15 Nov 2026. The source is a peer
+**Status (16 Nov 2026): A built** (mod 0.3.0, released in 0.4.35), **B's query and feed built**
+(0.4.35; bound by token binding in 0.4.36), **D's `job run` built** (not yet released); `job watch`
+and C not built. Asked for by the user on 15 Nov 2026. The source is a peer
 session's summary of an article on building always-on agents (13 Nov 2026), relayed. That article
 builds such agents from five parts: an event inbox, timers, memory, permissions and an outbox. The
 bus is already the inbox. This phase adds the timers, and makes arriving mail wake a session.
@@ -1009,7 +1011,30 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
 - **A session started for its mail wakes for it**, because no session marked that message. A
   session that was woken and ended without acking is not woken again for that message.
 
+#### What piece D's `job run` came to (16 Nov 2026)
+
+- **It sends from `<machine>/job`**, the machine in the client's config. Deriving the sender from the
+  working directory, as `whoami` does, would make it equal the parent's address whenever a session
+  starts a job from its own repo, and the broker never delivers a sender its own mail: the one
+  message that matters would get an id and vanish. A `--to` equal to the sender is refused before
+  the command runs.
+- **The batching rule is a pure state machine fed with times** (`job::Batcher`), so it is tested
+  without sleeping. Two integration tests run a real child against a real broker.
+- **The end message is retried for 15 minutes**, backing off from 1 s to 30 s, because broker
+  upgrades no longer wait for the user and a long job can end during one. A test ends a job while
+  no broker listens, then starts one on that port. Past the window, the message goes to stderr and
+  the exit code is 75.
+- **A line is what a terminal would leave on screen**: decoded lossily, a `\r` keeps only its last
+  redraw, and 64 KiB without a newline is cut, so a progress bar cannot grow without bound.
+- **After the command exits, output still in its pipes gets 2 s.** A process it started can hold
+  the pipes open for ever, and waiting for them would hold back the end message.
+- **The regex engine is `regex-lite`**, with ASCII classes only.
+- **Still to build:** `job watch --pid` (a process already running; its exit code cannot be known
+  on Linux unless it is our child, so the message must say so) and `job watch --file --match`.
+
 #### Build order — each step one commit, test first
+
+The order the user chose is in decision 5 above (A, then D, then C); this list predates it.
 
 1. **C, broker and store:** the `not_before` column, held delivery, the broker timer, self-delivery
    for timers, `/health` advertising it. Integration tests drive a real broker with a timer due in a

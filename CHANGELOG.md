@@ -22,6 +22,19 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Added
+
+- **`job run`: a command that reports to a session when it ends** (Phase 11 piece D in
+  `docs/plan.md`). `agent-msg-bus job run --to <addr> -- <command>` runs the command and sends one
+  message of kind `job` when it ends, with the exit code or signal, the run time and the last 20
+  lines of output, and exits with the command's own code. `--match <regex> --every <interval>`
+  also reports matching lines: the first at once, later ones at most once per interval, and any
+  still held with the end. The interval has no default, by the user's decision (15 Nov 2026). It
+  sends from `<machine>/job` and refuses a `--to` equal to its sender, since the broker never
+  delivers a sender its own mail. The end message is retried for 15 minutes through a broker
+  restart, then printed to stderr with exit code 75. Client-only: no broker change. New
+  dependency: `regex-lite`.
+
 ## [0.4.36] — 2026-11-15
 
 ### Changed

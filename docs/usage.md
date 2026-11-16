@@ -50,6 +50,7 @@ agent-msg-bus whoami        # this session's address, the name actually bound, a
 agent-msg-bus peers         # who is on the bus: live/offline, pending counts
 agent-msg-bus peers --pending --json  # this machine's addresses with mail needing a session (broker 0.4.35+)
 agent-msg-bus watch --pending         # the same as a live feed: {address, id, kind, ts} per message (0.4.35+)
+agent-msg-bus job run --to <me> -- <command>  # run it; mail <me> when it ends (0.4.37+)
 agent-msg-bus send --from <me> --to <them> --kind fyi|request|blocking \
                    --subject "..." --body-file <path>
 agent-msg-bus ack <me> <last-message-id>
@@ -297,6 +298,47 @@ address that matches, including mailboxes nobody reads any more, and stays unrea
 that address acks it. Prefer explicit recipients. (Before v0.2.0 a single broadcast also made every
 address it matched permanently unsweepable. That is fixed: being addressed by a wildcard is
 delivery, not participation.)
+
+---
+
+## Long jobs that report back
+
+`job run` runs a command and tells a session, as bus mail of kind `job`, when the command ends and,
+if asked, when it prints a line that matters. A session that starts a scraper running for days hears
+from it when there is something to hear, instead of re-arming a watch every 30 minutes. The inbox mod
+wakes a session for `job` mail by default.
+
+```bash
+agent-msg-bus job run --to <me> -- python scrape.py --all
+agent-msg-bus job run --to <me> --name scrape --match 'ERROR|captcha' --every 30m -- python scrape.py
+```
+
+- **The end** is always reported, in one message: how the command ended (its exit code, or the
+  signal that killed it), the run time, and the last 20 lines of output (`--tail <n>`, `0` for
+  none). The subject carries the name, the outcome and the run time, so the wake's pointer says
+  enough to decide whether to read on. `job run` exits with the command's own code.
+- **Matches**, with `--match <regex>`, need `--every <interval>` (`30s`, `10m`, `2h`, `1d`), and
+  there is no default: every message can start a paid turn in the session it wakes, so the session
+  that sets the pattern also sets how often it can be woken. The first match goes at once; later
+  ones wait for the interval and go together, with their count and the newest 10 lines. Matches
+  still waiting when the command ends go with the end message.
+- **It sends from `<machine>/job`**, the machine in this client's config, never as the session it
+  reports to. The broker never delivers a sender its own mail, so a `--to` equal to the sender is
+  refused before the command runs; under token binding a token can only send from its own machine
+  anyway. `--from` names another address on the same machine.
+- **A broker restart does not lose the end.** The end message is retried with backoff for 15
+  minutes. If it never gets through, `job run` prints it to stderr and exits 75. A match message
+  that fails is kept and goes with the next one, or with the end.
+- **The output still goes to `job run`'s own stdout and stderr**, so whatever runs it keeps its log.
+  The lines a message carries are stored on the broker like any message body: do not point this at
+  a command that prints secrets.
+- **Start a long job under the machine's own supervisor**, not from a session's background shell,
+  which is reaped after a few minutes, and not under Monitor, which expires: on Linux
+  `systemd-run --user --unit <name> agent-msg-bus job run --to <me> -- <command>` (a user unit
+  outlives the login only with `loginctl enable-linger`), on Windows a scheduled task. `job run` keeps no state of its own, so a supervisor that restarts it starts the
+  job again from the beginning: make the job itself resumable.
+- **Patterns** use the `regex-lite` syntax: the usual operators and ASCII classes such as `\d` and
+  `\w`, without Unicode classes.
 
 ---
 

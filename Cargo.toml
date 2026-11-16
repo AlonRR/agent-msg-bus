@@ -28,6 +28,9 @@ clap = { version = "4", features = ["derive", "env"] }
 # blocking HTTP for the CLI half. Deliberately not reqwest: the client path needs no
 # async runtime, and ureq keeps the single binary small.
 ureq = { version = "2", features = ["json"] }
+# `job run --match`: a small regex engine with no dependencies of its own. Log patterns need no
+# Unicode classes, which is most of what the full `regex` crate adds.
+regex-lite = "0.1"
 # WebSocket *client*, for the relay's upstream leg. Also used by the integration tests. The rustls
 # feature is what lets the relay reach a broker behind a TLS front (`wss://`); the relay passes its
 # own client config, so the webpki-roots the feature names are not what decides trust.

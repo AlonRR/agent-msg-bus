@@ -275,7 +275,7 @@ fn status_frame(state: &str, detail: &str, at: &str) -> serde_json::Value {
 }
 
 /// `2026-09-20T17:31:05Z` — UTC, to the second, with the zone written out so nobody has to guess.
-fn utc_stamp(t: time::OffsetDateTime) -> String {
+pub(crate) fn utc_stamp(t: time::OffsetDateTime) -> String {
     let t = t.to_offset(time::UtcOffset::UTC);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
