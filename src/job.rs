@@ -31,6 +31,8 @@ pub const LINE_CAP: usize = 2000;
 /// Bytes held while waiting for a newline before the held text is treated as a line anyway. A
 /// progress bar redrawn with `\r` never ends its line.
 const HOLD_CAP: usize = 64 * 1024;
+/// How soon a match message that failed to send is tried again, when the interval is longer.
+pub const MATCH_RETRY: Duration = Duration::from_secs(60);
 /// Matched lines one message carries at most: the newest.
 pub const MATCH_LINES: usize = 10;
 /// How long the end message keeps trying to reach the broker.
@@ -156,6 +158,8 @@ pub struct Batch {
 pub struct Batcher {
     every: Duration,
     last: Option<Duration>,
+    /// Set when a send failed: try again then, rather than a whole interval later.
+    retry_at: Option<Duration>,
     lines: VecDeque<String>,
     count: usize,
     total: usize,
@@ -163,7 +167,7 @@ pub struct Batcher {
 
 impl Batcher {
     pub fn new(every: Duration) -> Batcher {
-        Batcher { every, last: None, lines: VecDeque::new(), count: 0, total: 0 }
+        Batcher { every, last: None, retry_at: None, lines: VecDeque::new(), count: 0, total: 0 }
     }
 
     /// A line matched at `now`. Returns what to send now, if anything.
@@ -182,12 +186,16 @@ impl Batcher {
         if self.count == 0 {
             return None;
         }
-        if let Some(last) = self.last {
-            if now.saturating_sub(last) < self.every {
-                return None;
-            }
+        let ready = match (self.retry_at, self.last) {
+            (Some(at), _) => now >= at,
+            (None, Some(last)) => now.saturating_sub(last) >= self.every,
+            (None, None) => true,
+        };
+        if !ready {
+            return None;
         }
         self.last = Some(now);
+        self.retry_at = None;
         self.take()
     }
 
@@ -196,7 +204,7 @@ impl Batcher {
         if self.count == 0 {
             return None;
         }
-        Some(self.last.map_or(Duration::ZERO, |l| l + self.every))
+        Some(self.retry_at.unwrap_or_else(|| self.last.map_or(Duration::ZERO, |l| l + self.every)))
     }
 
     /// Everything held, whatever the time: for the end message.
@@ -209,8 +217,10 @@ impl Batcher {
         Some(b)
     }
 
-    /// A batch that could not be sent goes back, ahead of anything newer.
-    pub fn restore(&mut self, b: Batch) {
+    /// A batch that could not be sent at `now` goes back, ahead of anything newer, and is tried
+    /// again after [`MATCH_RETRY`] or the interval, whichever is shorter.
+    pub fn restore(&mut self, b: Batch, now: Duration) {
+        self.retry_at = Some(now + MATCH_RETRY.min(self.every));
         for l in b.lines.into_iter().rev() {
             self.lines.push_front(l);
         }
@@ -366,6 +376,7 @@ impl<'a> Report<'a> {
             (Some((_, p)), Some((_, e))) => (p.as_str(), e.as_str()),
             _ => return,
         };
+        let now = self.t0.elapsed();
         let Some(b) = self.batcher.as_mut() else { return };
         let n = batch.count;
         let subject = format!("job {}: {n} line{} matched `{pat}`", self.o.name, if n == 1 { "" } else { "s" });
@@ -382,7 +393,7 @@ impl<'a> Report<'a> {
         );
         if let Err(e) = (self.send)(&subject, &body) {
             eprintln!("agent-msg-bus: job: could not report a match ({e}); it will go with a later message");
-            b.restore(batch);
+            b.restore(batch, now);
         }
     }
 
@@ -999,9 +1010,25 @@ mod tests {
     fn a_batch_that_failed_to_send_goes_back_first() {
         let mut b = Batcher::new(600 * S);
         let first = b.on_match(Duration::ZERO, "a".into()).unwrap();
-        b.restore(first);
+        b.restore(first, Duration::ZERO);
         b.on_match(S, "b".into());
         assert_eq!(b.take(), Some(Batch { lines: vec!["a".into(), "b".into()], count: 2 }));
+    }
+
+    #[test]
+    fn a_failed_send_is_tried_again_within_a_minute_not_a_whole_interval() {
+        // With --every 1d, a broker restart at the first match would otherwise cost a day.
+        let mut b = Batcher::new(86400 * S);
+        let first = b.on_match(100 * S, "a".into()).unwrap();
+        b.restore(first, 100 * S);
+        assert_eq!(b.next_due(), Some(160 * S));
+        assert_eq!(b.due(159 * S), None);
+        assert!(b.due(160 * S).is_some());
+        // A short interval is not made longer by the retry.
+        let mut b = Batcher::new(10 * S);
+        let first = b.on_match(100 * S, "a".into()).unwrap();
+        b.restore(first, 100 * S);
+        assert_eq!(b.next_due(), Some(110 * S));
     }
 
     #[test]
