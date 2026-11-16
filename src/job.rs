@@ -394,15 +394,7 @@ pub fn run(o: &RunOpts, send: SendFn) -> i32 {
     );
     if let (Some(b), Some((_, pat))) = (batcher.as_mut(), &o.pattern) {
         let total = b.total();
-        match b.take() {
-            Some(held) => body.push_str(&format!(
-                "\nMatched `{pat}`: {total} lines in all. {} not reported before the end{}:\n{}",
-                held.count,
-                if held.count > held.lines.len() { ", the newest of them" } else { "" },
-                indented(&held.lines)
-            )),
-            None => body.push_str(&format!("\nMatched `{pat}`: {total} lines in all, all reported already.\n")),
-        }
+        body.push_str(&match_summary(pat, total, b.take()));
     }
     if o.tail > 0 {
         let lines: Vec<String> = tail.into_iter().collect();
@@ -433,6 +425,22 @@ pub fn run(o: &RunOpts, send: SendFn) -> i32 {
             );
             EXIT_UNSENT
         }
+    }
+}
+
+/// The end message's account of `--match`: how many lines matched, and those not yet reported.
+fn match_summary(pat: &str, total: usize, held: Option<Batch>) -> String {
+    let lines = if total == 1 { "1 line".to_string() } else { format!("{total} lines") };
+    match held {
+        _ if total == 0 => format!("\nNo line matched `{pat}`.\n"),
+        Some(held) => format!(
+            "\nMatched `{pat}`: {lines} in all. {} not reported before the end{}:\n{}",
+            held.count,
+            if held.count > held.lines.len() { ", the newest of them" } else { "" },
+            indented(&held.lines)
+        ),
+        None if total == 1 => format!("\nMatched `{pat}`: {lines} in all, reported already.\n"),
+        None => format!("\nMatched `{pat}`: {lines} in all, all reported already.\n"),
     }
 }
 
@@ -639,6 +647,25 @@ mod tests {
         let long = default_name(&c(&["x", &"y".repeat(100)]));
         assert_eq!(long.chars().count(), 48);
         assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn the_end_message_says_plainly_when_nothing_matched() {
+        // Seen live 16 Nov 2026: "Matched `^hit`: 0 lines in all, all reported already."
+        assert_eq!(match_summary("^hit", 0, None), "\nNo line matched `^hit`.\n");
+        assert_eq!(
+            match_summary("^hit", 3, None),
+            "\nMatched `^hit`: 3 lines in all, all reported already.\n"
+        );
+        assert_eq!(
+            match_summary("^hit", 1, None),
+            "\nMatched `^hit`: 1 line in all, reported already.\n"
+        );
+        let held = Batch { lines: vec!["hit two".into()], count: 1 };
+        assert_eq!(
+            match_summary("^hit", 2, Some(held)),
+            "\nMatched `^hit`: 2 lines in all. 1 not reported before the end:\n    hit two\n"
+        );
     }
 
     #[test]

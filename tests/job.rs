@@ -242,14 +242,19 @@ async fn the_end_message_waits_out_a_broker_restart() {
     let port = held.local_addr().unwrap().port();
     let base = format!("http://127.0.0.1:{port}");
     held.set_nonblocking(true).unwrap();
+    // "Down" lasts until a send has been refused, not for a fixed time: under a loaded full run,
+    // starting the job took longer than a fixed 3 s and its first send found the broker up.
     let down = std::thread::spawn(move || {
-        let until = std::time::Instant::now() + Duration::from_secs(3);
-        while std::time::Instant::now() < until {
+        let give_up = std::time::Instant::now() + Duration::from_secs(60);
+        let mut refused = 0;
+        while refused == 0 && std::time::Instant::now() < give_up {
             if let Ok((sock, _)) = held.accept() {
                 drop(sock);
+                refused += 1;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        assert_eq!(refused, 1, "job run never tried to send");
         held
     });
 
