@@ -1164,16 +1164,6 @@ fn run_client(cli: &Cli) {
             .map_err(Into::into),
         Cmd::Send { from, to, kind, subject, body, body_file, reply_to, at, in_ } => {
             let resolved = read_body(body, body_file.as_deref());
-            if at.is_some() || in_.is_some() {
-                let in_secs = in_.as_deref().map(interval_secs);
-                return report(c
-                    .set_timer(from, to, kind, subject, &resolved, reply_to, at.as_deref(), in_secs)
-                    .map(|(id, due)| {
-                        println!("{id}");
-                        eprintln!("held {id} until {due}: {from} -> {to}. Cancel with: agent-msg-bus remind {from} --cancel {id}");
-                    })
-                    .map_err(Into::into));
-            }
             // Warn, never refuse: an unknown `--to` already only warns, three sessions are live on
             // this bus, and a send that starts rejecting mid-flight is a worse failure than the one
             // being fixed. The cost of a bad `--from` is not this message - it is every reply to it.
@@ -1183,6 +1173,16 @@ fn run_client(cli: &Cli) {
                 &agent_msg_bus::identity::classify(from, &peers),
             ) {
                 eprintln!("{line}");
+            }
+            if at.is_some() || in_.is_some() {
+                let in_secs = in_.as_deref().map(interval_secs);
+                return report(c
+                    .set_timer(from, to, kind, subject, &resolved, reply_to, at.as_deref(), in_secs)
+                    .map(|(id, due)| {
+                        println!("{id}");
+                        eprintln!("held {id} until {due}: {from} -> {to}. Cancel with: agent-msg-bus remind {from} --cancel {id}");
+                    })
+                    .map_err(Into::into));
             }
             c.send(from, to, kind, subject, &resolved, reply_to)
                 .map(|id| {

@@ -297,32 +297,79 @@ async fn the_real_serve_fires_timers_including_ones_due_while_it_was_down() {
         };
         s.set_timer(&nm, &agent_msg_bus::store::ts_of(now - time::Duration::hours(1)), now - time::Duration::hours(2)).unwrap();
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let mut broker = std::process::Command::new(env!("CARGO_BIN_EXE_agent-msg-bus"))
-        .args(["serve", "--listen", &format!("127.0.0.1:{port}"), "--db", db.to_str().unwrap()])
-        .args(["--tokens", dir.join("tokens.json").to_str().unwrap()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let base = format!("http://127.0.0.1:{port}");
+    // A token no other test's broker knows: the port is free when picked, but another test's broker
+    // can take it before `serve` binds it, and that broker must then answer 401, not mail. `serve`
+    // that loses the port exits, and the test tries a new one.
+    const OWN: &str = "timers-serve-only-token"; // secret-gate: allow (a test fixture)
+    std::fs::write(dir.join("tokens.json"), format!(r#"{{"machine-a":"{OWN}"}}"#)).unwrap();
+    let tokens = dir.join("tokens.json");
     let got = blocking(move || {
-        let c = Client::new(&base, TOKEN);
-        let until = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Ok((got, _)) = c.read_unread("machine-a/b", 10) {
-                if !got.is_empty() || std::time::Instant::now() >= until {
-                    return got;
+        for _attempt in 0..5 {
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let mut broker = std::process::Command::new(env!("CARGO_BIN_EXE_agent-msg-bus"))
+                .args(["serve", "--listen", &format!("127.0.0.1:{port}"), "--db", db.to_str().unwrap()])
+                .args(["--tokens", tokens.to_str().unwrap()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let c = Client::new(&format!("http://127.0.0.1:{port}"), OWN);
+            let until = std::time::Instant::now() + Duration::from_secs(30);
+            let mut got = Vec::new();
+            let mut lost_port = false;
+            while std::time::Instant::now() < until {
+                if broker.try_wait().unwrap().is_some() {
+                    lost_port = true;
+                    break;
                 }
-            } else if std::time::Instant::now() >= until {
-                return Vec::new();
+                if let Ok((g, _)) = c.read_unread("machine-a/b", 10) {
+                    if !g.is_empty() {
+                        got = g;
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
             }
-            std::thread::sleep(Duration::from_millis(200));
+            let still_ours = broker.try_wait().unwrap().is_none();
+            let _ = broker.kill();
+            let _ = broker.wait();
+            if lost_port {
+                continue;
+            }
+            assert!(still_ours, "the answer must have come from this test's own broker");
+            return got;
         }
+        panic!("serve lost its port five times running");
     })
     .await;
-    let _ = broker.kill();
-    let _ = broker.wait();
     assert_eq!(got.len(), 1, "the overdue timer fired on start: {got:?}");
     assert_eq!(got[0].subject, "overdue");
+}
+
+/// A reminder to a mistyped address fires into a mailbox nobody reads. `/send` warns about an
+/// unknown recipient at once; a timer must too, when it is set, not hours later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timer_for_an_unknown_address_warns_when_it_is_set() {
+    let r = rig(false).await;
+    let rr = Rig { base: r.base.clone(), dir: r.dir.clone(), state: r.state.clone() };
+    let out = blocking(move || cli(&rr, &["remind", "machine-a/nobody-here", "--in", "1h", "--subject", "s"])).await;
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no registration answers to 'machine-a/nobody-here'"), "{err}");
+}
+
+/// A plain send of kind `timer` to oneself is delivered now, so `/send` must not say it never is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reminder_sent_now_to_oneself_is_not_called_undeliverable() {
+    let r = rig(false).await;
+    register(&r, "machine-a/me").await;
+    let rr = Rig { base: r.base.clone(), dir: r.dir.clone(), state: r.state.clone() };
+    let out = blocking(move || {
+        cli(&rr, &["send", "--from", "machine-a/me", "--to", "machine-a/me", "--kind", "timer", "--subject", "now"])
+    })
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("never sent its own message"), "{err}");
+    assert_eq!(unread_within(&r, "machine-a/me", 1, Duration::from_secs(5)).await.len(), 1);
 }

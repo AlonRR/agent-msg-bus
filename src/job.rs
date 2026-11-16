@@ -693,6 +693,8 @@ mod win {
     const SYNCHRONIZE: u32 = 0x0010_0000;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const INFINITE: u32 = 0xFFFF_FFFF;
+    const WAIT_OBJECT_0: u32 = 0;
+    const STILL_ACTIVE: u32 = 259;
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -722,7 +724,14 @@ mod win {
             let mut code = 0u32;
             // SAFETY: self.0 is a live process handle opened with SYNCHRONIZE and query rights.
             unsafe {
-                WaitForSingleObject(self.0, INFINITE);
+                // A wait that fails (it should not, on a handle this process holds) must not be read
+                // as the process ending: fall back to asking every second until it has an exit code.
+                while WaitForSingleObject(self.0, INFINITE) != WAIT_OBJECT_0 {
+                    if GetExitCodeProcess(self.0, &mut code) != 0 && code != STILL_ACTIVE {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
                 (GetExitCodeProcess(self.0, &mut code) != 0).then_some(code as i32)
             }
         }

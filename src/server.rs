@@ -317,7 +317,7 @@ async fn send(
     let known = st.store.lock().unwrap().recipient_is_known(&stored.to).unwrap_or(true);
     let reason = if pushed > 0 {
         None
-    } else if self_addressed {
+    } else if self_addressed && !stored.is_reminder() {
         Some("a sender is never sent its own message; this is not a delivery failure".to_string())
     } else if known {
         Some("queued for a known address that is not currently subscribed; it will be delivered on connect".to_string())
@@ -493,8 +493,19 @@ async fn set_timer(
     }
     let nm = NewMessage { from: b.from, to: b.to, kind, subject: b.subject, body: b.body, reply_to: b.reply_to };
     let due_ts = crate::store::ts_of(due);
-    match st.store.lock().unwrap().set_timer(&nm, &due_ts, now) {
-        Ok(id) => reply(serde_json::json!({"id": id, "due": due_ts}), warning),
+    let store = st.store.lock().unwrap();
+    // As `/send` does, now rather than when it fires: a reminder to a mistyped address would
+    // otherwise be found out hours later, in a mailbox nobody reads.
+    let known = store.recipient_is_known(&nm.to).unwrap_or(true);
+    let note = (!known).then(|| {
+        format!(
+            "WARNING: no registration answers to '{}'. The timer is held, but when it comes due \
+             nothing will collect it - check the spelling. Cancel it with --cancel.",
+            nm.to
+        )
+    });
+    match store.set_timer(&nm, &due_ts, now) {
+        Ok(id) => reply(serde_json::json!({"id": id, "due": due_ts, "recipient_known": known, "note": note}), warning),
         Err(e) => server_error(e),
     }
 }

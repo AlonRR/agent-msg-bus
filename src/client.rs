@@ -380,6 +380,9 @@ impl Client {
             }),
         );
         let v = timers_route(v)?;
+        if let Some(note) = v.get("note").and_then(|x| x.as_str()) {
+            eprintln!("agent-msg-bus: {note}");
+        }
         let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
         Ok((field("id"), field("due")))
     }
