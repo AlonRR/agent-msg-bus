@@ -34,6 +34,11 @@ explicitly not part of it and can change in a patch.
   delivers a sender its own mail. The end message is retried for 15 minutes through a broker
   restart, then printed to stderr with exit code 75. Client-only: no broker change. New
   dependency: `regex-lite`.
+- **`job watch`, for a job that is already running.** `--pid <pid>` reports when the process
+  ends, with its exit code on Windows (Linux tells only the parent, and the message says so);
+  `--file <log> --match <regex> --every <interval>` reports lines added to a file after the watch
+  starts, following truncation and replacement. Pid reuse is guarded: a handle on Windows, the
+  process start time from `/proc` on Linux.
 
 ## [0.4.36] — 2026-11-15
 

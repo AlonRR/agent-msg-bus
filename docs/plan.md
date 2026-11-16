@@ -851,8 +851,8 @@ types shipped with Claude Code 2.1.296. The bus facts are measured from this rep
 ### Phase 11 — wake on mail, timers a session sets itself, and jobs that report back (proposed 15 Nov 2026)
 
 **Status (16 Nov 2026): A built** (mod 0.3.0, released in 0.4.35), **B's query and feed built**
-(0.4.35; bound by token binding in 0.4.36), **D's `job run` built** (not yet released); `job watch`
-and C not built. Asked for by the user on 15 Nov 2026. The source is a peer
+(0.4.35; bound by token binding in 0.4.36), **D built**: `job run` and `job watch` (not yet
+released); C not built. Asked for by the user on 15 Nov 2026. The source is a peer
 session's summary of an article on building always-on agents (13 Nov 2026), relayed. That article
 builds such agents from five parts: an event inbox, timers, memory, permissions and an outbox. The
 bus is already the inbox. This phase adds the timers, and makes arriving mail wake a session.
@@ -1029,8 +1029,14 @@ A wake is then one mechanism, tested once, and the bus stays the only record, as
 - **After the command exits, output still in its pipes gets 2 s.** A process it started can hold
   the pipes open for ever, and waiting for them would hold back the end message.
 - **The regex engine is `regex-lite`**, with ASCII classes only.
-- **Still to build:** `job watch --pid` (a process already running; its exit code cannot be known
-  on Linux unless it is our child, so the message must say so) and `job watch --file --match`.
+- **`job watch --pid`** holds a process handle on Windows, which gives the exit code and is immune
+  to pid reuse. On Linux it polls `/proc/<pid>/stat` every second and compares the start time; a
+  zombie counts as ended. The exit code goes only to a process's parent there, so the message says
+  it cannot be known rather than guess. No new crate: the four Win32 calls are declared by hand.
+- **`job watch --file`** starts at the file's end, reads at most 1 MiB at a time, and reads the
+  file again from its start when it is shorter than what was read or, on Unix, has a new inode.
+  After the process ends it reads the file once more before the end message, so the last lines
+  are in it.
 
 #### Build order — each step one commit, test first
 

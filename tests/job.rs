@@ -276,3 +276,178 @@ async fn the_end_message_waits_out_a_broker_restart() {
     let got = blocking(move || mail(&b, "machine-a/parent")).await;
     assert_eq!(got.len(), 1, "sent once the broker was back: {got:?}");
 }
+
+// ---- job watch: a process or a log file that is already there ----
+
+/// Runs `job watch` with `args`, waiting for it to finish.
+fn job_watch(e: &Env, base: &str, args: &[&str]) -> std::process::Output {
+    watch_cmd(e, base, args).output().unwrap()
+}
+
+fn watch_cmd(e: &Env, base: &str, args: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_agent-msg-bus"));
+    c.args(["--url", base, "--token", TOKEN, "job", "watch"])
+        .args(args)
+        .env("USERPROFILE", &e.home)
+        .env("HOME", &e.home)
+        .env_remove("AMB_URL")
+        .env_remove("AMB_TOKEN")
+        .env_remove("AMB_CA_FILE");
+    c
+}
+
+/// A process that runs about a second, then exits with 5.
+fn short_then_5() -> std::process::Child {
+    let argv = if cfg!(windows) {
+        shell("ping -n 2 127.0.0.1 >nul & exit /b 5")
+    } else {
+        shell("sleep 1; exit 5")
+    };
+    std::process::Command::new(&argv[0]).args(&argv[1..]).spawn().unwrap()
+}
+
+/// A process that runs until the test kills it. Started directly, not through a shell: killing
+/// `cmd` leaves the `ping` it started running for two minutes (seen 16 Nov 2026).
+fn long_running() -> std::process::Child {
+    let (prog, args): (&str, &[&str]) =
+        if cfg!(windows) { ("ping", &["-n", "120", "127.0.0.1"]) } else { ("sleep", &["120"]) };
+    std::process::Command::new(prog)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_pid_reports_when_the_process_ends() {
+    let e = env();
+    let base = broker(&e).await;
+    let mut child = short_then_5();
+    let pid = child.id().to_string();
+    let b = base.clone();
+    let out = blocking(move || {
+        let e = Env { dir: e.dir, home: e.home };
+        job_watch(&e, &b, &["--to", "machine-a/parent", "--name", "w", "--pid", &pid])
+    })
+    .await;
+    let _ = child.wait();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let b = base.clone();
+    let got = blocking(move || mail(&b, "machine-a/parent")).await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    let m = &got[0];
+    assert_eq!((m.kind.as_str(), m.from.as_str()), ("job", "machine-a/job"));
+    assert!(m.subject.contains("w") && m.subject.contains("ended"), "{}", m.subject);
+    if cfg!(windows) {
+        // Windows hands the exit code to whoever holds a handle on the process.
+        assert!(m.subject.contains("exit 5"), "{}", m.subject);
+    } else {
+        // Linux tells only the parent; the message must say so rather than invent one.
+        assert!(m.body.contains("cannot be known"), "{}", m.body);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_file_reports_lines_added_after_it_started() {
+    let e = env();
+    let base = broker(&e).await;
+    let log = e.dir.join("scrape.log");
+    std::fs::write(&log, "hit old\n").unwrap();
+    let mut sleeper = long_running();
+    let pid = sleeper.id().to_string();
+    let mut w = watch_cmd(
+        &e,
+        &base,
+        &["--to", "machine-a/parent", "--pid", &pid, "--file", log.to_str().unwrap(), "--match", "^hit", "--every", "1h"],
+    )
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
+
+    // Wait for "watching" on stderr, so the lines below are appended after it opened the file.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let stderr = w.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut all = String::new();
+        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = tx.send(line.clone());
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    });
+    let ready = blocking(move || loop {
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(l) if l.contains("watching") => return true,
+            Ok(_) => continue,
+            Err(_) => return false,
+        }
+    })
+    .await;
+    assert!(ready, "job watch never said it was watching");
+
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        f.write_all(b"hit new\nplain\n").unwrap();
+    }
+    // The first match goes at once, while the process still runs.
+    let b = base.clone();
+    let first = blocking(move || {
+        for _ in 0..100 {
+            let got = mail(&b, "machine-a/parent");
+            if !got.is_empty() {
+                return got;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Vec::new()
+    })
+    .await;
+    assert_eq!(first.len(), 1, "the first match, before the end: {first:?}");
+    assert!(first[0].body.contains("hit new") && !first[0].body.contains("hit old"), "{}", first[0].body);
+
+    sleeper.kill().unwrap();
+    let _ = sleeper.wait();
+    let status = blocking(move || w.wait().unwrap()).await;
+    let err = reader.join().unwrap();
+    assert_eq!(status.code(), Some(0), "{err}");
+    let b = base.clone();
+    let got = blocking(move || mail(&b, "machine-a/parent")).await;
+    assert_eq!(got.len(), 2, "{got:?}");
+    let end = &got[1];
+    assert!(end.subject.contains("ended"), "{}", end.subject);
+    assert!(end.body.contains("plain") && !end.body.contains("hit old"), "only lines added while watching: {}", end.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_refuses_a_pid_that_is_not_running() {
+    let e = env();
+    let base = broker(&e).await;
+    let b = base.clone();
+    let out = blocking(move || {
+        let e = Env { dir: e.dir, home: e.home };
+        job_watch(&e, &b, &["--to", "machine-a/parent", "--pid", "999999999"])
+    })
+    .await;
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("999999999"), "{out:?}");
+    let b = base.clone();
+    assert!(blocking(move || mail(&b, "machine-a/parent")).await.is_empty(), "nothing sent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_needs_a_pid_or_a_file() {
+    let e = env();
+    let base = broker(&e).await;
+    let b = base.clone();
+    let out = blocking(move || {
+        let e = Env { dir: e.dir, home: e.home };
+        job_watch(&e, &b, &["--to", "machine-a/parent"])
+    })
+    .await;
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--pid") && err.contains("--file"), "{err}");
+}

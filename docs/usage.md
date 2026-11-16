@@ -51,6 +51,7 @@ agent-msg-bus peers         # who is on the bus: live/offline, pending counts
 agent-msg-bus peers --pending --json  # this machine's addresses with mail needing a session (broker 0.4.35+)
 agent-msg-bus watch --pending         # the same as a live feed: {address, id, kind, ts} per message (0.4.35+)
 agent-msg-bus job run --to <me> -- <command>  # run it; mail <me> when it ends (0.4.37+)
+agent-msg-bus job watch --to <me> --pid <pid> [--file <log>]  # the same for one already running
 agent-msg-bus send --from <me> --to <them> --kind fyi|request|blocking \
                    --subject "..." --body-file <path>
 agent-msg-bus ack <me> <last-message-id>
@@ -337,6 +338,20 @@ agent-msg-bus job run --to <me> --name scrape --match 'ERROR|captcha' --every 30
   `systemd-run --user --unit <name> agent-msg-bus job run --to <me> -- <command>` (a user unit
   outlives the login only with `loginctl enable-linger`), on Windows a scheduled task. `job run` keeps no state of its own, so a supervisor that restarts it starts the
   job again from the beginning: make the job itself resumable.
+- **A job that is already running** gets `job watch` instead:
+
+  ```bash
+  agent-msg-bus job watch --to <me> --pid 4242
+  agent-msg-bus job watch --to <me> --pid 4242 --file scrape.log --match 'ERROR' --every 30m
+  agent-msg-bus job watch --to <me> --file /var/log/app.log --match 'panic' --every 1h
+  ```
+
+  `--pid` reports when the process ends. On Windows the message carries its exit code. On Linux it
+  can't, because only a process's parent learns it, and the message says so: use `job run` when the
+  code matters. A new process that reuses the pid is not mistaken for the old one. `--file` follows
+  the file from its end, like `tail -F`: only lines added after the watch starts count, and a file
+  that is truncated or replaced is read again from its start. Watching a file without `--pid` runs
+  until stopped and sends matches only.
 - **Patterns** use the `regex-lite` syntax: the usual operators and ASCII classes such as `\d` and
   `\w`, without Unicode classes.
 

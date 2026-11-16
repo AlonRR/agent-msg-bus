@@ -347,10 +347,51 @@ enum JobCmd {
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<String>,
     },
+    /// Watch something already running: a process (--pid), sending TO a message when it ends, and
+    /// or a file (--file) such as its log, sending lines added to it that match --match.
+    ///
+    /// Only lines added after the watch starts count. Watching a file alone runs until stopped and
+    /// sends matches only. On Windows the end message carries the process's exit code; on Linux it
+    /// can't, since only a process's parent learns it: use `job run` when the code matters.
+    #[command(group(clap::ArgGroup::new("target").args(["pid", "file"]).required(true).multiple(true)))]
+    Watch {
+        /// The session to tell: its bus address.
+        #[arg(long)]
+        to: String,
+        /// Send from this address instead of `<machine>/job`. Must be on this token's machine,
+        /// and must not be TO.
+        #[arg(long)]
+        from: Option<String>,
+        /// What the messages call the job. Default: `pid <pid>`, or the file's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// The process to watch. Report when it ends.
+        #[arg(long)]
+        pid: Option<u32>,
+        /// A file to follow from its end, like `tail -F`; a truncated or replaced file is read
+        /// again from its start.
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Report lines added to --file that match this regular expression. Needs --every.
+        #[arg(long = "match", value_name = "REGEX", requires_all = ["every", "file"])]
+        pattern: Option<String>,
+        /// With --match: report matches at most once per this interval (30s, 10m, 2h, 1d).
+        #[arg(long, requires = "pattern")]
+        every: Option<String>,
+        /// How many of the last lines added to --file the end message carries; 0 for none.
+        #[arg(long, default_value_t = 20)]
+        tail: usize,
+    },
 }
 
-/// `job run`: checks everything that can be wrong before the command starts, since a mistake
-/// found when a days-long job ends costs the report it existed for. Returns the exit code.
+/// What a `job` command reports on.
+enum JobTarget<'a> {
+    Run(&'a [String]),
+    Watch { pid: Option<u32>, file: Option<&'a std::path::Path> },
+}
+
+/// `job run` and `job watch`: checks everything that can be wrong before anything starts, since a
+/// mistake found when a days-long job ends costs the report it existed for. Returns the exit code.
 #[allow(clippy::too_many_arguments)]
 fn job_run(
     cli: &Cli,
@@ -360,11 +401,15 @@ fn job_run(
     pattern: Option<&str>,
     every: Option<&str>,
     tail: usize,
-    command: &[String],
+    target: JobTarget,
 ) -> i32 {
     use agent_msg_bus::job;
+    let verb = match target {
+        JobTarget::Run(_) => "run",
+        JobTarget::Watch { .. } => "watch",
+    };
     let usage = |msg: String| {
-        eprintln!("agent-msg-bus: job run: {msg}");
+        eprintln!("agent-msg-bus: job {verb}: {msg}");
         2
     };
     let from = match from {
@@ -400,13 +445,24 @@ fn job_run(
     };
     let (url, token, ca_file) = resolve_conn(cli);
     let c = cli_client(&url, &token, &ca_file);
+    let default_name = match &target {
+        JobTarget::Run(command) => job::default_name(command),
+        JobTarget::Watch { pid: Some(p), .. } => format!("pid {p}"),
+        JobTarget::Watch { file: Some(f), .. } => {
+            f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| f.display().to_string())
+        }
+        JobTarget::Watch { .. } => unreachable!("clap requires --pid or --file"),
+    };
     let opts = job::RunOpts {
         from: from.clone(),
-        name: name.map(str::to_string).unwrap_or_else(|| job::default_name(command)),
+        name: name.map(str::to_string).unwrap_or(default_name),
         pattern,
         every,
         tail,
-        command: command.to_vec(),
+        command: match &target {
+            JobTarget::Run(command) => command.to_vec(),
+            JobTarget::Watch { .. } => Vec::new(),
+        },
         retry_for: job::RETRY_FOR,
     };
     // No sender advisory: `<machine>/job` is never registered, by design, so it would warn on
@@ -414,7 +470,10 @@ fn job_run(
     let send = |subject: &str, body: &str| {
         c.send(&from, to, "job", subject, body, "").map_err(|e| e.to_string())
     };
-    job::run(&opts, &send)
+    match target {
+        JobTarget::Run(_) => job::run(&opts, &send),
+        JobTarget::Watch { pid, file } => job::watch(&opts, pid, file, &send),
+    }
 }
 
 /// Resolve broker URL, token and CA file: explicit flag/env first, then
@@ -495,7 +554,12 @@ fn main() {
         }
         Cmd::Whoami { json } => whoami(&cli, json),
         Cmd::Job { cmd: JobCmd::Run { ref to, ref from, ref name, ref pattern, ref every, tail, ref command } } => {
-            std::process::exit(job_run(&cli, to, from.as_deref(), name.as_deref(), pattern.as_deref(), every.as_deref(), tail, command))
+            let target = JobTarget::Run(command);
+            std::process::exit(job_run(&cli, to, from.as_deref(), name.as_deref(), pattern.as_deref(), every.as_deref(), tail, target))
+        }
+        Cmd::Job { cmd: JobCmd::Watch { ref to, ref from, ref name, pid, ref file, ref pattern, ref every, tail } } => {
+            let target = JobTarget::Watch { pid, file: file.as_deref() };
+            std::process::exit(job_run(&cli, to, from.as_deref(), name.as_deref(), pattern.as_deref(), every.as_deref(), tail, target))
         }
         Cmd::Update { ref from, ref to, dry_run, force } => {
             update(from.as_deref(), to.as_deref(), dry_run, force)

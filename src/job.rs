@@ -277,6 +277,8 @@ pub type SendFn<'a> = &'a dyn Fn(&str, &str) -> Result<String, String>;
 enum Ev {
     Line(String),
     Eof,
+    /// The watched process ended, with its exit code when it can be known.
+    Gone(Option<i32>),
 }
 
 fn utc(t: SystemTime) -> String {
@@ -287,11 +289,143 @@ fn indented(lines: &[String]) -> String {
     lines.iter().map(|l| format!("    {l}\n")).collect()
 }
 
+/// What `job run` and `job watch` share: the last lines, the matches waiting to be sent, and the
+/// words that say what is being watched.
+struct Report<'a> {
+    o: &'a RunOpts,
+    send: SendFn<'a>,
+    t0: Instant,
+    tail: VecDeque<String>,
+    batcher: Option<Batcher>,
+    /// `Command: …` or `Watching: …`, a line of every message.
+    what: String,
+    /// `job run` or `job watch`.
+    via: &'static str,
+    /// What the last lines are the last lines of, and what to say when there are none. None: no
+    /// section at all, as for a process watched with no file.
+    tail_of: Option<(String, String)>,
+}
+
+impl<'a> Report<'a> {
+    fn new(
+        o: &'a RunOpts,
+        send: SendFn<'a>,
+        what: String,
+        via: &'static str,
+        tail_of: Option<(String, String)>,
+    ) -> Self {
+        Report {
+            o,
+            send,
+            t0: Instant::now(),
+            tail: VecDeque::new(),
+            batcher: o.every.as_ref().map(|(every, _)| Batcher::new(*every)),
+            what,
+            via,
+            tail_of,
+        }
+    }
+
+    fn line(&mut self, l: String) {
+        if self.o.tail > 0 {
+            self.tail.push_back(l.clone());
+            while self.tail.len() > self.o.tail {
+                self.tail.pop_front();
+            }
+        }
+        let now = self.t0.elapsed();
+        if let (Some((re, _)), Some(b)) = (&self.o.pattern, self.batcher.as_mut()) {
+            if re.is_match(&l) {
+                if let Some(batch) = b.on_match(now, l) {
+                    self.send_matches(batch);
+                }
+            }
+        }
+    }
+
+    /// Sends held matches whose interval has passed.
+    fn tick(&mut self) {
+        let now = self.t0.elapsed();
+        if let Some(batch) = self.batcher.as_mut().and_then(|b| b.due(now)) {
+            self.send_matches(batch);
+        }
+    }
+
+    /// How long the loop may sleep before something is due.
+    fn wait(&self) -> Duration {
+        let mut wait = Duration::from_millis(250);
+        if let Some(due) = self.batcher.as_ref().and_then(|b| b.next_due()) {
+            wait = wait.min(due.saturating_sub(self.t0.elapsed()));
+        }
+        wait
+    }
+
+    /// One try. A batch that fails goes back to wait for the next interval or the end message.
+    fn send_matches(&mut self, batch: Batch) {
+        let (pat, every) = match (&self.o.pattern, &self.o.every) {
+            (Some((_, p)), Some((_, e))) => (p.as_str(), e.as_str()),
+            _ => return,
+        };
+        let Some(b) = self.batcher.as_mut() else { return };
+        let n = batch.count;
+        let subject = format!("job {}: {n} line{} matched `{pat}`", self.o.name, if n == 1 { "" } else { "s" });
+        let body = format!(
+            "{n} new line{} of the job {} matched `{pat}` ({} in all so far){}:\n{}\nThe job is still running. Matches are reported at most once every {every}; the end is always reported.\n{}\nSent from {} by `agent-msg-bus {}`.\n",
+            if n == 1 { "" } else { "s" },
+            self.o.name,
+            b.total(),
+            if n > batch.lines.len() { ", the newest of them" } else { "" },
+            indented(&batch.lines),
+            self.what,
+            self.o.from,
+            self.via
+        );
+        if let Err(e) = (self.send)(&subject, &body) {
+            eprintln!("agent-msg-bus: job: could not report a match ({e}); it will go with a later message");
+            b.restore(batch);
+        }
+    }
+
+    /// The end message's sections after its first paragraph: matches not yet sent, the last lines.
+    fn closing(&mut self) -> String {
+        let mut body = String::new();
+        if let (Some(b), Some((_, pat))) = (self.batcher.as_mut(), &self.o.pattern) {
+            let total = b.total();
+            body.push_str(&match_summary(pat, total, b.take()));
+        }
+        if let (true, Some((of, none))) = (self.o.tail > 0, &self.tail_of) {
+            let lines: Vec<String> = self.tail.drain(..).collect();
+            if lines.is_empty() {
+                body.push_str(&format!("\n{none}\n"));
+            } else {
+                body.push_str(&format!("\nThe last {} lines {of}:\n{}", lines.len(), indented(&lines)));
+            }
+        }
+        body
+    }
+
+    /// Sends the end message, retrying through a broker restart. Returns `code`, or
+    /// [`EXIT_UNSENT`] if it never got through.
+    fn end(&self, subject: &str, body: &str, code: i32) -> i32 {
+        match send_until(self.send, subject, body, self.o.retry_for) {
+            Ok(id) => {
+                eprintln!("agent-msg-bus: job: reported the end as {id}");
+                code
+            }
+            Err(e) => {
+                eprintln!("agent-msg-bus: job: could not report the end ({e}). The message was:\n{subject}\n\n{body}");
+                EXIT_UNSENT
+            }
+        }
+    }
+}
+
 /// Runs the command and reports on it. Returns the exit code for `job run`.
 pub fn run(o: &RunOpts, send: SendFn) -> i32 {
     let started = SystemTime::now();
-    let t0 = Instant::now();
     let cmdline = o.command.join(" ");
+    let tail_of = ("of output, stdout and stderr together".to_string(), "No output.".to_string());
+    let mut r = Report::new(o, send, format!("Command: {cmdline}"), "job run", Some(tail_of));
     let mut child = match Command::new(&o.command[0])
         .args(&o.command[1..])
         .stdin(Stdio::null())
@@ -309,9 +443,9 @@ pub fn run(o: &RunOpts, send: SendFn) -> i32 {
                 utc(started),
                 o.from
             );
-            return match send_until(send, &subject, &body, o.retry_for) {
-                Ok(_) => EXIT_NOT_STARTED,
-                Err(_) => EXIT_UNSENT,
+            return match r.end(&subject, &body, EXIT_NOT_STARTED) {
+                EXIT_UNSENT => EXIT_UNSENT,
+                _ => EXIT_NOT_STARTED,
             };
         }
     };
@@ -323,11 +457,8 @@ pub fn run(o: &RunOpts, send: SendFn) -> i32 {
     readers.push(pump(out, tx.clone(), false));
     readers.push(pump(err, tx, true));
 
-    let mut tail: VecDeque<String> = VecDeque::new();
-    let mut batcher = o.every.as_ref().map(|(every, _)| Batcher::new(*every));
     let mut eofs = 0;
     let mut exited: Option<(ExitStatus, Instant)> = None;
-
     loop {
         if eofs >= 2 && exited.is_some() {
             break;
@@ -337,28 +468,10 @@ pub fn run(o: &RunOpts, send: SendFn) -> i32 {
                 break;
             }
         }
-        let mut wait = Duration::from_millis(250);
-        if let Some(due) = batcher.as_ref().and_then(|b| b.next_due()) {
-            wait = wait.min(due.saturating_sub(t0.elapsed()));
-        }
-        match rx.recv_timeout(wait) {
-            Ok(Ev::Line(l)) => {
-                if o.tail > 0 {
-                    tail.push_back(l.clone());
-                    while tail.len() > o.tail {
-                        tail.pop_front();
-                    }
-                }
-                if let (Some((re, _)), Some(b)) = (&o.pattern, batcher.as_mut()) {
-                    if re.is_match(&l) {
-                        if let Some(batch) = b.on_match(t0.elapsed(), l) {
-                            send_matches(o, send, b, batch);
-                        }
-                    }
-                }
-            }
+        match rx.recv_timeout(r.wait()) {
+            Ok(Ev::Line(l)) => r.line(l),
             Ok(Ev::Eof) => eofs += 1,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Ev::Gone(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 eofs = 2;
                 std::thread::sleep(Duration::from_millis(100));
@@ -369,18 +482,14 @@ pub fn run(o: &RunOpts, send: SendFn) -> i32 {
                 exited = Some((st, Instant::now()));
             }
         }
-        if let Some(b) = batcher.as_mut() {
-            if let Some(batch) = b.due(t0.elapsed()) {
-                send_matches(o, send, b, batch);
-            }
-        }
+        r.tick();
     }
     let status = match exited {
         Some((st, _)) => st,
         None => child.wait().expect("the child was started, so it can be waited for"),
     };
     let ended = SystemTime::now();
-    let ran = ended.duration_since(started).unwrap_or_else(|_| t0.elapsed());
+    let ran = ended.duration_since(started).unwrap_or_else(|_| r.t0.elapsed());
     let (how, code) = outcome(&status);
 
     let subject = format!("job {}: {how} after {}", o.name, human(ran));
@@ -392,40 +501,14 @@ pub fn run(o: &RunOpts, send: SendFn) -> i32 {
         utc(ended),
         o.from
     );
-    if let (Some(b), Some((_, pat))) = (batcher.as_mut(), &o.pattern) {
-        let total = b.total();
-        body.push_str(&match_summary(pat, total, b.take()));
-    }
-    if o.tail > 0 {
-        let lines: Vec<String> = tail.into_iter().collect();
-        if lines.is_empty() {
-            body.push_str("\nNo output.\n");
-        } else {
-            body.push_str(&format!(
-                "\nThe last {} lines of output, stdout and stderr together:\n{}",
-                lines.len(),
-                indented(&lines)
-            ));
-        }
-    }
-    for r in readers {
+    body.push_str(&r.closing());
+    for h in readers {
         // A reader still blocked on a pipe a grandchild holds is left to the process's exit.
-        if r.is_finished() {
-            let _ = r.join();
+        if h.is_finished() {
+            let _ = h.join();
         }
     }
-    match send_until(send, &subject, &body, o.retry_for) {
-        Ok(id) => {
-            eprintln!("agent-msg-bus: job: reported the end as {id}");
-            code
-        }
-        Err(e) => {
-            eprintln!(
-                "agent-msg-bus: job: could not report the end ({e}). The message was:\n{subject}\n\n{body}"
-            );
-            EXIT_UNSENT
-        }
-    }
+    r.end(&subject, &body, code)
 }
 
 /// The end message's account of `--match`: how many lines matched, and those not yet reported.
@@ -479,30 +562,6 @@ fn pump(
     })
 }
 
-/// One try. A batch that fails goes back to wait for the next interval or the end message.
-fn send_matches(o: &RunOpts, send: SendFn, b: &mut Batcher, batch: Batch) {
-    let (pat, every) = match (&o.pattern, &o.every) {
-        (Some((_, p)), Some((_, e))) => (p.as_str(), e.as_str()),
-        _ => return,
-    };
-    let n = batch.count;
-    let subject = format!("job {}: {n} line{} matched `{pat}`", o.name, if n == 1 { "" } else { "s" });
-    let body = format!(
-        "{n} new line{} of the job {} matched `{pat}` ({} in all so far){}:\n{}\nThe job is still running. Matches are reported at most once every {every}; the end is always reported.\nCommand: {}\nSent from {} by `agent-msg-bus job run`.\n",
-        if n == 1 { "" } else { "s" },
-        o.name,
-        b.total(),
-        if n > batch.lines.len() { ", the newest of them" } else { "" },
-        indented(&batch.lines),
-        o.command.join(" "),
-        o.from
-    );
-    if let Err(e) = send(&subject, &body) {
-        eprintln!("agent-msg-bus: job: could not report a match ({e}); it will go with a later message");
-        b.restore(batch);
-    }
-}
-
 /// Retries with backoff, 1 s doubling to 30 s, until `limit` has passed.
 fn send_until(send: SendFn, subject: &str, body: &str, limit: Duration) -> Result<String, String> {
     let start = Instant::now();
@@ -522,11 +581,317 @@ fn send_until(send: SendFn, subject: &str, body: &str, limit: Duration) -> Resul
     }
 }
 
+/// The most `job watch` reads from a file in one go, so a log that grew by a gigabyte while
+/// nobody looked is read in pieces rather than into memory at once.
+const READ_CHUNK: u64 = 1 << 20;
+
+/// A file followed from its end, like `tail -F`: lines written before `job watch` started are
+/// not news.
+pub struct Follow {
+    path: std::path::PathBuf,
+    file: std::fs::File,
+    pos: u64,
+}
+
+impl Follow {
+    pub fn open_at_end(path: &std::path::Path) -> std::io::Result<Follow> {
+        use std::io::Seek;
+        let mut file = std::fs::File::open(path)?;
+        let pos = file.seek(std::io::SeekFrom::End(0))?;
+        Ok(Follow { path: path.to_path_buf(), file, pos })
+    }
+
+    /// Up to [`READ_CHUNK`] bytes written since the last read. A file now shorter than what was
+    /// already read was truncated or replaced, so it is read again from its start.
+    pub fn read_new(&mut self) -> std::io::Result<Vec<u8>> {
+        use std::io::Seek;
+        let now = std::fs::metadata(&self.path)?;
+        if now.len() < self.pos || self.replaced(&now) {
+            eprintln!("agent-msg-bus: job: {} was truncated or replaced; reading it from the start", self.path.display());
+            self.file = std::fs::File::open(&self.path)?;
+            self.pos = 0;
+        }
+        self.file.seek(std::io::SeekFrom::Start(self.pos))?;
+        let mut buf = Vec::new();
+        (&mut self.file).take(READ_CHUNK).read_to_end(&mut buf)?;
+        self.pos += buf.len() as u64;
+        Ok(buf)
+    }
+
+    #[cfg(unix)]
+    fn replaced(&self, now: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        self.file.metadata().map(|m| m.ino() != now.ino() || m.dev() != now.dev()).unwrap_or(true)
+    }
+
+    #[cfg(not(unix))]
+    fn replaced(&self, _now: &std::fs::Metadata) -> bool {
+        false
+    }
+}
+
+/// The state letter and start time (field 22, in clock ticks since boot) of a `/proc/<pid>/stat`
+/// line. The command name in field 2 is in parentheses and may itself hold spaces and `)`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_stat(s: &str) -> Option<(char, u64)> {
+    let rest = &s[s.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let state = f.first()?.chars().next()?;
+    let start = f.get(19)?.parse().ok()?;
+    Some((state, start))
+}
+
+/// Blocks until the process ends; returns its exit code when it can be known.
+pub type Waiter = Box<dyn FnOnce() -> Option<i32> + std::marker::Send>;
+
+/// Something that waits for process `pid` to end, or why it can't.
+///
+/// On Windows it holds a handle on the process, which also yields the exit code and cannot be
+/// fooled by the pid being reused. On Linux it polls `/proc` and compares the start time, so a
+/// new process given the same pid is not mistaken for the old one; the exit code goes only to the
+/// parent, so it is unknown.
+#[cfg(windows)]
+pub fn wait_for(pid: u32) -> Result<Waiter, String> {
+    win::Proc::open(pid).map(|p| Box::new(move || p.wait()) as Waiter)
+}
+
+#[cfg(target_os = "linux")]
+pub fn wait_for(pid: u32) -> Result<Waiter, String> {
+    let stat = |pid: u32| parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?);
+    let (_, start) = stat(pid).ok_or_else(|| format!("no process with pid {pid}"))?;
+    Ok(Box::new(move || {
+        loop {
+            match stat(pid) {
+                Some((state, t)) if t == start && state != 'Z' && state != 'X' => {
+                    std::thread::sleep(Duration::from_secs(1))
+                }
+                _ => return None,
+            }
+        }
+    }))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn wait_for(pid: u32) -> Result<Waiter, String> {
+    Err(format!("job watch --pid {pid}: watching a process works on Linux and Windows only"))
+}
+
+#[cfg(windows)]
+mod win {
+    type Handle = *mut core::ffi::c_void;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+        fn GetExitCodeProcess(h: Handle, code: *mut u32) -> i32;
+        fn CloseHandle(h: Handle) -> i32;
+    }
+
+    pub struct Proc(Handle);
+
+    // The handle is used from one thread at a time: opened here, waited on by the watcher thread.
+    unsafe impl Send for Proc {}
+
+    impl Proc {
+        pub fn open(pid: u32) -> Result<Proc, String> {
+            // SAFETY: plain Win32 call; a null result is checked.
+            let h = unsafe { OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if h.is_null() {
+                Err(format!("no process with pid {pid} that this user can watch: {}", std::io::Error::last_os_error()))
+            } else {
+                Ok(Proc(h))
+            }
+        }
+
+        pub fn wait(self) -> Option<i32> {
+            let mut code = 0u32;
+            // SAFETY: self.0 is a live process handle opened with SYNCHRONIZE and query rights.
+            unsafe {
+                WaitForSingleObject(self.0, INFINITE);
+                (GetExitCodeProcess(self.0, &mut code) != 0).then_some(code as i32)
+            }
+        }
+    }
+
+    impl Drop for Proc {
+        fn drop(&mut self) {
+            // SAFETY: closes the handle opened in `open`, once.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+/// Watches a process, a file, or both, and reports as `job run` does. Ends when the process
+/// does; watching only a file runs until stopped and sends only matches. Returns the exit code.
+pub fn watch(o: &RunOpts, pid: Option<u32>, file: Option<&std::path::Path>, send: SendFn) -> i32 {
+    let started = SystemTime::now();
+    let waiter = match pid.map(wait_for) {
+        Some(Ok(w)) => Some(w),
+        Some(Err(e)) => {
+            eprintln!("agent-msg-bus: job watch: {e}");
+            return 1;
+        }
+        None => None,
+    };
+    let mut follow = match file.map(Follow::open_at_end) {
+        Some(Ok(f)) => Some(f),
+        Some(Err(e)) => {
+            eprintln!("agent-msg-bus: job watch: cannot read {}: {e}", file.unwrap().display());
+            return 1;
+        }
+        None => None,
+    };
+    let what = match (pid, file) {
+        (Some(p), Some(f)) => format!("process {p} and the file {}", f.display()),
+        (Some(p), None) => format!("process {p}"),
+        (None, Some(f)) => format!("the file {}", f.display()),
+        (None, None) => unreachable!("clap requires --pid or --file"),
+    };
+    let tail_of = file.map(|f| {
+        (format!("added to {}", f.display()), format!("Nothing was added to {} while it was watched.", f.display()))
+    });
+    let mut r = Report::new(o, send, format!("Watching: {what}"), "job watch", tail_of);
+    let (tx, rx) = mpsc::channel::<Ev>();
+    if let Some(w) = waiter {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Ev::Gone(w()));
+        });
+    }
+    eprintln!("agent-msg-bus: job: watching {what}");
+
+    let mut lines = Lines::default();
+    let mut read_failed = false;
+    let mut gone: Option<Option<i32>> = None;
+    loop {
+        if let Some(f) = follow.as_mut() {
+            loop {
+                match f.read_new() {
+                    Ok(b) if b.is_empty() => break,
+                    Ok(b) => {
+                        read_failed = false;
+                        for l in lines.push(&b) {
+                            r.line(l);
+                        }
+                    }
+                    Err(e) => {
+                        if !read_failed {
+                            eprintln!("agent-msg-bus: job watch: cannot read {}: {e}; still trying", f.path.display());
+                        }
+                        read_failed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if gone.is_some() {
+            break;
+        }
+        if let Ok(Ev::Gone(code)) = rx.recv_timeout(r.wait()) {
+            // One more pass over the file above picks up what the process wrote last.
+            gone = Some(code);
+            continue;
+        }
+        r.tick();
+    }
+    if let Some(l) = lines.finish() {
+        r.line(l);
+    }
+    drop(tx);
+
+    let code = gone.flatten();
+    let ended = SystemTime::now();
+    let watched = ended.duration_since(started).unwrap_or_else(|_| r.t0.elapsed());
+    let pid = pid.expect("only a watched process ends the loop");
+    let subject = match code {
+        Some(c) => format!("job {}: process {pid} ended, exit {c}, watched {}", o.name, human(watched)),
+        None => format!("job {}: process {pid} ended, watched {}", o.name, human(watched)),
+    };
+    let mut body = format!(
+        "The process {pid}, watched as {}, ended{}. It was watched for {}.\n",
+        o.name,
+        code.map(|c| format!(" with exit code {c}")).unwrap_or_default(),
+        human(watched)
+    );
+    if code.is_none() {
+        body.push_str(
+            "Its exit code cannot be known here: only the process that started it is told. \
+             `job run` starts the command itself and reports its code.\n",
+        );
+    }
+    body.push_str(&format!(
+        "\nWatching: {what}\nStarted watching: {}\nEnded:            {}\nSent from {} by `agent-msg-bus job watch`.\n",
+        utc(started),
+        utc(ended),
+        o.from
+    ));
+    body.push_str(&r.closing());
+    r.end(&subject, &body, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const S: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn a_proc_stat_line_gives_state_and_start_time_even_with_a_strange_name() {
+        let line = "4242 (scrape (v2) x) S 1 4242 4242 0 -1 4194560 100 0 0 0 5 2 0 0 20 0 1 0 987654 1000 100";
+        assert_eq!(parse_stat(line), Some(('S', 987654)));
+        assert_eq!(parse_stat("4242 (zombie) Z 1 2 3"), None, "too short: no start time");
+        assert_eq!(parse_stat("garbage"), None);
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("amb-job-unit-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("f.log")
+    }
+
+    #[test]
+    fn a_followed_file_yields_only_what_was_added() {
+        use std::io::Write;
+        let p = scratch("added");
+        std::fs::write(&p, "before\n").unwrap();
+        let mut f = Follow::open_at_end(&p).unwrap();
+        assert!(f.read_new().unwrap().is_empty());
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"after\n").unwrap();
+        assert_eq!(f.read_new().unwrap(), b"after\n");
+        assert!(f.read_new().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_truncated_file_is_read_again_from_its_start() {
+        let p = scratch("truncated");
+        std::fs::write(&p, "a long first line\n").unwrap();
+        let mut f = Follow::open_at_end(&p).unwrap();
+        std::fs::write(&p, "new\n").unwrap();
+        assert_eq!(f.read_new().unwrap(), b"new\n");
+    }
+
+    #[test]
+    fn a_big_burst_is_read_in_pieces() {
+        use std::io::Write;
+        let p = scratch("burst");
+        std::fs::write(&p, "").unwrap();
+        let mut f = Follow::open_at_end(&p).unwrap();
+        let burst = vec![b'x'; READ_CHUNK as usize + 10];
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(&burst).unwrap();
+        assert_eq!(f.read_new().unwrap().len(), READ_CHUNK as usize);
+        assert_eq!(f.read_new().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn watching_a_pid_that_does_not_exist_is_refused_at_once() {
+        assert!(wait_for(999_999_999).is_err());
+    }
 
     #[test]
     fn intervals_take_a_number_and_a_unit() {
@@ -697,10 +1062,10 @@ mod tests {
     #[test]
     fn a_match_that_could_not_be_sent_is_held_for_later() {
         let o = opts(Some("x"));
-        let mut b = Batcher::new(3600 * S);
-        let batch = b.on_match(Duration::ZERO, "x1".into()).unwrap();
-        send_matches(&o, &|_: &str, _: &str| Err("down".to_string()), &mut b, batch);
-        assert_eq!(b.take(), Some(Batch { lines: vec!["x1".into()], count: 1 }));
+        let down = |_: &str, _: &str| Err("down".to_string());
+        let mut r = Report::new(&o, &down, "Command: t".into(), "job run", None);
+        r.line("x1".into());
+        assert_eq!(r.batcher.as_mut().unwrap().take(), Some(Batch { lines: vec!["x1".into()], count: 1 }));
     }
 
     #[test]
