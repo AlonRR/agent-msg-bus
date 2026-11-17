@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.37] — 2026-11-17
+
 ### Added
 
 - **`job run`: a command that reports to a session when it ends** (Phase 11 piece D in
