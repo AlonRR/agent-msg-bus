@@ -148,9 +148,11 @@ session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
 ## What has been checked
 
 - `claude plugin validate`: passes.
-- `claude plugin test`: 54 tests, against a stand-in for the CLI. They cover finding the inbox, what
-  is shown and when, the band and its clicks, the wake, the timer, re-reading after a bus command,
-  and watch mode. The 12 band tests (with the count assertions moved from the status line to the
+- `claude plugin test`: 58 tests, against a stand-in for the CLI. They cover finding the inbox, what
+  is shown and when, the band and its clicks, the wake and its hold through a running turn, the
+  timer, re-reading after a bus command, and watch mode. Of the 4 hold tests added in 0.3.1, the 2
+  that expect a held wake failed on 0.3.0, and two defects seeded into 0.3.1 (no read at the
+  turn's end; a subagent's turn holding the wake) each failed one. The 12 band tests (with the count assertions moved from the status line to the
   band) failed on 0.1.1: 15 of the 41 then written failed there, and all pass on 0.2.0. Of the 13
   wake tests, the 8 that expect a wake failed on 0.2.0; the 5 that expect none passed there too,
   as they should.
@@ -178,6 +180,15 @@ session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
   - a mouse click on the row listed the headers with their age (`13s  <sender>  <subject>`), a click
     on a header opened its id, sent time and every line of its body under it, and a click on the row
     folded the list again.
+
+- The same kind of session, 17 Nov 2026 (Claude Code 2.1.326, mod 0.3.1, 140 columns), whose own
+  turns sent the mail with the bus CLI, so the mod read it mid-turn:
+  - a turn that sent a `request`, read it and acked it: no wake, in the 75 s after the turn;
+  - a turn that sent a `request` and left it unread: one wake, right after the turn ended;
+  - after that woken turn ended, a `request` sent from outside while the session was idle woke it
+    14 s later, so the end of a turn the mod's own wake started releases the hold too.
+  The terminal had the kitty keyboard protocol on: Enter reached the session only as `ESC [13u`,
+  a plain carriage return typed nothing but a stray `u`.
 
 Not checked yet:
 - colours and fonts: the check above read the screen as text, not pixels.
