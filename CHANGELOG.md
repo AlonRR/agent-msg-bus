@@ -22,6 +22,16 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Changed
+
+- **The SessionStart text names `remind` and `job`**, with the session's own address filled in:
+  how to wake itself later (`--in`, `--at`, `--list`, `--cancel`), what a due reminder does to a
+  live, idle session (the inbox mod wakes it) and to one that has ended (it waits, and the next
+  session on the address is told at start), and how to be told when a command ends (`job run`,
+  `job watch`). On 17 Nov 2026 a session set a `CronCreate` for a morning task, which dies with
+  the session, because nothing it loaded named `remind` (asked by a weekly review, on the user's
+  decision).
+
 ## [0.4.38] — 2026-11-17
 
 ### Fixed

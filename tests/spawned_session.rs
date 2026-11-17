@@ -172,6 +172,30 @@ async fn a_refused_name_is_said_out_loud_and_not_pinned() {
     }
 }
 
+/// A session learns at start that it can wake itself later and be told when a job ends. On
+/// 17 Nov 2026 a session set a CronCreate for a morning task, which dies with the session, because
+/// nothing it loaded named `remind`. The commands come filled in with its own address, and the
+/// banner says what a reminder does to a live session and to one that has ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_banner_names_remind_and_job_with_this_address() {
+    let r = rig().await;
+    let banner = session_start(&r, None).await;
+    for want in [
+        format!("remind {REPO_ADDR} --in"),
+        "--at".to_string(),
+        "--list".to_string(),
+        "--cancel".to_string(),
+        format!("job run --to {REPO_ADDR} --"),
+        format!("job watch --to {REPO_ADDR} --pid"),
+        "--file".to_string(),
+    ] {
+        assert!(banner.contains(&want), "the banner does not name `{want}`: {banner}");
+    }
+    for said in ["after this session ends", "kind `timer`", "dies with the session"] {
+        assert!(banner.contains(said), "the banner does not say `{said}`: {banner}");
+    }
+}
+
 /// A pin is a claim the session itself made, so it stands. A resumed session still carrying the
 /// launcher's variable must not be renamed, and a mismatch is worth one line.
 #[tokio::test(flavor = "multi_thread")]

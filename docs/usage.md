@@ -380,6 +380,11 @@ agent-msg-bus remind <me> --cancel <timer id>
   before then, and it cannot be acked: `ack` refuses its id (it starts with `t`) and names the
   cancel. Only the address that set it can cancel it.
 - **It prints the timer's id** on stdout, and on stderr when it is due and how to cancel it.
+- **It outlives the session that set it.** Once due it is ordinary mail: a live, idle session is
+  woken for it by the inbox mod (kind `timer` is among the default wake kinds), and if the session
+  has ended it waits in the mailbox until the next session to start on that address is told at
+  start. A `CronCreate` or `ScheduleWakeup` dies with its session. The SessionStart text names
+  `remind` and `job` with the session's own address filled in, so a session knows both exist.
 - **Repeating reminders** are not built in: set the next one when you handle the current one.
 - **Needs broker 0.4.37 or later.** An older broker answers 404, and the client says so.
 

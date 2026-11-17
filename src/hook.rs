@@ -591,6 +591,21 @@ pub fn run() -> ! {
          To see who is on the bus:  {me} peers\n\
          After handling messages:  {me} ack {addr} <last-message-id>\n\
          \n\
+         To wake yourself later, even after this session ends:  {me} remind {addr} --in 2h \
+         --subject \"...\"  (or --at with a zoned time such as 2026-11-18T09:00:00+02:00; \
+         `remind {addr} --list` shows what is set, `--cancel <id>` drops one). When it comes due, \
+         the broker delivers a message of kind `timer` to this address: a live, idle session is \
+         woken for it by the inbox mod, if installed (`timer` is among its default wake kinds); \
+         once this session has ended, it waits in this mailbox and the next session to start on \
+         this address is told at start. A CronCreate or ScheduleWakeup dies with the session; a \
+         reminder does not.\n\
+         To be told when a command ends:  {me} job run --to {addr} -- <command>  (add --match \
+         <regex> --every <interval> for lines it prints); for something already running, \
+         {me} job watch --to {addr} --pid <pid>, or --file <log> with --match --every. Each \
+         sends a message of kind `job` from <machine>/job. A job that must outlive this session \
+         goes under the machine's own supervisor (a scheduled task, a systemd unit), not a \
+         session's background shell, which is reaped.\n\
+         \n\
          ACK IS A SEPARATE, DELIBERATE STEP. Acting on a message feels like handling it, but until \
          you ack, the message is still unread: it will be delivered again on every reconnect, \
          marked `\"replay\": true`. A frame carrying that flag is not a duplicate send - it is one \
