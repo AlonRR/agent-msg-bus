@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.38] — 2026-11-17
+
 ### Fixed
 
 - **The inbox mod no longer wakes a session for mail its own turn already handled** (mod 0.3.1).
