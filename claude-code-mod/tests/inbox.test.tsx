@@ -81,6 +81,9 @@ function world(on: On, stored: Record<string, unknown> = {}): World {
     return { text: e.text }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  // The engine beneath the mod's turn hooks: a turn starts, and ends with its answer.
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
   // A call on `$` is answered with `{ value }`, a void one with `{ value: undefined }`.
   on('session.id', () => ({ value: '0123abcd-0000-0000-0000-000000000000' }))
   on('process.run', async ($, e) => {
@@ -594,6 +597,61 @@ describe('waking the session when mail arrives', () => {
     await start($, w)
     await w.clock.advance(5 * 60_000)
     expect(w.prompts).toEqual([])
+  })
+
+  // A prompt submitted mid-turn runs only once the session is idle. Seen 17 Nov 2026: a timer
+  // found during a turn woke the session ten minutes later, after that turn had read and acked it.
+  const turnStart = ($: Engine, extra: { agentId?: string } = {}) => $.turn.start({ text: '', turnId: 'turn-1', ...extra })
+  const turnEnd = ($: Engine, reason: 'answer' | 'aborted' | 'error' = 'answer', extra: { agentId?: string } = {}) =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: reason === 'aborted', turnId: 'turn-1', reason, ...extra })
+
+  test('mail found during a turn and acked in it wakes nothing when the turn ends', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    await turnStart($)
+    w.waiting = [request(1, { kind: 'timer' })]
+    await w.clock.advance(60_000)
+    expect(w.prompts).toEqual([])
+    expect(await bandHead($)).toContain('bus: 1 unread')
+    w.waiting = []
+    await turnEnd($)
+    await w.clock.advance(0)
+    expect(w.prompts).toEqual([])
+  })
+
+  test('mail found during a turn and still unread when it ends wakes then, once', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    await turnStart($)
+    w.waiting = [request(1)]
+    await w.clock.advance(3 * 60_000)
+    expect(w.prompts).toEqual([])
+    await turnEnd($)
+    await w.clock.advance(0)
+    expect(w.prompts.length).toBe(1)
+    expect(w.prompts[0]).toContain(request(1).id)
+    await w.clock.advance(5 * 60_000)
+    expect(w.prompts.length).toBe(1)
+  })
+
+  test('an interrupted turn lets a held wake go, as an answered one does', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    await turnStart($)
+    w.waiting = [request(1)]
+    await w.clock.advance(60_000)
+    await turnEnd($, 'aborted')
+    await w.clock.advance(0)
+    expect(w.prompts.length).toBe(1)
+  })
+
+  test("a subagent's turn holds no wake: the session's own loop is idle", async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    await turnStart($, { agentId: 'agent-1' })
+    w.waiting = [request(1)]
+    await w.clock.advance(60_000)
+    expect(w.prompts.length).toBe(1)
   })
 })
 

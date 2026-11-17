@@ -1,6 +1,6 @@
 {
   "name": "agent-msg-bus-inbox",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Shows how much agent-msg-bus mail is waiting for this session, in a row above the prompt and a toast. Click the row to list what is unread, and a header to read that message. A new request, blocking, timer or job message wakes the session with a pointer to it.",
   "types": "./types/index.d.ts",
   "author": {

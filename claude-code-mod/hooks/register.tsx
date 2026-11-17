@@ -10,7 +10,9 @@
 // - A new message of a waking kind (request, blocking, timer, job by default) starts a turn in
 //   this session, once per message, with a pointer: id, sender, kind and subject. The ids it woke
 //   for are kept in the plugin's store, shared by the machine's sessions, so neither a reload nor a
-//   second session on the same inbox wakes for the same message again.
+//   second session on the same inbox wakes for the same message again. Mail found while the
+//   session's own turn runs wakes nothing yet: the turn's end reads again and wakes only for what
+//   that turn left unread.
 //
 // Three things it never does, by design:
 // - It never acks. Acking is the session's deliberate step.
@@ -50,6 +52,10 @@ type State = {
   wakeKinds: Set<string>
   /** A `-p` run or an SDK host: never woken, so a wake cannot extend a run nobody watches. */
   interactive: boolean
+  /** The main loop's running turn, if any: a wake waits for it to end. */
+  turn: string | undefined
+  /** A wake was held for the running turn: read again once it ends. */
+  held: boolean
 }
 
 // Change a tag when that value's fields change: it declines what an earlier version stored.
@@ -324,6 +330,13 @@ async function wake($: EngineInterface, s: State, addr: string, seen: Wire[], is
 async function wakeOnce($: EngineInterface, s: State, inbox: Inbox, listed: boolean): Promise<void> {
   if (!s.interactive || s.wakeKinds.size === 0 || s.me === undefined) return
   if (!listed) return
+  // A prompt submitted mid-turn runs only after the turn, which may have read and acked the mail
+  // by then. So nothing is marked or sent now: the turn's end reads again and wakes for what is
+  // still waiting.
+  if (s.turn !== undefined) {
+    s.held = true
+    return
+  }
   if (inbox.total <= inbox.messages.length) {
     await wake($, s, inbox.addr, inbox.messages, true)
     return
@@ -462,6 +475,8 @@ export const register: Register = (on, options) => {
     bodies: new Map(),
     wakeKinds: wakeKindsOf(options.wakeKinds),
     interactive: false,
+    turn: undefined,
+    held: false,
   }
 
   // Started, not awaited: a `whoami` that waits on an unreachable broker must not hold up the
@@ -472,6 +487,24 @@ export const register: Register = (on, options) => {
     void begin($, s, options.binary, intervalMs)
     return started
   })
+
+  // The main loop's turns, so a wake found mid-turn waits for the end. A subagent's turn is not
+  // the session's: it holds nothing. Every ending (answer, interruption, refusal, error) releases.
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) s.turn = e.turnId
+    return next(e)
+  })
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    if (e.agentId === undefined && s.turn === e.turnId) {
+      s.turn = undefined
+      if (s.held) {
+        s.held = false
+        void refresh($, s)
+      }
+    }
+    return done
+  }).catch(($, e, next) => next(e))
 
   // It never blocks or changes the call: the result goes back as it came, the reads it starts run
   // after, and a failure here is skipped rather than turned into a refusal.

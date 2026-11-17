@@ -22,6 +22,16 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The inbox mod no longer wakes a session for mail its own turn already handled** (mod 0.3.1).
+  A wake is a prompt, and a prompt submitted mid-turn runs only once the session is idle. So mail
+  found during a turn woke the session after that turn, even when the turn had read and acked
+  it. Seen 17 Nov 2026: a timer found mid-turn woke its session about ten minutes later, for a
+  message acked six minutes before. The mod now follows the main loop's turns (`turn.start`,
+  `turn.complete`; a subagent's turn holds nothing), marks and sends nothing while one runs, and
+  reads again when it ends, however it ends, waking only for what is still unread.
+
 ## [0.4.37] — 2026-11-17
 
 ### Added

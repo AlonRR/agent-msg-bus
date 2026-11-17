@@ -6,7 +6,10 @@ list what is unread; click a header to read that message. Showing costs no model
 
 **A new message of a waking kind wakes the session** (0.3.0 on): `request`, `blocking`, `timer`
 and `job` by default. The mod starts one turn with a pointer to the message, never its body, and
-the session reads and acks it itself. Every other kind, `fyi` above all, only shows.
+the session reads and acks it itself. Every other kind, `fyi` above all, only shows. Mail that
+arrives while the session's own turn is running wakes nothing yet (0.3.1 on): when the turn ends
+the mod reads again and wakes only for what is still unread, so mail the turn read and acked
+does not start another turn.
 
 ```
 bus: 2 unread for machine-a/repo · show
