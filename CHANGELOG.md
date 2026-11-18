@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.39] — 2026-11-18
+
 ### Changed
 
 - **The SessionStart text names `remind` and `job`**, with the session's own address filled in:
