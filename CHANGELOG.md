@@ -22,6 +22,8 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+## [0.4.40] — 2026-11-19
+
 ### Fixed
 
 - **The inbox mod's wake names the binary it runs, not a bare `agent-msg-bus`** (mod 0.3.2). The
