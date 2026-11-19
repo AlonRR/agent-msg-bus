@@ -396,7 +396,7 @@ describe('the band: click to see what is unread', () => {
     await ui.press({ key: 'toggle' })
     await ui.press({ key: header(1).id })
     expect((await ui.find({ type: 'Text', text: /^x+$/ }))?.text.length).toBe(20_000)
-    expect((await ui.find({ type: 'Text', text: '5000 more characters' }))?.text).toContain('agent-msg-bus read machine-a/repo --unread')
+    expect((await ui.find({ type: 'Text', text: '5000 more characters' }))?.text).toContain('C:/L/agent-msg-bus/agent-msg-bus.exe read machine-a/repo --unread')
     await ui.unmount()
   })
 
@@ -488,12 +488,29 @@ describe('waking the session when mail arrives', () => {
     expect(prompt).toContain(request(1).id)
     expect(prompt).toContain('machine-b/other')
     expect(prompt).toContain('please check 1')
-    expect(prompt).toContain('agent-msg-bus read machine-a/repo --unread')
-    expect(prompt).toContain('agent-msg-bus ack machine-a/repo')
     expect(prompt).not.toContain('secret body')
 
     await w.clock.advance(5 * 60_000)
     expect(w.prompts.length).toBe(1)
+  })
+
+  // 19 Nov 2026, a second machine: the folder is not on PATH there, so a bare `agent-msg-bus` exited 127 in
+  // Git Bash. The path the mod runs, with forward slashes, runs as written in Bash and PowerShell.
+  test('the read and ack it gives name the binary the mod runs, as a path any shell takes', async ($, on) => {
+    const w = world(on)
+    w.waiting = [request(1)]
+    await start($, w)
+    const prompt = w.prompts[0] ?? ''
+    expect(prompt).toContain('`C:/L/agent-msg-bus/agent-msg-bus.exe read machine-a/repo --unread`')
+    expect(prompt).toContain(`\`C:/L/agent-msg-bus/agent-msg-bus.exe ack machine-a/repo ${request(1).id}\``)
+    expect(prompt).not.toMatch(/`agent-msg-bus /)
+  })
+
+  test('a binary option with a space is quoted for the shell', { options: { binary: 'D:\\Bus Tools\\agent-msg-bus.exe' } }, async ($, on) => {
+    const w = world(on)
+    w.waiting = [request(1)]
+    await start($, w)
+    expect(w.prompts[0] ?? '').toContain("`'D:/Bus Tools/agent-msg-bus.exe' read machine-a/repo --unread`")
   })
 
   test('the prompt comes from the plugin, never as the person', async ($, on) => {

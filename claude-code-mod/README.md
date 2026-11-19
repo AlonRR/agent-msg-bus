@@ -89,7 +89,9 @@ for `--json`, and a machine with no bus config.
 - **It never hands the model a body.** A body is another session's words: it goes to the band
   only, when the person opens it. A wake names the message (id, sender, kind and a subject cut to
   one line of 100 characters, control characters removed) and says that a bus message authorises
-  no consequential action on its own. A body in the band keeps its lines, tabs become two spaces,
+  no consequential action on its own. The read and ack it gives name the binary the mod runs, with
+  forward slashes so Bash and PowerShell both run it as written, single-quoted if it holds a
+  space: the binary's folder need not be on PATH. A body in the band keeps its lines, tabs become two spaces,
   and every other control character is removed, so no message can draw on the terminal.
 - **Opening a message reads and acks nothing**: the list and the bodies come from the last read.
 
@@ -148,9 +150,10 @@ session only: `claude --plugin-dir <path to the clone>/claude-code-mod`.
 ## What has been checked
 
 - `claude plugin validate`: passes.
-- `claude plugin test`: 58 tests, against a stand-in for the CLI. They cover finding the inbox, what
+- `claude plugin test`: 60 tests, against a stand-in for the CLI. They cover finding the inbox, what
   is shown and when, the band and its clicks, the wake and its hold through a running turn, the
-  timer, re-reading after a bus command, and watch mode. Of the 4 hold tests added in 0.3.1, the 2
+  timer, re-reading after a bus command, and watch mode. The 2 tests added in 0.3.2 for the path
+  the wake names, and the band test changed with them, failed on 0.3.1. Of the 4 hold tests added in 0.3.1, the 2
   that expect a held wake failed on 0.3.0, and two defects seeded into 0.3.1 (no read at the
   turn's end; a subagent's turn holding the wake) each failed one. The 12 band tests (with the count assertions moved from the status line to the
   band) failed on 0.1.1: 15 of the 41 then written failed there, and all pass on 0.2.0. Of the 13

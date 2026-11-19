@@ -22,6 +22,15 @@ explicitly not part of it and can change in a patch.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The inbox mod's wake names the binary it runs, not a bare `agent-msg-bus`** (mod 0.3.2). The
+  read and ack a wake gives, and the band's "read it whole" line, said `agent-msg-bus read ...`,
+  which fails where the binary's folder is not on PATH: seen 19 Nov 2026 on a second machine,
+  exit 127 in Git Bash and "not recognized" in PowerShell. They now name the path the mod itself
+  runs (its `binary` option, else `%LOCALAPPDATA%\agent-msg-bus\agent-msg-bus.exe`), with forward
+  slashes so both shells take it unquoted, and single-quoted if it holds any other character.
+
 ## [0.4.39] — 2026-11-18
 
 ### Changed
